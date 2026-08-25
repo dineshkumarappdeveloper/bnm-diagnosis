@@ -1,0 +1,17 @@
+-- Per-thread (and inbox) sync cursors. `key` is e.g.
+-- "messages:<businessId>:<externalUserId>:<platform>" or "inbox:<businessId>".
+
+CREATE TABLE sync_state (
+    key TEXT NOT NULL PRIMARY KEY,
+    cursor TEXT,
+    last_synced_at TEXT
+);
+
+getState:
+SELECT * FROM sync_state WHERE key = ?;
+
+upsertState:
+INSERT OR REPLACE INTO sync_state(key, cursor, last_synced_at) VALUES (?, ?, ?);
+
+clearAllState:
+DELETE FROM sync_state;

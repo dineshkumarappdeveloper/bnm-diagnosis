@@ -1,0 +1,45 @@
+-- Per-device numbering series for offline invoice numbering. A device is bound
+-- (once, while online) to a series code (e.g. 'C1') per financial year; the
+-- local `high_water` is the last issued sequence. allocate = bump then read,
+-- inside a transaction, so a crash never reissues a number.
+
+CREATE TABLE counter_series (
+    business_id TEXT NOT NULL,
+    series TEXT NOT NULL,
+    fy TEXT NOT NULL,
+    high_water INTEGER NOT NULL DEFAULT 0,
+    prefix TEXT NOT NULL DEFAULT 'INV',
+    number_format TEXT NOT NULL DEFAULT '{prefix}-{series}-{seq}',
+    PRIMARY KEY (business_id, series, fy)
+);
+
+-- Upsert the series binding. The caller (registerSeriesLocal) passes
+-- max(existing, incoming) as high_water so a re-pair never rewinds the local
+-- sequence (this dialect predates ON CONFLICT DO UPDATE, so the MAX is in Kotlin).
+upsertSeries:
+INSERT OR REPLACE INTO counter_series(business_id, series, fy, high_water, prefix, number_format)
+VALUES (?, ?, ?, ?, ?, ?);
+
+-- Raise (never lower) the local high_water — used to adopt the server's next free
+-- sequence when recovering from a duplicate-number collision.
+raiseHighWater:
+UPDATE counter_series SET high_water = MAX(high_water, ?) WHERE business_id = ? AND series = ? AND fy = ?;
+
+getSeries:
+SELECT * FROM counter_series WHERE business_id = ? AND series = ? AND fy = ?;
+
+allSeries:
+SELECT * FROM counter_series WHERE business_id = ?;
+
+bumpSeries:
+UPDATE counter_series SET high_water = high_water + 1 WHERE business_id = ? AND series = ? AND fy = ?;
+
+highWater:
+SELECT high_water FROM counter_series WHERE business_id = ? AND series = ? AND fy = ?;
+
+-- A device issues under exactly ONE counter/series at a time. When it (re)pairs to
+-- a counter, drop any OTHER series it previously issued under, so `deviceSeries`
+-- (which returns one row) can't keep numbering under a stale code (e.g. staying on
+-- C1 after re-pairing to C2). Rows for the SAME series across financial years are kept.
+deleteOtherSeries:
+DELETE FROM counter_series WHERE business_id = ? AND series != ?;

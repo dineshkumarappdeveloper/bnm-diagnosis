@@ -1,0 +1,37 @@
+-- Generic offline document store for ecommerce entities
+-- (entity ∈ 'order' | 'product' | 'category' | 'ledger').
+-- The full server JSON is kept in `json`; id/seq/created_at are extracted for
+-- the cursor + ordering. Soft-deleted rows are removed locally during sync.
+
+CREATE TABLE ecom_entity (
+    entity TEXT NOT NULL,
+    id TEXT NOT NULL,
+    business_id TEXT NOT NULL,
+    seq INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT,
+    json TEXT NOT NULL,
+    PRIMARY KEY (entity, id)
+);
+
+CREATE INDEX ecom_entity_list ON ecom_entity(entity, business_id, created_at);
+
+selectEntity:
+SELECT json FROM ecom_entity
+WHERE entity = ? AND business_id = ?
+ORDER BY created_at DESC;
+
+selectById:
+SELECT json FROM ecom_entity WHERE entity = ? AND id = ?;
+
+upsertEntity:
+INSERT OR REPLACE INTO ecom_entity(entity, id, business_id, seq, created_at, json)
+VALUES (?, ?, ?, ?, ?, ?);
+
+deleteEntity:
+DELETE FROM ecom_entity WHERE entity = ? AND id = ?;
+
+clearAllEntities:
+DELETE FROM ecom_entity;
+
+countEntity:
+SELECT count(*) FROM ecom_entity WHERE entity = ? AND business_id = ?;

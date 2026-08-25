@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>BNM Diagnosis connects to your receipt printer on the local network to print bills.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>BNM Diagnosis connects to your Bluetooth receipt printer to print bills.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>BNM Diagnosis connects to your Bluetooth receipt printer to print bills.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Google Sign-In</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.465133992840-2b1irbf71lmskthgu37pqe333qb0vda4</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

@@ -1,0 +1,13 @@
+platform :ios, '14.0'
+
+use_frameworks!
+
+# Google Sign-In CocoaPods for BNMDiagnosis iOS (currently unused — auth is email-only;
+# the GoogleSignIn bridge is a no-op stub. Safe to drop these pods in an iOS cleanup pass.)
+# After adding this file, run: cd iosApp && pod install
+# Then open iosApp.xcworkspace (not .xcodeproj)
+
+target 'iosApp' do
+  pod 'GoogleSignIn', '~> 7.0'
+  pod 'GoogleSignInSwift', '~> 7.0'
+end

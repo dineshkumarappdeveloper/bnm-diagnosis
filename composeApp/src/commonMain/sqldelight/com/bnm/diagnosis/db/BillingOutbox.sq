@@ -1,0 +1,53 @@
+-- Generic offline mutation outbox. Optimistic writes (create invoice, mark paid,
+-- send) are enqueued here and drained on reconnect. Idempotency_key dedupes a
+-- lost-ACK retry server-side; depends_on orders dependent mutations.
+
+CREATE TABLE billing_outbox (
+    id TEXT NOT NULL PRIMARY KEY,
+    business_id TEXT NOT NULL,
+    op TEXT NOT NULL,
+    aggregate_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    seq_local INTEGER NOT NULL,
+    depends_on TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    last_error TEXT
+);
+
+CREATE INDEX billing_outbox_drain ON billing_outbox(status, created_at, seq_local);
+CREATE UNIQUE INDEX billing_outbox_idem ON billing_outbox(idempotency_key);
+
+enqueue:
+INSERT INTO billing_outbox(id, business_id, op, aggregate_id, idempotency_key, payload, created_at, seq_local, depends_on, attempts, next_attempt_at, status, last_error)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 'pending', NULL);
+
+selectPending:
+SELECT * FROM billing_outbox WHERE status IN ('pending','failed') ORDER BY created_at, seq_local;
+
+markSending:
+UPDATE billing_outbox SET status = 'sending' WHERE id = ?;
+
+markFailed:
+UPDATE billing_outbox SET status = 'failed', attempts = attempts + 1, next_attempt_at = ?, last_error = ? WHERE id = ?;
+
+updatePayload:
+UPDATE billing_outbox SET payload = ? WHERE id = ?;
+
+deleteById:
+DELETE FROM billing_outbox WHERE id = ?;
+
+requeueStuck:
+UPDATE billing_outbox SET status = 'pending' WHERE status = 'sending';
+
+countByIdempotency:
+SELECT count(*) FROM billing_outbox WHERE idempotency_key = ?;
+
+maxSeqLocal:
+SELECT coalesce(max(seq_local), 0) FROM billing_outbox;
+
+pendingCount:
+SELECT count(*) FROM billing_outbox WHERE status IN ('pending','failed','sending');

@@ -1,0 +1,7 @@
+package com.bnm.diagnosis
+
+interface Platform {
+    val name: String
+}
+
+expect fun getPlatform(): Platform
