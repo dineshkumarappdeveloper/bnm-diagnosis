@@ -1,6 +1,10 @@
 package com.bnm.diagnosis.navigation
 
 sealed class Screen(val route: String) {
+    /** License activation — the app's entry when this device isn't licensed. */
+    data object Activation : Screen("activation")
+    /** License & devices management (reached from Settings). */
+    data object LicenseDevices : Screen("license_devices")
     data object Login : Screen("login")
     data object BusinessSelector : Screen("business_selector")
     data object Main : Screen("main")

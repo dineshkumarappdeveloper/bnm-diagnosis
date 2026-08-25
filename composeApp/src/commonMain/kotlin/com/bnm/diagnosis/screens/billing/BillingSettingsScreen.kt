@@ -57,7 +57,13 @@ import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BillingSettingsScreen(api: BillingApi, authRepository: AuthRepository, businessId: String, onBack: () -> Unit) {
+fun BillingSettingsScreen(
+    api: BillingApi,
+    authRepository: AuthRepository,
+    businessId: String,
+    onBack: () -> Unit,
+    onOpenLicense: (() -> Unit)? = null,
+) {
     val repo = LocalBillingRepository.current
     val scope = rememberCoroutineScope()
     val settings by repo.invoiceSettingsFlow(businessId).collectAsState(null)
@@ -296,6 +302,25 @@ fun BillingSettingsScreen(api: BillingApi, authRepository: AuthRepository, busin
                             Text(if (clearing) "Clearing & re-syncing…" else "Clear local data & re-sync")
                         }
                         clearMsg?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
+                    }
+                }
+            }
+
+            // ── License ──
+            if (onOpenLicense != null) {
+                item { Text("License", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
+                item {
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                "See who this copy of BNM Diagnosis is licensed to and manage the devices using its seats.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            OutlinedButton(onClick = onOpenLicense, modifier = Modifier.fillMaxWidth()) {
+                                Text("License & devices")
+                            }
+                        }
                     }
                 }
             }
