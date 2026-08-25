@@ -1,5 +1,21 @@
 package com.bnm.diagnosis.db
 
+import app.cash.sqldelight.db.SqlDriver
+
+/**
+ * Idempotent `ALTER TABLE … ADD COLUMN` — the column-level twin of the
+ * CREATE TABLE IF NOT EXISTS self-heal below, for columns added to a table a
+ * device already has. SQLite offers no IF NOT EXISTS for columns: adding one
+ * that already exists raises "duplicate column name", which is exactly the
+ * no-op wanted on the second and every later run. Any other failure is equally
+ * non-fatal — opening the app must never depend on a migration succeeding.
+ *
+ * `internal` so the upgrade path is directly testable (EmrIdentityTest).
+ */
+internal fun SqlDriver.addColumn(table: String, column: String, type: String) {
+    runCatching { execute(null, "ALTER TABLE $table ADD COLUMN $column $type", 0) }
+}
+
 /**
  * Builds the single app-wide [AppDatabase].
  *
@@ -85,8 +101,20 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
         "CREATE TABLE IF NOT EXISTS emr_inbox (id TEXT NOT NULL PRIMARY KEY, visit_id TEXT, " +
         "test_name TEXT NOT NULL, instructions TEXT, status TEXT, lab_status TEXT, accession_no TEXT, " +
         "matched_order_id TEXT, seq INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0, " +
-        "status_pushed INTEGER NOT NULL DEFAULT 0, created_at TEXT)", 0)
+        "status_pushed INTEGER NOT NULL DEFAULT 0, created_at TEXT, test_code TEXT, visit_number TEXT, " +
+        "patient_name TEXT, patient_phone TEXT, patient_sex TEXT, patient_dob TEXT)", 0)
     driver.execute(null, "CREATE INDEX IF NOT EXISTS emr_inbox_open ON emr_inbox(done, seq)", 0)
+    // P3b identity columns: devices whose emr_inbox predates them already have
+    // the table, so CREATE IF NOT EXISTS is a no-op there — add the columns
+    // one by one instead. SQLite has no ADD COLUMN IF NOT EXISTS; a re-run just
+    // errors with "duplicate column name", which addColumn swallows. Order
+    // matches the CREATE above so SELECT * maps positionally either way.
+    driver.addColumn("emr_inbox", "test_code", "TEXT")
+    driver.addColumn("emr_inbox", "visit_number", "TEXT")
+    driver.addColumn("emr_inbox", "patient_name", "TEXT")
+    driver.addColumn("emr_inbox", "patient_phone", "TEXT")
+    driver.addColumn("emr_inbox", "patient_sex", "TEXT")
+    driver.addColumn("emr_inbox", "patient_dob", "TEXT")
     // ── P4: staff accounts + roles (local RBAC, synced across the lab's seats) ──
     driver.execute(null,
         "CREATE TABLE IF NOT EXISTS staff (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, " +

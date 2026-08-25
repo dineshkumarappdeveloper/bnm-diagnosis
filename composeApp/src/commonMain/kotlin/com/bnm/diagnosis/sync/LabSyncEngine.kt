@@ -346,13 +346,20 @@ class LabSyncEngine(
             val name = o.testName?.takeIf { it.isNotBlank() } ?: "Lab test"
             val doneNow = o.resultedAt != null || o.labStatus == "reported" || o.status == "cancelled"
             val existing = emrQ.byId(o.id).executeAsOneOrNull()
+            // Identity block (P3b) is additive and every field is nullable: a
+            // server that hasn't shipped it sends nothing, and updateFromServer
+            // COALESCEs so null never wipes what an earlier sweep landed.
             if (existing == null) {
                 emrQ.insert(o.id, o.visitId, name, o.instructions, o.status, o.labStatus,
-                    o.accessionNo, o.seq, if (doneNow) 1L else 0L, o.createdAt)
+                    o.accessionNo, o.seq, if (doneNow) 1L else 0L, o.createdAt,
+                    o.testCode, o.visitNumber, o.patientName, o.patientPhone,
+                    o.patientSex, o.patientDob)
             } else {
                 emrQ.updateFromServer(o.visitId, name, o.instructions, o.status, o.labStatus,
                     o.accessionNo ?: existing.accession_no, o.seq,
-                    if (doneNow) 1L else existing.done, o.id)
+                    if (doneNow) 1L else existing.done,
+                    o.testCode, o.visitNumber, o.patientName, o.patientPhone,
+                    o.patientSex, o.patientDob, o.id)
             }
             // Multi-seat: ANOTHER seat may have registered this row (its ack put
             // the accession on the server copy). Re-match it against the local

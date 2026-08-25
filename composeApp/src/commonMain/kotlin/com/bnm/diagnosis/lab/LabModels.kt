@@ -158,9 +158,16 @@ data class LabResult(
     val isEntered: Boolean get() = !value.isNullOrBlank()
 }
 
-/** One clinic order in the local EMR inbox (P3 bridge; `emr_inbox` table).
- *  The row carries NO patient demographics — the clinic keeps those; the lab
- *  asks the walk-in patient and registers them locally. */
+/**
+ * One clinic order in the local EMR inbox (P3 bridge; `emr_inbox` table).
+ *
+ * P3b: the clinic now shares WHO the order is for ([patientName]/[patientPhone]/
+ * [patientSex]/[patientDob], [visitNumber]) and WHICH catalog entry the doctor
+ * picked ([testCode]) — so the desk identifies the patient and resolves the test
+ * without retyping or fuzzy guessing. Every one of those is nullable: a LEGACY
+ * row (or a server that predates the additive change) has them all null and the
+ * desk behaves exactly as it did before — hand-typed patient, name matching.
+ */
 data class EmrInboxItem(
     val id: String,                   // clinical_lab_orders.id
     val visitId: String?,
@@ -172,7 +179,48 @@ data class EmrInboxItem(
     val matchedOrderId: String?,      // local lab_orders.id once registered
     val done: Boolean = false,
     val createdAt: String? = null,
-)
+    // ── identity block (null on legacy rows) ──
+    val testCode: String? = null,     // the lab's own catalog code, exact
+    val visitNumber: String? = null,  // human visit no. the patient quotes
+    val patientName: String? = null,
+    val patientPhone: String? = null,
+    val patientSex: String? = null,   // 'M' | 'F' | 'O'
+    val patientDob: String? = null,   // ISO date
+) {
+    /** True when the clinic sent enough to skip retyping the patient. */
+    val hasIdentity: Boolean
+        get() = !patientName.isNullOrBlank() || !patientPhone.isNullOrBlank()
+
+    /** Everything a desk search should look at, lowercased once. */
+    fun searchBlob(): String = listOfNotNull(
+        patientName, patientPhone, patientPhone?.filter { it.isDigit() },
+        visitNumber, testName, testCode, accessionNo,
+    ).joinToString(" ").lowercase()
+}
+
+/** How an EMR row's test was resolved onto the local catalog — the desk tells
+ *  the tech which of these happened rather than silently pre-ticking a box. */
+enum class EmrTestMatchKind {
+    /** Exact `test_code` hit — the doctor picked this catalog entry. */
+    CODE,
+    /** Legacy free-text row: name (or code) matched exactly. */
+    NAME,
+    /** Legacy free-text row: substring match — likely right, worth a glance. */
+    FUZZY,
+    /** Nothing matched — the test rides on the order note. */
+    NONE,
+}
+
+/** [EmrTestMatchKind] + the test it resolved to (null for [EmrTestMatchKind.NONE]). */
+data class EmrTestMatch(val test: LabTest?, val kind: EmrTestMatchKind) {
+    /** One line for the desk: "matched Complete Blood Count (CBC)". */
+    fun label(): String = when (kind) {
+        EmrTestMatchKind.CODE -> "matched ${test?.name} (${test?.code}) by code"
+        EmrTestMatchKind.NAME -> "matched ${test?.name} (${test?.code}) by name"
+        EmrTestMatchKind.FUZZY -> "closest match ${test?.name} (${test?.code}) — check it"
+        EmrTestMatchKind.NONE -> "no catalog match — added as a note"
+    }
+}
 
 /** One critical result (CL/CH) with the identity a lab needs to PHONE it out.
  *  Drives the home dashboard's "Critical results today" card. */

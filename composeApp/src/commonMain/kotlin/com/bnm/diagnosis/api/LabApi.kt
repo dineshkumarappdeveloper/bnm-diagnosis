@@ -110,7 +110,17 @@ data class LabSyncPullRow(
     val json: kotlinx.serialization.json.JsonElement? = null,
 )
 
-/** One clinic order from `GET admin-lab/emr-orders` (clinical_lab_orders projection). */
+/**
+ * One clinic order from `GET admin-lab/emr-orders` (clinical_lab_orders projection).
+ *
+ * The identity block ([testCode] … [patientDob]) is an ADDITIVE server change:
+ * every field defaults to null, so this parses unchanged against a server that
+ * hasn't shipped it yet — the desk simply falls back to name matching and a
+ * hand-typed patient, exactly as before.
+ *  - [testCode]  the LAB'S OWN catalog code the doctor picked; null = the
+ *                doctor free-texted the test and only [testName] exists.
+ *  - [patientDob] ISO date — the desk derives whole years from it.
+ */
 @Serializable
 data class LabEmrOrder(
     val id: String,
@@ -124,6 +134,13 @@ data class LabEmrOrder(
     @SerialName("created_at") val createdAt: String? = null,
     @SerialName("result_value") val resultValue: String? = null,
     @SerialName("resulted_at") val resultedAt: String? = null,
+    // ── identity block (additive; all nullable) ──
+    @SerialName("test_code") val testCode: String? = null,
+    @SerialName("visit_number") val visitNumber: String? = null,
+    @SerialName("patient_name") val patientName: String? = null,
+    @SerialName("patient_phone") val patientPhone: String? = null,
+    @SerialName("patient_sex") val patientSex: String? = null,   // M | F | O
+    @SerialName("patient_dob") val patientDob: String? = null,   // ISO date
 )
 
 /**

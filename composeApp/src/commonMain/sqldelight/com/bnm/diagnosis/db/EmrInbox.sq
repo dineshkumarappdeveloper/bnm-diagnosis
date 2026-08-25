@@ -4,6 +4,14 @@
 -- must never clobber: matched_order_id (the local lab_orders row registered
 -- for it), status_pushed (in_progress+accession acknowledged to the clinic)
 -- and done (result written back). `seq` is the server delta cursor value.
+--
+-- P3b IDENTITY: the projection now also carries the doctor's catalog pick
+-- (test_code) and the patient the clinic already knows (visit_number,
+-- patient_name/phone/sex/dob). All SIX are nullable — a legacy row (or a
+-- server that predates the additive change) simply has them null and the desk
+-- works exactly as before. New columns are APPENDED so the ADD COLUMN
+-- self-heal in AppDatabaseFactory produces the same column order as a fresh
+-- CREATE (SQLDelight maps SELECT * positionally).
 
 CREATE TABLE emr_inbox (
     id TEXT NOT NULL PRIMARY KEY,        -- clinical_lab_orders.id
@@ -17,7 +25,13 @@ CREATE TABLE emr_inbox (
     seq INTEGER NOT NULL DEFAULT 0,
     done INTEGER NOT NULL DEFAULT 0,      -- 1 = result pushed back (or cancelled/resulted elsewhere)
     status_pushed INTEGER NOT NULL DEFAULT 0, -- 1 = in_progress+accession sent to the clinic
-    created_at TEXT
+    created_at TEXT,
+    test_code TEXT,                       -- the lab's own catalog code the doctor picked
+    visit_number TEXT,                    -- human visit no. the patient quotes at the desk
+    patient_name TEXT,
+    patient_phone TEXT,
+    patient_sex TEXT,                     -- 'M' | 'F' | 'O'
+    patient_dob TEXT                      -- ISO date
 );
 
 CREATE INDEX emr_inbox_open ON emr_inbox(done, seq);
@@ -26,14 +40,24 @@ byId:
 SELECT * FROM emr_inbox WHERE id = ?;
 
 insert:
-INSERT OR IGNORE INTO emr_inbox(id, visit_id, test_name, instructions, status, lab_status, accession_no, matched_order_id, seq, done, status_pushed, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, ?);
+INSERT OR IGNORE INTO emr_inbox(id, visit_id, test_name, instructions, status, lab_status, accession_no, matched_order_id, seq, done, status_pushed, created_at, test_code, visit_number, patient_name, patient_phone, patient_sex, patient_dob)
+VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?);
 
 -- Refresh the SERVER fields only — matched_order_id / status_pushed are local.
+-- The identity columns are COALESCEd: a server that hasn't shipped the additive
+-- fields yet sends null for all six, and null must never wipe demographics an
+-- earlier (or newer) sweep already landed.
 updateFromServer:
 UPDATE emr_inbox
-SET visit_id = ?, test_name = ?, instructions = ?, status = ?, lab_status = ?, accession_no = ?, seq = ?, done = ?
-WHERE id = ?;
+SET visit_id = :visit_id, test_name = :test_name, instructions = :instructions, status = :status,
+    lab_status = :lab_status, accession_no = :accession_no, seq = :seq, done = :done,
+    test_code = COALESCE(:test_code, test_code),
+    visit_number = COALESCE(:visit_number, visit_number),
+    patient_name = COALESCE(:patient_name, patient_name),
+    patient_phone = COALESCE(:patient_phone, patient_phone),
+    patient_sex = COALESCE(:patient_sex, patient_sex),
+    patient_dob = COALESCE(:patient_dob, patient_dob)
+WHERE id = :id;
 
 -- Unregistered rows drive the LabHome badge.
 countPending:

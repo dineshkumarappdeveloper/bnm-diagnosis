@@ -29,6 +29,7 @@ import kotlinx.datetime.LocalDate
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.atStartOfDayIn
 import kotlinx.datetime.daysUntil
+import kotlinx.datetime.periodUntil
 import kotlinx.datetime.plus
 import kotlinx.datetime.toLocalDateTime
 import kotlinx.serialization.builtins.ListSerializer
@@ -90,6 +91,20 @@ class LabRepository(
         val q = query.trim()
         if (q.isEmpty()) pQ.recent().executeAsList().map { it.toModel() }
         else pQ.search(q).executeAsList().map { it.toModel() }
+    }
+
+    /**
+     * EMR auto-identify: patients whose phone IS this one, compared on
+     * normalized digits (see [normalizePhone]) — never a prefix, never a name.
+     * Returns 0 (register them), 1 (preselect) or n (the tech picks) rows,
+     * newest activity first. Fully local; works with zero network.
+     */
+    suspend fun patientsByPhone(phone: String?): List<Patient> = withContext(Dispatchers.Default) {
+        val key = normalizePhone(phone)
+        if (key == null) emptyList()
+        else pQ.searchByPhoneDigits(key).executeAsList()
+            .map { it.toModel() }
+            .filter { normalizePhone(it.phone) == key }
     }
 
     suspend fun softDeletePatient(id: String) = withContext(Dispatchers.Default) {
@@ -537,6 +552,11 @@ class LabRepository(
         emrQ.byId(id).executeAsOneOrNull()?.toModel()
     }
 
+    /** [matchEmrTest] against the live catalog — the desk's one call. */
+    suspend fun resolveEmrTest(row: EmrInboxItem): EmrTestMatch = withContext(Dispatchers.Default) {
+        matchEmrTest(listTests(), row.testCode, row.testName)
+    }
+
     // ── Row → model mappers ──────────────────────────────────────────────────
 
     private fun Patients.toModel() = Patient(id, name, sex, dob, age_years, phone, address,
@@ -566,7 +586,8 @@ class LabRepository(
         flag, ref_display, notes, entered_by, entered_at, verified_by, verified_at, approved_by, approved_at)
 
     private fun Emr_inbox.toModel() = EmrInboxItem(id, visit_id, test_name, instructions, status,
-        lab_status, accession_no, matched_order_id, done == 1L, created_at)
+        lab_status, accession_no, matched_order_id, done == 1L, created_at,
+        test_code, visit_number, patient_name, patient_phone, patient_sex, patient_dob)
 
     private fun WorklistByStatus.toEntry() = WorklistEntry(
         order = LabOrder(id, accession_no, patient_id, referrer_id, invoice_id, status, priority,
@@ -615,6 +636,65 @@ class LabRepository(
         private val ENTRY_OPEN_STATUSES = setOf(
             LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED,
         )
+
+        /**
+         * Phone identity key: digits only, last 10 kept — so '+91 98765 43210',
+         * '098765 43210' and '9876543210' are ONE patient. Fewer than 6 digits
+         * identifies nobody and yields null (never match on a fragment).
+         */
+        fun normalizePhone(raw: String?): String? {
+            val digits = raw?.filter { it.isDigit() }.orEmpty()
+            if (digits.length < 6) return null
+            return if (digits.length > 10) digits.takeLast(10) else digits
+        }
+
+        /**
+         * COMPLETED years between an ISO `dob` and [today] — the age a patient
+         * says out loud, birthday-aware (28 until the birthday, 29 on it).
+         * Null when the dob is absent, unparseable or in the future, and the
+         * desk then leaves the age field blank for the tech to fill.
+         *
+         * Deliberately separate from [resolveAgeYears], which returns the
+         * FRACTIONAL age reference ranges are banded on.
+         */
+        fun ageYearsFromDob(dob: String?, today: LocalDate): Long? {
+            val raw = dob?.trim()?.take(10)?.takeIf { it.isNotBlank() } ?: return null
+            val birth = runCatching { LocalDate.parse(raw) }.getOrNull() ?: return null
+            if (birth > today) return null
+            return birth.periodUntil(today).years.toLong()
+        }
+
+        /** [ageYearsFromDob] as of the device's local today. */
+        fun ageYearsFromDob(dob: String?): Long? = ageYearsFromDob(
+            dob,
+            kotlin.time.Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()).date,
+        )
+
+        /**
+         * THE EMR test-resolution rule, in one place. The doctor's own catalog
+         * CODE is authoritative when present — exact, case-insensitive, no
+         * guessing. Only a legacy free-text row falls through to the old name
+         * matching (exact name → exact code → substring either way), and a row
+         * that matches nothing is carried as an order NOTE rather than silently
+         * dropped. [EmrTestMatch.kind] is what the desk shows the tech.
+         */
+        fun matchEmrTest(tests: List<LabTest>, testCode: String?, testName: String?): EmrTestMatch {
+            val code = testCode?.trim().orEmpty()
+            if (code.isNotEmpty()) {
+                tests.firstOrNull { it.code.equals(code, ignoreCase = true) }
+                    ?.let { return EmrTestMatch(it, EmrTestMatchKind.CODE) }
+            }
+            val wanted = testName?.trim().orEmpty()
+            if (wanted.isEmpty()) return EmrTestMatch(null, EmrTestMatchKind.NONE)
+            tests.firstOrNull { it.name.equals(wanted, ignoreCase = true) }
+                ?.let { return EmrTestMatch(it, EmrTestMatchKind.NAME) }
+            tests.firstOrNull { it.code.equals(wanted, ignoreCase = true) }
+                ?.let { return EmrTestMatch(it, EmrTestMatchKind.NAME) }
+            tests.firstOrNull {
+                it.name.contains(wanted, ignoreCase = true) || wanted.contains(it.name, ignoreCase = true)
+            }?.let { return EmrTestMatch(it, EmrTestMatchKind.FUZZY) }
+            return EmrTestMatch(null, EmrTestMatchKind.NONE)
+        }
 
         /** Age in (fractional) years: dob preferred, age_years fallback, else
          *  null — and a null age matches only ranges with no age bounds. */

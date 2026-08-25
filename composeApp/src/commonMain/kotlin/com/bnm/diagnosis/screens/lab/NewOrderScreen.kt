@@ -64,6 +64,9 @@ import com.bnm.diagnosis.billing.PaymentChoice
 import com.bnm.diagnosis.chat.LocalBillingRepository
 import com.bnm.diagnosis.chat.LocalOutboxSender
 import com.bnm.diagnosis.connectivity.LocalConnectivity
+import com.bnm.diagnosis.lab.EmrInboxItem
+import com.bnm.diagnosis.lab.EmrTestMatch
+import com.bnm.diagnosis.lab.EmrTestMatchKind
 import com.bnm.diagnosis.lab.LabOrder
 import com.bnm.diagnosis.lab.LabPanel
 import com.bnm.diagnosis.lab.LabRepository
@@ -96,9 +99,11 @@ fun NewOrderScreen(
     /** Registration finished: pop home (snackbar shows [accession]); non-null
      *  invoiceId = the operator asked to view the bill's details. */
     onFinished: (accession: String, invoiceId: String?) -> Unit,
-    /** P3 EMR bridge: registering FOR this inbox row — pre-selects the test
-     *  matched by name (else the order note carries it) and reports the match
-     *  back through [onEmrRegistered] after the order is created. */
+    /** P3 EMR bridge: registering FOR this inbox row — pre-selects the test the
+     *  doctor picked (by CATALOG CODE when the row carries one, else by name;
+     *  else the order note carries it), auto-identifies the patient from the
+     *  row's phone, and reports the match back through [onEmrRegistered] after
+     *  the order is created. */
     emrOrderId: String? = null,
     onEmrRegistered: suspend (emrId: String, order: LabOrder) -> Unit = { _, _ -> },
 ) {
@@ -154,25 +159,47 @@ fun NewOrderScreen(
     val runningTotal = expandedIds.sumOf { priceOf(it) }
     val catalogTotal = expandedIds.sumOf { testById[it]?.price ?: 0.0 }
 
-    // ── P3 EMR prefill: match the clinic's test by name; the row carries no
-    // demographics, so the patient is created from the walk-in as usual. ──
-    var emrRow by remember { mutableStateOf<com.bnm.diagnosis.lab.EmrInboxItem?>(null) }
+    // ── P3b EMR prefill ──────────────────────────────────────────────────────
+    // Two independent jobs, both driven off the locally-synced inbox row (no
+    // network): resolve the TEST (catalog code first — LabRepository.matchEmrTest
+    // is the one brain), and identify the PATIENT (exact phone → preselect / pick
+    // / prefill the new-patient form). Nothing is auto-CREATED: a patient the lab
+    // has never seen is shown to the tech in the form, pre-typed, to confirm.
+    var emrRow by remember { mutableStateOf<EmrInboxItem?>(null) }
+    var emrMatch by remember { mutableStateOf<EmrTestMatch?>(null) }
+    var emrPrefill by remember { mutableStateOf<EmrPatientPrefill?>(null) }
+    var emrPhoneCandidates by remember { mutableStateOf<List<Patient>>(emptyList()) }
+    var emrPatientNote by remember { mutableStateOf<String?>(null) }
     var orderNotes by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(emrOrderId) {
         val row = emrOrderId?.let { runCatching { labRepo.emrById(it) }.getOrNull() } ?: return@LaunchedEffect
         emrRow = row
-        val tests = runCatching { labRepo.listTests() }.getOrDefault(emptyList())
-        val wanted = row.testName.trim()
-        val match = tests.firstOrNull { it.name.equals(wanted, ignoreCase = true) }
-            ?: tests.firstOrNull { it.code.equals(wanted, ignoreCase = true) }
-            ?: tests.firstOrNull {
-                it.name.contains(wanted, ignoreCase = true) || wanted.contains(it.name, ignoreCase = true)
-            }
-        if (match != null && match.id !in selectedTestIds) selectedTestIds.add(match.id)
+
+        // ── test: code beats name beats fuzzy beats "carry it as a note" ──
+        val match = runCatching { labRepo.resolveEmrTest(row) }
+            .getOrDefault(EmrTestMatch(null, EmrTestMatchKind.NONE))
+        emrMatch = match
+        match.test?.let { if (it.id !in selectedTestIds) selectedTestIds.add(it.id) }
         orderNotes = buildString {
             append("EMR order: ").append(row.testName)
+            row.testCode?.takeIf { it.isNotBlank() }?.let { append(" [").append(it).append(']') }
+            row.visitNumber?.takeIf { it.isNotBlank() }?.let { append(" · visit ").append(it) }
             row.instructions?.takeIf { it.isNotBlank() }?.let { append(" — ").append(it) }
-            if (match == null) append(" (not in catalog — pick the closest test)")
+            if (match.test == null) append(" (not in catalog — pick the closest test)")
+        }
+
+        // ── patient: exact normalized-digit phone match against the local registry ──
+        val byPhone = runCatching { labRepo.patientsByPhone(row.patientPhone) }.getOrDefault(emptyList())
+        if (row.hasIdentity) emrPrefill = EmrPatientPrefill.from(row)
+        when {
+            byPhone.size == 1 -> {
+                patient = byPhone.first()
+                emrPatientNote = "Matched on ${row.patientPhone} from the clinic — Change to override"
+            }
+            byPhone.size > 1 -> {
+                emrPhoneCandidates = byPhone
+                emrPatientNote = null
+            }
         }
     }
 
@@ -306,8 +333,14 @@ fun NewOrderScreen(
                             .padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(14.dp),
                     ) {
-                        emrRow?.let { EmrBanner(it) }
-                        PatientSection(patient, onPatient = { patient = it })
+                        emrRow?.let { EmrBanner(it, emrMatch) }
+                        PatientSection(
+                            // A manual pick/clear retires the "matched on …" note
+                            // — it would otherwise explain the wrong patient.
+                            patient, onPatient = { patient = it; emrPatientNote = null },
+                            matchedNote = emrPatientNote, prefill = emrPrefill,
+                            phoneCandidates = emrPhoneCandidates,
+                        )
                         ReferrerSection(referrers, referrer, onPick = { referrer = it }, onQuickAdd = { showAddReferrer = true })
                         PrioritySection(priority) { priority = it }
                         SelectedTestsSummary(expandedIds.toList(), testById, rates)
@@ -323,8 +356,12 @@ fun NewOrderScreen(
                 }
             } else {
                 Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    emrRow?.let { EmrBanner(it) }
-                    PatientSection(patient, onPatient = { patient = it })
+                    emrRow?.let { EmrBanner(it, emrMatch) }
+                    PatientSection(
+                        patient, onPatient = { patient = it; emrPatientNote = null },
+                        matchedNote = emrPatientNote, prefill = emrPrefill,
+                        phoneCandidates = emrPhoneCandidates,
+                    )
                     ReferrerSection(referrers, referrer, onPick = { referrer = it }, onQuickAdd = { showAddReferrer = true })
                     PrioritySection(priority) { priority = it }
                     TestPicker(
@@ -404,24 +441,74 @@ fun NewOrderScreen(
     }
 }
 
-/** P3: the clinic's order being registered — the row has NO demographics, the
- *  walk-in patient supplies them at the desk. */
+/**
+ * P3b: the clinic's order being registered. Says out loud HOW the test was
+ * resolved ("matched Complete Blood Count (CBC) by code" vs "no catalog match —
+ * added as a note") so nobody has to reverse-engineer a pre-ticked checkbox,
+ * and echoes the visit no. + demographics the clinic sent. A legacy row without
+ * an identity block still asks the desk to collect the details by hand.
+ */
 @Composable
-private fun EmrBanner(row: com.bnm.diagnosis.lab.EmrInboxItem) {
+private fun EmrBanner(row: EmrInboxItem, match: EmrTestMatch?) {
     Card(
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
     ) {
-        Column(Modifier.fillMaxWidth().padding(12.dp)) {
-            Text("EMR order · ${row.testName}", style = MaterialTheme.typography.titleSmall,
+        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            val head = buildString {
+                append("EMR order · ").append(row.testName)
+                row.testCode?.takeIf { it.isNotBlank() }?.let { append(" [").append(it).append(']') }
+                row.visitNumber?.takeIf { it.isNotBlank() }?.let { append(" · visit ").append(it) }
+            }
+            Text(head, style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onTertiaryContainer)
             row.instructions?.takeIf { it.isNotBlank() }?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onTertiaryContainer)
             }
-            Text("Ask the patient for their details below — the clinic doesn't share demographics.",
+            match?.let {
+                Text(
+                    it.label(),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = if (it.kind == EmrTestMatchKind.NONE) FontWeight.SemiBold else FontWeight.Normal,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+            }
+            Text(
+                if (row.hasIdentity) "Patient details came from the clinic — confirm them below."
+                else "Ask the patient for their details below — this order carries no demographics.",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onTertiaryContainer)
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+            )
+        }
+    }
+}
+
+/**
+ * The clinic's demographics, shaped for the new-patient form. `ageYears` is
+ * DERIVED from the row's ISO dob (whole completed years, via
+ * LabRepository.ageYearsFromDob) — null dob leaves the age field blank rather
+ * than inventing a number, and the tech fills it in as they always have.
+ */
+private data class EmrPatientPrefill(
+    val name: String,
+    val phone: String,
+    val sex: String?,          // 'M' | 'F' | 'O' — null when the clinic didn't say
+    val ageYears: Long?,
+    val dob: String?,
+) {
+    companion object {
+        private val SEXES = setOf("M", "F", "O")
+
+        fun from(row: EmrInboxItem): EmrPatientPrefill {
+            val dob = row.patientDob?.trim()?.take(10)?.takeIf { it.isNotBlank() }
+            return EmrPatientPrefill(
+                name = row.patientName?.trim().orEmpty(),
+                phone = row.patientPhone?.trim().orEmpty(),
+                sex = row.patientSex?.trim()?.uppercase()?.takeIf { it in SEXES },
+                ageYears = LabRepository.ageYearsFromDob(dob),
+                dob = dob,
+            )
         }
     }
 }
@@ -430,7 +517,16 @@ private fun EmrBanner(row: com.bnm.diagnosis.lab.EmrInboxItem) {
 
 @OptIn(ExperimentalUuidApi::class, ExperimentalLayoutApi::class)
 @Composable
-private fun PatientSection(patient: Patient?, onPatient: (Patient?) -> Unit) {
+private fun PatientSection(
+    patient: Patient?,
+    onPatient: (Patient?) -> Unit,
+    /** P3b: why this patient is already selected (EMR phone match). */
+    matchedNote: String? = null,
+    /** P3b: the clinic's demographics — seeds the new-patient form. */
+    prefill: EmrPatientPrefill? = null,
+    /** P3b: >1 local patient shares the clinic's phone — the tech picks. */
+    phoneCandidates: List<Patient> = emptyList(),
+) {
     val repo = LocalLabRepository.current
     val scope = rememberCoroutineScope()
 
@@ -447,6 +543,10 @@ private fun PatientSection(patient: Patient?, onPatient: (Patient?) -> Unit) {
                                 (patient.phone?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""),
                             style = MaterialTheme.typography.bodySmall,
                         )
+                        matchedNote?.let {
+                            Text(it, style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer)
+                        }
                     }
                     TextButton(onClick = { onPatient(null) }) { Text("Change") }
                 }
@@ -454,11 +554,57 @@ private fun PatientSection(patient: Patient?, onPatient: (Patient?) -> Unit) {
             return@Column
         }
 
-        var query by remember { mutableStateOf("") }
+        // The EMR prefill arrives asynchronously (the inbox row is read in a
+        // LaunchedEffect), so every field below is keyed on it and re-seeds the
+        // moment it lands. With candidates to disambiguate we show those first;
+        // otherwise we open straight into the pre-typed form — one confirming
+        // tap instead of retyping the patient.
+        var query by remember(prefill) { mutableStateOf(prefill?.phone.orEmpty()) }
         var matches by remember { mutableStateOf<List<Patient>>(emptyList()) }
-        var showNewForm by remember { mutableStateOf(false) }
+        var showNewForm by remember(prefill, phoneCandidates) {
+            mutableStateOf(prefill != null && phoneCandidates.isEmpty())
+        }
         LaunchedEffect(query) { matches = runCatching { repo.searchPatients(query) }.getOrDefault(emptyList()) }
 
+        if (phoneCandidates.isNotEmpty() && !showNewForm) {
+            Text(
+                "${phoneCandidates.size} patients share the clinic's phone — pick the right one.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                phoneCandidates.forEach { p ->
+                    val likely = prefill?.name?.takeIf { it.isNotBlank() }
+                        ?.equals(p.name.trim(), ignoreCase = true) == true
+                    Card(
+                        modifier = Modifier.fillMaxWidth().clickable { onPatient(p) },
+                        shape = RoundedCornerShape(10.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (likely) MaterialTheme.colorScheme.secondaryContainer
+                            else MaterialTheme.colorScheme.surface,
+                        ),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                    ) {
+                        Row(Modifier.fillMaxWidth().padding(10.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(p.name + if (likely) " · name matches" else "",
+                                style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                            Text(
+                                ageSexLabel(p.dob, p.ageYears, p.sex) + (p.phone?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""),
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+            Text(
+                "Not one of them? Search by name below, or register a new patient.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        // Always reachable, candidates or not — the phone match is a shortcut,
+        // never a cage: free search and "+ New patient" stay one tap away.
         OutlinedTextField(
             value = query, onValueChange = { query = it },
             label = { Text("Search name or phone") }, singleLine = true,
@@ -486,18 +632,29 @@ private fun PatientSection(patient: Patient?, onPatient: (Patient?) -> Unit) {
             OutlinedButton(onClick = { showNewForm = true }, modifier = Modifier.fillMaxWidth()) { Text("+ New patient") }
         } else {
             // Inline mini-form. Age & sex are REQUIRED — reference ranges depend on them.
-            var name by remember { mutableStateOf(query.filter { !it.isDigit() }.trim()) }
-            var sex by remember { mutableStateOf<String?>(null) }
-            var ageText by remember { mutableStateOf("") }
-            var dob by remember { mutableStateOf("") }
-            var phone by remember { mutableStateOf(query.filter { it.isDigit() }) }
+            // Seeded from the EMR row when there is one; the tech can retype any
+            // of it before saving, and nothing is written until they do.
+            var name by remember(prefill) {
+                mutableStateOf(prefill?.name?.takeIf { it.isNotBlank() } ?: query.filter { !it.isDigit() }.trim())
+            }
+            var sex by remember(prefill) { mutableStateOf(prefill?.sex) }
+            var ageText by remember(prefill) { mutableStateOf(prefill?.ageYears?.toString().orEmpty()) }
+            var dob by remember(prefill) { mutableStateOf(prefill?.dob.orEmpty()) }
+            var phone by remember(prefill) {
+                mutableStateOf(prefill?.phone?.takeIf { it.isNotBlank() } ?: query.filter { it.isDigit() })
+            }
             var formError by remember { mutableStateOf<String?>(null) }
 
             Card(shape = RoundedCornerShape(12.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
                 Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("New patient", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "Age & sex are required — reference ranges depend on them.",
+                        if (prefill != null) "New patient — from the clinic" else "New patient",
+                        style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        if (prefill != null)
+                            "Pre-filled from the EMR order — check it, then save. Age & sex are required (reference ranges depend on them)."
+                        else "Age & sex are required — reference ranges depend on them.",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Full name *") },

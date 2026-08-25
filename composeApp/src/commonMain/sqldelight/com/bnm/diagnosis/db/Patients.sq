@@ -36,6 +36,22 @@ LIMIT 50;
 recent:
 SELECT * FROM patients WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 50;
 
+-- EMR auto-identify (P3b): find the patient by PHONE alone, comparing DIGITS so
+-- a clinic's '+91 98765 43210' matches a locally stored '9876543210'. SQLite has
+-- no regex, so strip the punctuation labs actually type and suffix-match the
+-- normalized number; LabRepository.patientsByPhone re-checks each hit exactly
+-- (this query only narrows the scan). Deliberately NOT limited to 1 — two
+-- family members sharing a phone must both surface for the tech to pick.
+searchByPhoneDigits:
+SELECT * FROM patients
+-- (No `phone IS NOT NULL` guard: a NULL phone makes the LIKE NULL, i.e. not
+-- true, so it filters itself out — and the row type stays `Patients`.)
+WHERE deleted_at IS NULL
+  AND replace(replace(replace(replace(replace(replace(phone, ' ', ''), '-', ''), '(', ''), ')', ''), '+', ''), '.', '')
+      LIKE '%' || :digits
+ORDER BY updated_at DESC
+LIMIT 25;
+
 softDelete:
 UPDATE patients SET deleted_at = ?, updated_at = ? WHERE id = ?;
 
