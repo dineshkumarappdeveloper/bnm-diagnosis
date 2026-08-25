@@ -378,8 +378,10 @@ fun OrderDetailScreen(
 
         BoxWithConstraints(Modifier.padding(inner).fillMaxSize()) {
             val wide = maxWidth >= WIDE_MIN_DP.dp
-            // Rows start after the header block (+ the table header when wide).
-            val leading = if (wide) 2 else 1
+            // The patient header is PINNED outside the list now, so rows start
+            // at 0 (+1 for the sticky column strip when wide). Keep this in
+            // step with the items emitted above `itemsIndexed` below.
+            val leading = if (wide) 1 else 0
 
             /** Focus row [target], scrolling it into view first — a LazyColumn
              *  requester that is not composed would throw. */
@@ -405,12 +407,10 @@ fun OrderDetailScreen(
                 if (target == null) focusManager.clearFocus() else focusRow(target)
             }
 
-            LazyColumn(
-                Modifier.fillMaxSize(),
-                state = listState,
-                contentPadding = PaddingValues(bottom = 28.dp),
-            ) {
-                item(key = "head") {
+            Column(Modifier.fillMaxSize()) {
+                // PINNED patient header — who you are typing results for must
+                // never scroll away mid-entry (it reads as part of the app bar).
+                Surface(tonalElevation = 2.dp, shadowElevation = 2.dp) {
                     Column(
                         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -426,6 +426,12 @@ fun OrderDetailScreen(
                         }
                     }
                 }
+
+            LazyColumn(
+                Modifier.fillMaxWidth().weight(1f),
+                state = listState,
+                contentPadding = PaddingValues(bottom = 28.dp),
+            ) {
                 if (wide) item(key = "cols") { TableHeader() }
                 itemsIndexed(rows, key = { _, r -> r.key }) { i, row ->
                     Column(Modifier.fillMaxWidth()) {
@@ -452,6 +458,7 @@ fun OrderDetailScreen(
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
                     }
                 }
+            }
             }
         }
     }
