@@ -36,6 +36,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -68,6 +69,7 @@ import com.bnm.diagnosis.report.buildReportDoc
 import com.bnm.diagnosis.report.openPdf
 import com.bnm.diagnosis.report.printPdf
 import com.bnm.diagnosis.report.writeLabReportPdf
+import com.bnm.diagnosis.staff.LocalStaffSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -93,6 +95,16 @@ fun OrderDetailScreen(
     val repo = LocalLabRepository.current
     val scope = rememberCoroutineScope()
     val prefs = remember { LimsPrefs() }
+    // P4: attribution + RBAC ride the SIGNED-IN staff member. LimsPrefs stays the
+    // device-name/printing holder — it is no longer who did the work.
+    val session = LocalStaffSession.current
+    val me by session.current.collectAsState()
+    // Graceful fallback: a somehow-empty session degrades to the station name
+    // rather than stamping a blank `entered_by`/`verified_by`.
+    val actor = me?.name?.takeIf { it.isNotBlank() } ?: prefs.deviceName
+    // Approval is the pathologist's signature — technicians verify, they don't
+    // approve. A null session falls back to the old free-text dialog.
+    val canApprove = me?.canApprove ?: true
 
     var order by remember { mutableStateOf<LabOrder?>(null) }
     var patient by remember { mutableStateOf<Patient?>(null) }
@@ -247,15 +259,16 @@ fun OrderDetailScreen(
                             },
                             onVerify = {
                                 if (busy) return@ActionBar
-                                busy = true; message = null
+                                busy = true; message = null; session.touch()
                                 scope.launch {
-                                    repo.verifyOrder(o.id, prefs.deviceName)
-                                        .onSuccess { message = "Verified by ${prefs.deviceName}"; reloadTick++ }
+                                    repo.verifyOrder(o.id, actor)
+                                        .onSuccess { message = "Verified by $actor"; reloadTick++ }
                                         .onFailure { message = it.message }
                                     busy = false
                                 }
                             },
-                            onApprove = { showApprove = true },
+                            canApprove = canApprove,
+                            onApprove = { session.touch(); showApprove = true },
                             onPrint = { if (!busy) showPrintChooser = true },
                         )
                     }
@@ -299,8 +312,9 @@ fun OrderDetailScreen(
                             result = res,
                             locked = locked,
                             onCommit = { text ->
+                                session.touch()
                                 scope.launch {
-                                    repo.enterResult(o.id, t.testId, param?.key ?: res.parameterKey, text, enteredBy = prefs.deviceName)
+                                    repo.enterResult(o.id, t.testId, param?.key ?: res.parameterKey, text, enteredBy = actor)
                                         .onSuccess { updated ->
                                             results = results + ("${t.testId}|${updated.parameterKey}" to updated)
                                             // Entry can walk the order status (in_progress/entered).
@@ -318,9 +332,13 @@ fun OrderDetailScreen(
         }
     }
 
-    // ── Approve dialog: pathologist name asked once, persisted as default ──
-    if (showApprove && o != null) {
-        var name by remember { mutableStateOf(prefs.approvedBy) }
+    // ── Approve dialog (P4): the SIGNED-IN pathologist signs — no free-text
+    // "approved by" any more. The old typed-name field survives only as the
+    // fallback for a somehow-null session (never expected once the sign-in gate
+    // is in front of the app, but approval must never become unreachable). ──
+    if (showApprove && o != null && canApprove) {
+        val signer = me
+        var name by remember(signer) { mutableStateOf(signer?.name ?: prefs.approvedBy) }
         var err by remember { mutableStateOf<String?>(null) }
         AlertDialog(
             onDismissRequest = { showApprove = false },
@@ -328,21 +346,30 @@ fun OrderDetailScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("The approving pathologist's name prints on every report.", style = MaterialTheme.typography.bodySmall)
-                    OutlinedTextField(
-                        value = name, onValueChange = { name = it },
-                        label = { Text("Approved by (pathologist)") }, singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    if (signer != null) {
+                        Text(signer.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Text(
+                            "Signing as ${signer.roleLabel.lowercase()} — switch user from the home header to sign as someone else.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        OutlinedTextField(
+                            value = name, onValueChange = { name = it },
+                            label = { Text("Approved by (pathologist)") }, singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                     err?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                 }
             },
             confirmButton = {
                 Button(onClick = {
-                    val n = name.trim()
+                    val n = (signer?.name ?: name).trim()
                     if (n.isEmpty()) { err = "Name is required"; return@Button }
-                    prefs.approvedBy = n
+                    if (signer == null) prefs.approvedBy = n
                     showApprove = false
-                    busy = true; message = null
+                    busy = true; message = null; session.touch()
                     scope.launch {
                         repo.approveOrder(o.id, n)
                             .onSuccess { message = "Approved by $n"; reloadTick++ }
@@ -512,6 +539,8 @@ private fun ActionBar(
     busy: Boolean,
     enteredCount: Int,
     totalCount: Int,
+    /** P4 RBAC: only a pathologist (or the owner) may sign results off. */
+    canApprove: Boolean,
     onForward: (String) -> Unit,
     onVerify: () -> Unit,
     onApprove: () -> Unit,
@@ -540,7 +569,13 @@ private fun ActionBar(
                 Button(onClick = onVerify, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Verify results") }
             }
             LabStatus.VERIFIED -> {
-                Button(onClick = onApprove, enabled = !busy, modifier = Modifier.weight(1f)) { Text("Approve") }
+                Button(onClick = onApprove, enabled = !busy && canApprove, modifier = Modifier.weight(1f)) { Text("Approve") }
+                if (!canApprove) Text(
+                    "Only a pathologist can approve results",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
             }
             LabStatus.APPROVED -> {
                 Button(onClick = onPrint, enabled = !busy, modifier = Modifier.weight(1f)) {

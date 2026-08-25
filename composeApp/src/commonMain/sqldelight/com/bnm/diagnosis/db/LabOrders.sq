@@ -106,6 +106,40 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 deleteTestsForOrder:
 DELETE FROM lab_order_tests WHERE order_id = ?;
 
+-- ── P4 referrer commissions ──
+--
+-- Gross billed per referrer over a date range, summed from the LINE-ITEM
+-- SNAPSHOTS (lab_order_tests.price) — those are the historical truth: they
+-- already carry the referrer's negotiated rate as it stood at registration,
+-- so re-pricing the catalog or the rate list never rewrites a past statement.
+-- Cancelled orders are excluded; orders with no referrer never appear.
+-- Bounds are ISO instants, :from inclusive / :toExclusive exclusive (the
+-- caller converts the operator's LOCAL date range to UTC instants).
+commissionByReferrer:
+SELECT o.referrer_id AS referrer_id,
+       count(DISTINCT o.id) AS orders_count,
+       coalesce(sum(t.price), 0.0) AS gross
+FROM lab_orders o
+LEFT JOIN lab_order_tests t ON t.order_id = o.id
+WHERE o.referrer_id IS NOT NULL
+  AND o.status != 'cancelled'
+  AND o.created_at >= :from AND o.created_at < :toExclusive
+GROUP BY o.referrer_id;
+
+-- Drill-down: one referrer's orders inside the same range, newest first.
+referrerOrdersInRange:
+SELECT o.id AS order_id, o.accession_no, o.created_at, o.status,
+       p.name AS patient_name,
+       coalesce(sum(t.price), 0.0) AS amount
+FROM lab_orders o
+JOIN patients p ON p.id = o.patient_id
+LEFT JOIN lab_order_tests t ON t.order_id = o.id
+WHERE o.referrer_id = :referrerId
+  AND o.status != 'cancelled'
+  AND o.created_at >= :from AND o.created_at < :toExclusive
+GROUP BY o.id
+ORDER BY o.created_at DESC;
+
 -- ── Order tests ──
 
 insertOrderTest:

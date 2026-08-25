@@ -1,0 +1,56 @@
+-- Lab staff accounts (P4). LOCAL-FIRST, like every other LIMS table: a lab
+-- signs its people in with zero network, forever. Roles gate what a person may
+-- do (`owner` | `pathologist` | `technician` | `receptionist`); result APPROVAL
+-- is restricted to pathologist+owner because the pathologist sign-off is the
+-- legally meaningful one.
+--
+-- Rows are NEVER hard-deleted: `active = 0` retires a person while their name
+-- stays readable on every result they entered/verified/approved (attribution
+-- history is the audit trail). `deleted_at` exists only so the sync spine can
+-- carry a tombstone if one is ever needed.
+--
+-- pin_hash is a salted SHA-256 written by StaffRepository (`s1$<salt>$<hex>` —
+-- the salt travels INSIDE the value so any of the lab's seats can verify it).
+-- See StaffRepository's KDoc: this is convenience access control on a shared
+-- lab PC, NOT a security boundary.
+
+CREATE TABLE staff (
+    id TEXT NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'receptionist',  -- owner|pathologist|technician|receptionist
+    pin_hash TEXT,                              -- null = no PIN (tap-to-enter)
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+);
+
+CREATE INDEX staff_active ON staff(active, name);
+
+upsert:
+INSERT OR REPLACE INTO staff(id, name, role, pin_hash, active, created_at, updated_at, deleted_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+byId:
+SELECT * FROM staff WHERE id = ?;
+
+-- The sign-in grid: only people who can currently work.
+listActive:
+SELECT * FROM staff WHERE deleted_at IS NULL AND active = 1 ORDER BY name;
+
+-- Staff management (owner-only): retired people stay visible, listed last.
+listAll:
+SELECT * FROM staff WHERE deleted_at IS NULL ORDER BY active DESC, name;
+
+softDelete:
+UPDATE staff SET deleted_at = ?, active = 0, updated_at = ? WHERE id = ?;
+
+-- Anti-lockout guard: 0 ⇒ seedOwnerIfEmpty creates the default owner.
+countActive:
+SELECT count(*) FROM staff WHERE deleted_at IS NULL AND active = 1;
+
+-- Sync sweep (P4): rows touched since the push watermark (ISO string compare,
+-- same pattern as patients). Deactivation + soft delete both bump updated_at,
+-- so one predicate covers edits, retirements and deletes.
+changedSince:
+SELECT * FROM staff WHERE updated_at > :since;

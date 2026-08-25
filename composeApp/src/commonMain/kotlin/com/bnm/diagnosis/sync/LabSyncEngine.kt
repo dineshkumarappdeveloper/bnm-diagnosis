@@ -17,6 +17,7 @@ import com.bnm.diagnosis.lab.Patient
 import com.bnm.diagnosis.lab.Referrer
 import com.bnm.diagnosis.lab.TestParameter
 import com.bnm.diagnosis.license.LicenseManager
+import com.bnm.diagnosis.staff.Staff
 import kotlin.time.Instant
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -88,6 +89,7 @@ class LabSyncEngine(
     private val oQ get() = db.labOrdersQueries
     private val resQ get() = db.resultsQueries
     private val emrQ get() = db.emrInboxQueries
+    private val stQ get() = db.staffQueries
 
     private val paramsSerializer = ListSerializer(TestParameter.serializer())
     private val idsSerializer = ListSerializer(String.serializer())
@@ -141,6 +143,20 @@ class LabSyncEngine(
                     row.created_at, row.deleted_at)
                 PushCandidate(m.id, json.encodeToJsonElement(Referrer.serializer(), m), m.deletedAt,
                     maxOf(ms(m.createdAt), ms(m.deletedAt)))
+            }
+        }
+        // Staff (P4): roles + PINs converge across the lab's seats. pin_hash IS
+        // pushed — deliberately. Same lab, same people: a PIN set at the front
+        // desk has to work on the pathologist's laptop, and the salt is embedded
+        // in the hash for exactly that reason (StaffRepository KDoc). It is also
+        // no meaningful disclosure: a PIN here is convenience access control on a
+        // shared lab PC, not a secret, and the local DB it already sits in is
+        // plainly readable. Nothing here is reused as a credential anywhere else.
+        pushEntity(E_STAFF) { since ->
+            stQ.changedSince(since).executeAsList().map { row ->
+                val m = row.toStaff()
+                PushCandidate(m.id, json.encodeToJsonElement(Staff.serializer(), m), m.deletedAt,
+                    maxOf(ms(m.updatedAt), ms(m.createdAt), ms(m.deletedAt)))
             }
         }
         pushCatalog()
@@ -249,6 +265,14 @@ class LabSyncEngine(
                 if (local != null && maxOf(ms(local.created_at), ms(local.deleted_at)) >= incoming) return
                 rQ.upsert(r.id, r.name, r.kind, r.phone, r.commissionPct,
                     r.createdAt, r.deletedAt ?: row.deletedAt)
+            }
+            E_STAFF -> {
+                val st = json.decodeFromJsonElement(Staff.serializer(), doc)
+                val local = stQ.byId(st.id).executeAsOneOrNull()
+                val incoming = maxOf(ms(st.updatedAt), ms(st.deletedAt ?: row.deletedAt))
+                if (local != null && maxOf(ms(local.updated_at), ms(local.deleted_at)) >= incoming) return
+                stQ.upsert(st.id, st.name, st.role, st.pinHash, if (st.active) 1L else 0L,
+                    st.createdAt, st.updatedAt, st.deletedAt ?: row.deletedAt)
             }
             // Catalog rows carry no stamps — server seq order IS the LWW order.
             E_TEST -> {
@@ -426,6 +450,11 @@ class LabSyncEngine(
             .getOrDefault(emptyList()),
     )
 
+    private fun com.bnm.diagnosis.db.Staff.toStaff() = Staff(
+        id = id, name = name, role = role, pinHash = pin_hash, active = active == 1L,
+        createdAt = created_at, updatedAt = updated_at, deletedAt = deleted_at,
+    )
+
     private fun Lab_orders.toOrder() = LabOrder(id, accession_no, patient_id, referrer_id,
         invoice_id, status, priority, notes, created_at, updated_at, collected_at,
         approved_at, reported_at)
@@ -456,6 +485,7 @@ class LabSyncEngine(
     private companion object {
         const val E_PATIENT = "patient"
         const val E_REFERRER = "referrer"
+        const val E_STAFF = "staff"
         const val E_TEST = "test"
         const val E_PANEL = "panel"
         const val E_ORDER = "order"

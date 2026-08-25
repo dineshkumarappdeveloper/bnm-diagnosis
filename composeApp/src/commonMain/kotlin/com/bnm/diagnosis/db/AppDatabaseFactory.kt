@@ -76,6 +76,10 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
     driver.execute(null,
         "CREATE TABLE IF NOT EXISTS accession_series (seat TEXT NOT NULL PRIMARY KEY, " +
         "prefix TEXT NOT NULL DEFAULT 'ACC', high_water INTEGER NOT NULL DEFAULT 0)", 0)
+    // ── P4: per-referrer B2B rate lists (no row = catalog price stands) ──
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS referrer_rates (referrer_id TEXT NOT NULL, test_id TEXT NOT NULL, " +
+        "price REAL NOT NULL, PRIMARY KEY (referrer_id, test_id))", 0)
     // ── P3 sync: EMR bridge inbox ──
     driver.execute(null,
         "CREATE TABLE IF NOT EXISTS emr_inbox (id TEXT NOT NULL PRIMARY KEY, visit_id TEXT, " +
@@ -83,5 +87,11 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
         "matched_order_id TEXT, seq INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0, " +
         "status_pushed INTEGER NOT NULL DEFAULT 0, created_at TEXT)", 0)
     driver.execute(null, "CREATE INDEX IF NOT EXISTS emr_inbox_open ON emr_inbox(done, seq)", 0)
+    // ── P4: staff accounts + roles (local RBAC, synced across the lab's seats) ──
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS staff (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, " +
+        "role TEXT NOT NULL DEFAULT 'receptionist', pin_hash TEXT, active INTEGER NOT NULL DEFAULT 1, " +
+        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT)", 0)
+    driver.execute(null, "CREATE INDEX IF NOT EXISTS staff_active ON staff(active, name)", 0)
     return AppDatabase(driver)
 }

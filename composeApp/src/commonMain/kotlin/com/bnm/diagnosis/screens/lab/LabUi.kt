@@ -1,19 +1,35 @@
 package com.bnm.diagnosis.screens.lab
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.bnm.diagnosis.lab.LabRepository
 import com.bnm.diagnosis.screens.license.defaultDeviceName
+import com.bnm.diagnosis.screens.staff.initialsOf
+import com.bnm.diagnosis.staff.Staff
 import com.russhwolf.settings.Settings
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
@@ -60,6 +76,52 @@ fun shortTimeLabel(iso: String): String {
     if (dt.date == today) return hm
     val mon = listOf("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
     return "${dt.date.day} ${mon[dt.date.month.ordinal]} $hm"
+}
+
+/**
+ * Signed-in staff chip for the LabHome header (P4): initials disc + name + role,
+ * click → "Switch user" / "Sign out". Both do the same thing to the session (it
+ * is dropped and the app returns to the sign-in grid) — two labels because they
+ * mean different things to the person at the bench.
+ *
+ * Null staff (session somehow empty) renders nothing rather than a dead chip.
+ */
+@Composable
+fun StaffHeaderChip(
+    staff: Staff?,
+    onSwitchUser: () -> Unit,
+    onSignOut: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (staff == null) return
+    var open by remember { mutableStateOf(false) }
+    Box(modifier) {
+        Row(
+            Modifier.background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(999.dp))
+                .clickable { open = true }
+                .padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Box(
+                Modifier.size(28.dp).background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(initialsOf(staff.name), fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer)
+            }
+            Column {
+                Text(staff.name, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(staff.roleLabel, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(text = { Text("Switch user") }, onClick = { open = false; onSwitchUser() })
+            DropdownMenuItem(text = { Text("Sign out") }, onClick = { open = false; onSignOut() })
+        }
+    }
 }
 
 /** Result flag chip: N = neutral, L/H/A = amber, CL/CH = red. Null flag → nothing. */

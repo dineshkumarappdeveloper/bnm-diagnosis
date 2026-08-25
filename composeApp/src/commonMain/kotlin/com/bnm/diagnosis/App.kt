@@ -69,6 +69,12 @@ import com.bnm.diagnosis.sync.LabSyncEngine
 import com.bnm.diagnosis.screens.license.ActivationScreen
 import com.bnm.diagnosis.screens.license.LicenseDevicesScreen
 import com.bnm.diagnosis.screens.login.LoginScreen
+import com.bnm.diagnosis.screens.staff.StaffScreen
+import com.bnm.diagnosis.screens.staff.StaffSignInScreen
+import com.bnm.diagnosis.staff.LocalStaffRepository
+import com.bnm.diagnosis.staff.LocalStaffSession
+import com.bnm.diagnosis.staff.StaffRepository
+import com.bnm.diagnosis.staff.StaffSession
 import com.bnm.diagnosis.screens.main.BillsScreen
 import com.bnm.diagnosis.ui.theme.AppTheme
 import com.bnm.diagnosis.ui.theme.ThemeManager
@@ -91,6 +97,10 @@ fun App() {
     val database = remember { createAppDatabase() }
     val repo = remember { BillingRepository(database, api) }
     val labRepo = remember { LabRepository(database, ApiClient.json) }
+    // ── P4: staff accounts + local RBAC. The session is in-memory ONLY — a
+    // restarted seat comes back to the sign-in grid. ──
+    val staffRepo = remember { StaffRepository(database, ApiClient.json) }
+    val staffSession = remember { StaffSession() }
 
     // First-run seed: ~40 standard tests + panels, only when the catalog is empty.
     LaunchedEffect(Unit) { runCatching { SeedCatalog.seedIfEmpty(labRepo) } }
@@ -185,6 +195,8 @@ fun App() {
         CompositionLocalProvider(
             LocalBillingRepository provides repo,
             LocalLabRepository provides labRepo,
+            LocalStaffRepository provides staffRepo,
+            LocalStaffSession provides staffSession,
             LocalSyncEngine provides syncEngine,
             LocalOutboxSender provides outboxSender,
             LocalCart provides cart,
@@ -200,10 +212,61 @@ fun App() {
                 // Accession of the order just registered (P1b) — shown as the
                 // confirmation snackbar once LabHome is back on screen.
                 var lastAccession by remember { mutableStateOf<String?>(null) }
+                // P4: who is at this seat. Entry flow = license check → staff
+                // sign-in → LabHome; the license-blocked banner/notice semantics
+                // below are unchanged (a blocked device still signs people in and
+                // stays fully readable/printable/exportable).
+                val signedInStaff by staffSession.current.collectAsState()
                 val startDestination = remember(isLoggedIn) {
-                    if (!licenseManager.isLicensed()) Screen.Activation.route else Screen.LabHome.route
+                    if (!licenseManager.isLicensed()) Screen.Activation.route else Screen.StaffSignIn.route
                 }
+
+                // "Switch user", "Sign out" and the auto-lock are one action:
+                // drop the in-memory session (lab data untouched) and go back to
+                // the sign-in grid with nothing left on the back stack.
+                fun lockSeat() {
+                    staffSession.signOut()
+                    navController.navigate(Screen.StaffSignIn.route) {
+                        popUpTo(navController.graph.id) { inclusive = true }
+                        launchSingleTop = true
+                    }
+                }
+
+                // Cheap idle tracking: a stamp on every destination change, plus
+                // the explicit touches the results workbench fires. No per-screen
+                // listeners, no recomposition churn.
+                LaunchedEffect(navController) {
+                    navController.currentBackStackEntryFlow.collect { staffSession.touch() }
+                }
+                // Auto-lock: one low-frequency poll; 15 min of nothing → sign-in.
+                LaunchedEffect(navController) {
+                    while (true) {
+                        delay(AUTO_LOCK_POLL_MS)
+                        if (staffSession.isIdle()) lockSeat()
+                    }
+                }
+
                 NavHost(navController = navController, startDestination = startDestination) {
+
+                    // ── Seat sign-in gate (P4) ──
+                    composable(Screen.StaffSignIn.route) {
+                        StaffSignInScreen(
+                            labName = licState.labName
+                                ?: authRepository.getSelectedBusinessName()
+                                ?: "BNM Diagnosis",
+                            onSignedIn = { person ->
+                                staffSession.signIn(person)
+                                navController.navigate(Screen.LabHome.route) {
+                                    popUpTo(Screen.StaffSignIn.route) { inclusive = true }
+                                }
+                            },
+                        )
+                    }
+
+                    // ── Staff & roles (owner only; guarded again inside) ──
+                    composable(Screen.Staff.route) {
+                        StaffScreen(onBack = { navController.popBackStack() })
+                    }
 
                     composable(Screen.Activation.route) {
                         ActivationScreen(
@@ -217,7 +280,8 @@ fun App() {
                                 }
                             },
                             onEnterApp = {
-                                navController.navigate(Screen.LabHome.route) {
+                                // Licensed now → the staff sign-in gate, not straight in.
+                                navController.navigate(Screen.StaffSignIn.route) {
                                     popUpTo(Screen.Activation.route) { inclusive = true }
                                 }
                             },
@@ -313,6 +377,9 @@ fun App() {
                                     licenseSeats = licState.seats,
                                     businessId = businessId,
                                     labSync = labSync,
+                                    signedInStaff = signedInStaff,
+                                    onSwitchUser = { lockSeat() },
+                                    onSignOut = { lockSeat() },
                                 )
                             }
                         }
@@ -460,6 +527,8 @@ fun App() {
                             businessId = businessId,
                             onBack = { navController.popBackStack() },
                             onOpenLicense = { navController.navigate(Screen.LicenseDevices.route) },
+                            onOpenStaff = { navController.navigate(Screen.Staff.route) },
+                            staffManageAllowed = signedInStaff?.canManageStaff == true,
                             labSync = labSync,
                             labName = licState.labName ?: authRepository.getSelectedBusinessName() ?: "BNM Diagnosis",
                         )
@@ -469,6 +538,9 @@ fun App() {
         }
     }
 }
+
+/** How often the auto-lock poll wakes up to check the idle stamp (P4). */
+private const val AUTO_LOCK_POLL_MS = 30_000L
 
 /**
  * Full-width banner shown when the license heartbeat reported this device as

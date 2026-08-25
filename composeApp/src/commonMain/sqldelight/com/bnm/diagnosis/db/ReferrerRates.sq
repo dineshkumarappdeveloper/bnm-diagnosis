@@ -1,0 +1,34 @@
+-- P4 · B2B price lists. A referring doctor/clinic that feeds the lab volume is
+-- billed at NEGOTIATED rates, not the walk-in catalog price. One row = one
+-- override for one (referrer, test) pair; NO row = the catalog price stands.
+-- Deleting the override (never storing a copy of the catalog price) is what
+-- keeps a rate list from silently freezing when the catalog is repriced.
+--
+-- The single pricing brain is LabRepository.effectivePrice(testId, referrerId)
+-- — nothing else may resolve a price. Order lines snapshot the EFFECTIVE price
+-- into lab_order_tests at registration, so history never re-prices.
+
+CREATE TABLE referrer_rates (
+    referrer_id TEXT NOT NULL,
+    test_id TEXT NOT NULL,
+    price REAL NOT NULL,
+    PRIMARY KEY (referrer_id, test_id)
+);
+
+upsertRate:
+INSERT OR REPLACE INTO referrer_rates(referrer_id, test_id, price) VALUES (?, ?, ?);
+
+ratesFor:
+SELECT * FROM referrer_rates WHERE referrer_id = ?;
+
+rateFor:
+SELECT price FROM referrer_rates WHERE referrer_id = ? AND test_id = ?;
+
+deleteRate:
+DELETE FROM referrer_rates WHERE referrer_id = ? AND test_id = ?;
+
+deleteAllFor:
+DELETE FROM referrer_rates WHERE referrer_id = ?;
+
+countFor:
+SELECT count(*) FROM referrer_rates WHERE referrer_id = ?;

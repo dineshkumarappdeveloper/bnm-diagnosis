@@ -79,6 +79,7 @@ import com.bnm.diagnosis.lab.CriticalResult
 import com.bnm.diagnosis.lab.LabStatus
 import com.bnm.diagnosis.lab.LocalLabRepository
 import com.bnm.diagnosis.lab.WorklistEntry
+import com.bnm.diagnosis.staff.Staff
 import com.bnm.diagnosis.sync.LabSyncEngine
 import com.bnm.diagnosis.ui.theme.AppTheme
 import kotlinx.coroutines.flow.combine
@@ -159,6 +160,12 @@ fun LabHomeScreen(
     businessId: String = "",
     /** P3: the lab sync spine — last-synced/Sync now; null hides all sync UI. */
     labSync: LabSyncEngine? = null,
+    /** P4: who is signed in on this seat — header chip only; null hides it. */
+    signedInStaff: Staff? = null,
+    /** Header chip ▸ "Switch user" — drops the session, back to the sign-in grid. */
+    onSwitchUser: () -> Unit = {},
+    /** Header chip ▸ "Sign out" — same session drop, different intent. */
+    onSignOut: () -> Unit = {},
 ) {
     val repo = LocalLabRepository.current
     val billingRepo = LocalBillingRepository.current
@@ -205,13 +212,23 @@ fun LabHomeScreen(
         val wide = maxWidth >= WIDE_BREAKPOINT
         Scaffold(
             topBar = {
-                if (!wide) TopAppBar(title = {
-                    Column {
-                        Text("BNM Diagnosis", style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(labName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    }
-                })
+                if (!wide) TopAppBar(
+                    title = {
+                        Column {
+                            Text("BNM Diagnosis", style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(labName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        }
+                    },
+                    actions = {
+                        StaffHeaderChip(
+                            staff = signedInStaff,
+                            onSwitchUser = onSwitchUser,
+                            onSignOut = onSignOut,
+                            modifier = Modifier.padding(end = 8.dp),
+                        )
+                    },
+                )
             },
             snackbarHost = { SnackbarHost(snackbar) },
         ) { inner ->
@@ -238,6 +255,12 @@ fun LabHomeScreen(
                                 LicenseModeChip(licenseMode)
                             }
                         }
+                        StaffHeaderChip(
+                            staff = signedInStaff,
+                            onSwitchUser = onSwitchUser,
+                            onSignOut = onSignOut,
+                            modifier = Modifier.padding(end = 12.dp),
+                        )
                         OutlinedButton(onClick = onNewPatient) {
                             Icon(Icons.Outlined.PersonAddAlt, contentDescription = null, modifier = Modifier.size(18.dp))
                             Text("  New patient")

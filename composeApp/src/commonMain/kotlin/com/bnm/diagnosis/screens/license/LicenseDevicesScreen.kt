@@ -37,15 +37,20 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import com.bnm.diagnosis.license.SubscriptionState
+import com.bnm.diagnosis.license.subscriptionStatus
+import com.bnm.diagnosis.api.LabHeartbeatResult
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.bnm.diagnosis.api.LabApi
+import com.bnm.diagnosis.ui.theme.AppTheme
 import com.bnm.diagnosis.api.LabSeatDevice
 import com.bnm.diagnosis.license.LicenseManager
 import kotlinx.coroutines.launch
+import androidx.compose.material3.Button
 
 /**
  * License & devices — Licensed-to card (lab name READ-ONLY), seat list with
@@ -72,6 +77,8 @@ fun LicenseDevicesScreen(
     var confirmDeactivate by remember { mutableStateOf<LabSeatDevice?>(null) }
     var confirmSelf by remember { mutableStateOf(false) }
     var reloadTick by remember { mutableStateOf(0) }
+    var checkingRenewal by remember { mutableStateOf(false) }
+    var renewalMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(reloadTick) {
         loading = true
@@ -133,6 +140,78 @@ fun LicenseDevicesScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                    }
+                }
+            }
+
+            // ── Subscription / renewal (P4) — perpetual licences show nothing:
+            // they are sold outright and must never nag.
+            item {
+                val sub = licenseManager.subscriptionStatus()
+                if (sub.isSubscription) {
+                    val tone = when (sub.state) {
+                        SubscriptionState.EXPIRED -> AppTheme.colors.dangerSoft
+                        SubscriptionState.IN_GRACE -> AppTheme.colors.warningSoft
+                        SubscriptionState.EXPIRING_SOON -> AppTheme.colors.warningSoft
+                        else -> MaterialTheme.colorScheme.surfaceVariant
+                    }
+                    Card(colors = CardDefaults.cardColors(containerColor = tone)) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                "Subscription",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                sub.notice ?: "Active" + (sub.daysToExpiry?.let { " · renews in $it days" } ?: ""),
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                "Records always stay readable, printable and exportable — renewal only gates registering new orders.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            renewalMessage?.let {
+                                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    onClick = {
+                                        if (checkingRenewal) return@Button
+                                        checkingRenewal = true
+                                        renewalMessage = null
+                                        scope.launch {
+                                            labApi.heartbeat()
+                                                .onSuccess { hb ->
+                                                    when (hb) {
+                                                        is LabHeartbeatResult.Ok -> {
+                                                            licenseManager.applyHeartbeat(
+                                                                hb.licenseJwt, hb.mode, hb.seats, hb.expiresAt, hb.labName,
+                                                            )
+                                                            renewalMessage = "Licence refreshed."
+                                                        }
+                                                        is LabHeartbeatResult.Blocked ->
+                                                            renewalMessage = hb.message
+                                                        LabHeartbeatResult.InvalidSession ->
+                                                            renewalMessage = "Session expired — reactivate this device."
+                                                    }
+                                                }
+                                                .onFailure {
+                                                    renewalMessage = "Couldn't reach BNM — try again when online."
+                                                }
+                                            checkingRenewal = false
+                                        }
+                                    },
+                                    enabled = !checkingRenewal,
+                                ) {
+                                    if (checkingRenewal) {
+                                        CircularProgressIndicator(Modifier.padding(end = 8.dp).size(16.dp), strokeWidth = 2.dp)
+                                    }
+                                    Text("Check for renewal")
+                                }
+                            }
+                        }
                     }
                 }
             }

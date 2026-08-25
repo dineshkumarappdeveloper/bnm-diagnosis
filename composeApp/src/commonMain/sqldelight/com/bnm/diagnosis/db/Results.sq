@@ -77,6 +77,22 @@ WHERE r.flag IN ('CL', 'CH') AND substr(r.entered_at, 1, 10) = :today
 ORDER BY r.entered_at DESC
 LIMIT :limit;
 
+-- Same card, TIMEZONE-CORRECT (P4). `criticalsToday` compares a UTC instant's
+-- date prefix against the operator's LOCAL date, so an IST lab's criticals card
+-- goes blank between local midnight and 05:30 — exactly the night shift where
+-- a call-out matters. This takes the half-open UTC instant bounds of the local
+-- day instead (LabRepository.instantBounds).
+criticalsBetween:
+SELECT r.order_id, r.test_id, r.parameter_key, r.value, r.unit, r.flag,
+       o.accession_no, p.name AS patient_name, p.phone AS patient_phone
+FROM lab_results r
+JOIN lab_orders o ON o.id = r.order_id
+JOIN patients p ON p.id = o.patient_id
+WHERE r.flag IN ('CL', 'CH')
+  AND r.entered_at >= :from AND r.entered_at < :toExclusive
+ORDER BY r.entered_at DESC
+LIMIT :limit;
+
 -- ── P3 sync ──
 
 -- Push sweep: orders whose result bundle changed since the watermark.

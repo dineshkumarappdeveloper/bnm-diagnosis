@@ -24,9 +24,12 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
+import kotlinx.datetime.DatePeriod
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.TimeZone
+import kotlinx.datetime.atStartOfDayIn
 import kotlinx.datetime.daysUntil
+import kotlinx.datetime.plus
 import kotlinx.datetime.toLocalDateTime
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
@@ -59,6 +62,7 @@ class LabRepository(
     private val resQ get() = db.resultsQueries
     private val accQ get() = db.accessionSeriesQueries
     private val emrQ get() = db.emrInboxQueries
+    private val rrQ get() = db.referrerRatesQueries
 
     private val paramsSerializer = ListSerializer(TestParameter.serializer())
     private val idsSerializer = ListSerializer(String.serializer())
@@ -112,6 +116,107 @@ class LabRepository(
     suspend fun softDeleteReferrer(id: String) = withContext(Dispatchers.Default) {
         rQ.softDelete(nowIso(), id)
     }
+
+    // ── P4 · Referrer rate lists (B2B pricing) ───────────────────────────────
+    //
+    // ONE PRICING BRAIN: [effectivePrice] / [priceList] are the only places a
+    // test's price is resolved. A rate row overrides the catalog price for that
+    // (referrer, test) pair; no row = the catalog price stands (so a catalog
+    // reprice flows through automatically — we never copy the catalog price in).
+
+    /** The referrer's overrides as testId → negotiated price. Empty for a
+     *  walk-in (null referrer) or a referrer billed at catalog rates. */
+    suspend fun ratesFor(referrerId: String?): Map<String, Double> = withContext(Dispatchers.Default) {
+        if (referrerId.isNullOrBlank()) emptyMap()
+        else rrQ.ratesFor(referrerId).executeAsList().associate { it.test_id to it.price }
+    }
+
+    /** Set one negotiated price. A negative price is meaningless — clamp at 0. */
+    suspend fun setRate(referrerId: String, testId: String, price: Double) = withContext(Dispatchers.Default) {
+        rrQ.upsertRate(referrerId, testId, price.coerceAtLeast(0.0))
+    }
+
+    /** Drop one override — the test falls back to the catalog price. */
+    suspend fun clearRate(referrerId: String, testId: String) = withContext(Dispatchers.Default) {
+        rrQ.deleteRate(referrerId, testId)
+    }
+
+    /** Drop the whole rate list (referrer billed at catalog rates again). */
+    suspend fun clearAllRates(referrerId: String) = withContext(Dispatchers.Default) {
+        rrQ.deleteAllFor(referrerId)
+    }
+
+    /** How many overrides a referrer carries — drives the "N rates" badge. */
+    suspend fun rateCount(referrerId: String): Long = withContext(Dispatchers.Default) {
+        rrQ.countFor(referrerId).executeAsOne()
+    }
+
+    /**
+     * THE pricing brain: what this test costs THIS referrer's patient — the
+     * negotiated rate when one exists, else the catalog price. `null`
+     * referrer = walk-in = catalog. Unknown test → 0.0.
+     */
+    suspend fun effectivePrice(testId: String, referrerId: String? = null): Double =
+        withContext(Dispatchers.Default) {
+            val catalog = tQ.testById(testId).executeAsOneOrNull()?.price ?: 0.0
+            val override = if (referrerId.isNullOrBlank()) null
+            else rrQ.rateFor(referrerId, testId).executeAsOneOrNull()
+            resolvePrice(catalog, override)
+        }
+
+    /**
+     * Bulk form of [effectivePrice] — every ACTIVE test priced for one referrer
+     * in a single pass (the UI can't afford a query per row). Same rule, one
+     * brain: [resolvePrice].
+     */
+    suspend fun priceList(referrerId: String?): Map<String, Double> = withContext(Dispatchers.Default) {
+        val rates = if (referrerId.isNullOrBlank()) emptyMap()
+        else rrQ.ratesFor(referrerId).executeAsList().associate { it.test_id to it.price }
+        tQ.listAllTests().executeAsList().associate { it.id to resolvePrice(it.price, rates[it.id]) }
+    }
+
+    // ── P4 · Commission report ───────────────────────────────────────────────
+
+    /**
+     * Per-referrer statement for the LOCAL date range [fromDate]..[toDate]
+     * (both inclusive, ISO `YYYY-MM-DD`). Gross comes from the ORDER LINE
+     * SNAPSHOTS — the historical truth, already at whatever rate applied when
+     * the order was registered. Rows are sorted by payable, biggest first;
+     * referrers with no orders in the range are omitted.
+     */
+    suspend fun commissionReport(fromDate: String, toDate: String): List<ReferrerCommissionRow> =
+        withContext(Dispatchers.Default) {
+            val (from, toExclusive) = instantBounds(fromDate, toDate)
+            val byId = rQ.list().executeAsList().associateBy { it.id }
+            oQ.commissionByReferrer(from, toExclusive).executeAsList().map { row ->
+                val rid = row.referrer_id
+                // A soft-deleted referrer still owes/earns for past orders — fall
+                // back to a direct lookup so the statement is never silently short.
+                val r = byId[rid] ?: rQ.byId(rid).executeAsOneOrNull()
+                ReferrerCommissionRow(
+                    referrerId = rid,
+                    referrerName = r?.name ?: "(deleted referrer)",
+                    kind = r?.kind ?: "doctor",
+                    phone = r?.phone,
+                    ordersCount = row.orders_count,
+                    gross = row.gross,
+                    commissionPct = r?.commission_pct ?: 0.0,
+                )
+            }.sortedByDescending { it.payable }
+        }
+
+    /** Drill-down for one statement row: that referrer's orders in the range. */
+    suspend fun referrerOrders(referrerId: String, fromDate: String, toDate: String): List<ReferrerOrderRow> =
+        withContext(Dispatchers.Default) {
+            val (from, toExclusive) = instantBounds(fromDate, toDate)
+            oQ.referrerOrdersInRange(referrerId, from, toExclusive).executeAsList().map {
+                ReferrerOrderRow(
+                    orderId = it.order_id, accessionNo = it.accession_no,
+                    patientName = it.patient_name, createdAt = it.created_at,
+                    status = it.status, amount = it.amount,
+                )
+            }
+        }
 
     // ── Test catalog ─────────────────────────────────────────────────────────
 
@@ -190,6 +295,12 @@ class LabRepository(
             val seat = prefs.accessionSeat
             val orderId = Uuid.random().toString()
             val now = nowIso()
+            // P4: the referrer's negotiated rate list, applied through the ONE
+            // pricing brain — the order lines snapshot the EFFECTIVE price, so
+            // the bill, the report and every later commission statement all
+            // read the same number no matter how the catalog moves afterwards.
+            val rates = if (referrerId.isNullOrBlank()) emptyMap()
+            else rrQ.ratesFor(referrerId).executeAsList().associate { it.test_id to it.price }
             db.transactionWithResult {
                 // Atomic allocate: seed the seat row if new, bump, then read.
                 accQ.init(seat, prefs.accessionPrefix)
@@ -201,7 +312,8 @@ class LabRepository(
                 oQ.insertOrder(orderId, accession, patientId, referrerId, invoiceId,
                     LabStatus.REGISTERED, priority, notes, now, now)
                 for (t in tests) {
-                    oQ.insertOrderTest(Uuid.random().toString(), orderId, t.id, t.name, t.price, "pending")
+                    val price = resolvePrice(t.price, rates[t.id])
+                    oQ.insertOrderTest(Uuid.random().toString(), orderId, t.id, t.name, price, "pending")
                     for (param in t.parameters) {
                         resQ.insertEmpty(Uuid.random().toString(), orderId, t.id, param.key, param.unit)
                     }
@@ -257,9 +369,14 @@ class LabRepository(
             .catch { emit(emptyList()) }
 
     /** Dashboard: today's critical results (CL/CH) with the patient's name and
-     *  phone — the call-out list (labs must phone criticals). */
+     *  phone — the call-out list (labs must phone criticals). "Today" is the
+     *  operator's LOCAL day expressed as UTC instant bounds (entered_at is a
+     *  UTC instant) — a plain date-prefix match would blank the card between
+     *  local midnight and the UTC offset, i.e. the whole IST night shift. */
     fun criticalsTodayFlow(limit: Long): Flow<List<CriticalResult>> =
-        resQ.criticalsToday(todayLocalDate(), limit).asFlow().mapToList(Dispatchers.Default)
+        todayLocalDate().let { d -> instantBounds(d, d) }
+            .let { (from, toExclusive) -> resQ.criticalsBetween(from, toExclusive, limit) }
+            .asFlow().mapToList(Dispatchers.Default)
             .map { rows ->
                 rows.map {
                     CriticalResult(
@@ -472,6 +589,29 @@ class LabRepository(
     )
 
     companion object {
+        /** THE pricing rule, in one place: a referrer override wins, else the
+         *  catalog price. Every price the app shows, bills or reports resolves
+         *  through here (directly or via [effectivePrice]/[priceList]). */
+        fun resolvePrice(catalogPrice: Double, rateOverride: Double?): Double =
+            rateOverride ?: catalogPrice
+
+        /**
+         * A LOCAL inclusive date range (ISO `YYYY-MM-DD`) → the half-open UTC
+         * instant bounds the order tables are keyed on (`created_at` is a UTC
+         * instant). Without this an IST lab's 1st-of-the-month early-morning
+         * orders would land in the previous month's statement.
+         */
+        fun instantBounds(fromDate: String, toDate: String): Pair<String, String> {
+            val tz = TimeZone.currentSystemDefault()
+            val from = runCatching {
+                LocalDate.parse(fromDate.take(10)).atStartOfDayIn(tz).toString()
+            }.getOrElse { fromDate }
+            val toExclusive = runCatching {
+                LocalDate.parse(toDate.take(10)).plus(DatePeriod(days = 1)).atStartOfDayIn(tz).toString()
+            }.getOrElse { toDate + "T99" }
+            return from to toExclusive
+        }
+
         private val ENTRY_OPEN_STATUSES = setOf(
             LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED,
         )

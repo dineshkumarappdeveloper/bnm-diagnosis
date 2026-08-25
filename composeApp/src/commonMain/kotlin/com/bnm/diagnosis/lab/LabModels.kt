@@ -85,6 +85,31 @@ data class Referrer(
     val deletedAt: String? = null,
 )
 
+/** P4 · one line of a referrer's commission statement. `gross` is summed from
+ *  the ORDER LINE SNAPSHOTS in the range (historical truth — already at the
+ *  referrer's negotiated rate); `payable` = gross × commissionPct / 100. */
+data class ReferrerCommissionRow(
+    val referrerId: String,
+    val referrerName: String,
+    val kind: String = "doctor",
+    val phone: String? = null,
+    val ordersCount: Long = 0,
+    val gross: Double = 0.0,
+    val commissionPct: Double = 0.0,
+) {
+    val payable: Double get() = gross * commissionPct / 100.0
+}
+
+/** P4 · commission-report drill-down row: one of a referrer's orders in range. */
+data class ReferrerOrderRow(
+    val orderId: String,
+    val accessionNo: String,
+    val patientName: String,
+    val createdAt: String,
+    val status: String,
+    val amount: Double,
+)
+
 @Serializable
 data class LabOrder(
     val id: String,

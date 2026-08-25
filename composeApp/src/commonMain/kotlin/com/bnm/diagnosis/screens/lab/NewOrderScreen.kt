@@ -54,6 +54,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import com.bnm.diagnosis.api.models.Invoice
 import com.bnm.diagnosis.billing.BillingPrefs
@@ -65,6 +66,7 @@ import com.bnm.diagnosis.chat.LocalOutboxSender
 import com.bnm.diagnosis.connectivity.LocalConnectivity
 import com.bnm.diagnosis.lab.LabOrder
 import com.bnm.diagnosis.lab.LabPanel
+import com.bnm.diagnosis.lab.LabRepository
 import com.bnm.diagnosis.lab.LabTest
 import com.bnm.diagnosis.lab.LocalLabRepository
 import com.bnm.diagnosis.lab.Patient
@@ -120,6 +122,27 @@ fun NewOrderScreen(
         allPanels = runCatching { labRepo.listPanels() }.getOrDefault(emptyList())
     }
     val testById = remember(allTests) { allTests.associateBy { it.id } }
+
+    // ── Referrer + priority ──
+    var referrers by remember { mutableStateOf<List<Referrer>>(emptyList()) }
+    var referrer by remember { mutableStateOf<Referrer?>(null) }
+    var showAddReferrer by remember { mutableStateOf(false) }
+    var priority by remember { mutableStateOf("routine") }
+    LaunchedEffect(Unit) { referrers = runCatching { labRepo.listReferrers() }.getOrDefault(emptyList()) }
+
+    // ── P4 B2B pricing: the selected referrer's negotiated rate list. Switching
+    // referrer re-loads it, which re-prices the whole cart (and the picker) on
+    // the spot. Empty map = walk-in / catalog rates. The map is only an OVERRIDE
+    // view — LabRepository.resolvePrice is still the one brain, and
+    // createLabOrder re-applies it server-side-of-the-UI when it snapshots the
+    // order lines, so what's shown here is exactly what gets billed. ──
+    var rates by remember { mutableStateOf<Map<String, Double>>(emptyMap()) }
+    LaunchedEffect(referrer?.id) {
+        rates = runCatching { labRepo.ratesFor(referrer?.id) }.getOrDefault(emptyMap())
+    }
+    fun priceOf(testId: String): Double =
+        LabRepository.resolvePrice(testById[testId]?.price ?: 0.0, rates[testId])
+
     // Panels expand to their tests, duplicates collapse — the SAME expansion
     // createLabOrder performs, so the running total matches the bill.
     val expandedIds = remember(selectedTestIds.toList(), selectedPanelIds.toList(), allPanels) {
@@ -128,14 +151,8 @@ fun NewOrderScreen(
         selectedPanelIds.forEach { pid -> allPanels.firstOrNull { it.id == pid }?.let { out += it.testIds } }
         out
     }
-    val runningTotal = expandedIds.sumOf { testById[it]?.price ?: 0.0 }
-
-    // ── Referrer + priority ──
-    var referrers by remember { mutableStateOf<List<Referrer>>(emptyList()) }
-    var referrer by remember { mutableStateOf<Referrer?>(null) }
-    var showAddReferrer by remember { mutableStateOf(false) }
-    var priority by remember { mutableStateOf("routine") }
-    LaunchedEffect(Unit) { referrers = runCatching { labRepo.listReferrers() }.getOrDefault(emptyList()) }
+    val runningTotal = expandedIds.sumOf { priceOf(it) }
+    val catalogTotal = expandedIds.sumOf { testById[it]?.price ?: 0.0 }
 
     // ── P3 EMR prefill: match the clinic's test by name; the row carries no
     // demographics, so the patient is created from the walk-in as usual. ──
@@ -250,9 +267,26 @@ fun NewOrderScreen(
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Column {
-                            Text("${expandedIds.size} test${if (expandedIds.size == 1) "" else "s"}",
-                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text("₹ ${formatDecimal2(runningTotal)}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            val rated = expandedIds.count { it in rates }
+                            Text(
+                                "${expandedIds.size} test${if (expandedIds.size == 1) "" else "s"}" +
+                                    if (rated > 0) " · $rated at ${referrer?.name ?: "referrer"} rates" else "",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("₹ ${formatDecimal2(runningTotal)}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                // Show what the walk-in list price would have been
+                                // whenever the rate list moved the number.
+                                if (rated > 0 && kotlin.math.abs(catalogTotal - runningTotal) > 0.005) {
+                                    Text(
+                                        "₹ ${formatDecimal2(catalogTotal)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        textDecoration = TextDecoration.LineThrough,
+                                        modifier = Modifier.padding(bottom = 2.dp),
+                                    )
+                                }
+                            }
                         }
                         Button(onClick = { register() }, enabled = !saving && patient != null && expandedIds.isNotEmpty()) {
                             if (saving) CircularProgressIndicator(Modifier.padding(end = 8.dp).size(16.dp), strokeWidth = 2.dp)
@@ -276,13 +310,13 @@ fun NewOrderScreen(
                         PatientSection(patient, onPatient = { patient = it })
                         ReferrerSection(referrers, referrer, onPick = { referrer = it }, onQuickAdd = { showAddReferrer = true })
                         PrioritySection(priority) { priority = it }
-                        SelectedTestsSummary(expandedIds.toList(), testById)
+                        SelectedTestsSummary(expandedIds.toList(), testById, rates)
                     }
                     Box(Modifier.width(1.dp).fillMaxHeight()) {
                         Surface(color = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.fillMaxSize()) {}
                     }
                     TestPicker(
-                        tests = allTests, panels = allPanels,
+                        tests = allTests, panels = allPanels, rates = rates,
                         selectedTestIds = selectedTestIds, selectedPanelIds = selectedPanelIds,
                         modifier = Modifier.weight(1f).fillMaxHeight(),
                     )
@@ -294,11 +328,11 @@ fun NewOrderScreen(
                     ReferrerSection(referrers, referrer, onPick = { referrer = it }, onQuickAdd = { showAddReferrer = true })
                     PrioritySection(priority) { priority = it }
                     TestPicker(
-                        tests = allTests, panels = allPanels,
+                        tests = allTests, panels = allPanels, rates = rates,
                         selectedTestIds = selectedTestIds, selectedPanelIds = selectedPanelIds,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 300.dp, max = 460.dp),
                     )
-                    SelectedTestsSummary(expandedIds.toList(), testById)
+                    SelectedTestsSummary(expandedIds.toList(), testById, rates)
                 }
             }
         }
@@ -525,6 +559,8 @@ private fun PatientSection(patient: Patient?, onPatient: (Patient?) -> Unit) {
 private fun TestPicker(
     tests: List<LabTest>,
     panels: List<LabPanel>,
+    /** P4: the selected referrer's negotiated overrides (testId → price). */
+    rates: Map<String, Double>,
     selectedTestIds: androidx.compose.runtime.snapshots.SnapshotStateList<String>,
     selectedPanelIds: androidx.compose.runtime.snapshots.SnapshotStateList<String>,
     modifier: Modifier = Modifier,
@@ -563,10 +599,15 @@ private fun TestPicker(
             if (visiblePanels.isNotEmpty()) {
                 items(visiblePanels, key = { "panel-${it.id}" }) { p ->
                     val selected = p.id in selectedPanelIds
+                    val listPrice = p.testIds.sumOf { id -> tests.firstOrNull { it.id == id }?.price ?: 0.0 }
                     PickRow(
                         title = p.name,
                         subtitle = "Panel · ${p.testIds.size} tests",
-                        price = p.testIds.sumOf { id -> tests.firstOrNull { it.id == id }?.price ?: 0.0 },
+                        price = p.testIds.sumOf { id ->
+                            LabRepository.resolvePrice(tests.firstOrNull { it.id == id }?.price ?: 0.0, rates[id])
+                        },
+                        catalogPrice = listPrice,
+                        rated = p.testIds.any { it in rates },
                         selected = selected,
                         onToggle = { if (selected) selectedPanelIds.remove(p.id) else selectedPanelIds.add(p.id) },
                     )
@@ -577,7 +618,9 @@ private fun TestPicker(
                 PickRow(
                     title = t.name,
                     subtitle = listOfNotNull(t.code, t.category, t.sampleType).joinToString(" · "),
-                    price = t.price,
+                    price = LabRepository.resolvePrice(t.price, rates[t.id]),
+                    catalogPrice = t.price,
+                    rated = t.id in rates,
                     selected = selected,
                     onToggle = { if (selected) selectedTestIds.remove(t.id) else selectedTestIds.add(t.id) },
                 )
@@ -587,7 +630,17 @@ private fun TestPicker(
 }
 
 @Composable
-private fun PickRow(title: String, subtitle: String, price: Double, selected: Boolean, onToggle: () -> Unit) {
+private fun PickRow(
+    title: String,
+    subtitle: String,
+    price: Double,
+    selected: Boolean,
+    onToggle: () -> Unit,
+    /** Walk-in list price — struck through when the referrer's rate differs. */
+    catalogPrice: Double = price,
+    /** True when a negotiated rate applies to this row (tags it "rate"). */
+    rated: Boolean = false,
+) {
     Card(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onToggle),
         shape = RoundedCornerShape(10.dp),
@@ -601,7 +654,21 @@ private fun PickRow(title: String, subtitle: String, price: Double, selected: Bo
                 Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                 Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text("₹ ${formatDecimal2(price)}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+            val overridden = rated && kotlin.math.abs(catalogPrice - price) > 0.005
+            Column(horizontalAlignment = Alignment.End) {
+                Text("₹ ${formatDecimal2(price)}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                if (overridden) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            "₹ ${formatDecimal2(catalogPrice)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textDecoration = TextDecoration.LineThrough,
+                        )
+                        RateTag()
+                    }
+                }
+            }
             if (selected) {
                 Icon(Icons.Default.Check, contentDescription = "Selected", tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(start = 8.dp).size(18.dp))
@@ -655,17 +722,46 @@ private fun PrioritySection(priority: String, onPick: (String) -> Unit) {
 }
 
 @Composable
-private fun SelectedTestsSummary(expandedIds: List<String>, testById: Map<String, LabTest>) {
+private fun SelectedTestsSummary(
+    expandedIds: List<String>,
+    testById: Map<String, LabTest>,
+    /** P4: the referrer's negotiated overrides (testId → price). */
+    rates: Map<String, Double> = emptyMap(),
+) {
     if (expandedIds.isEmpty()) return
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("Selected (${expandedIds.size})", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
         expandedIds.forEach { id ->
             val t = testById[id] ?: return@forEach
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(t.name, style = MaterialTheme.typography.bodySmall)
-                Text("₹ ${formatDecimal2(t.price)}", style = MaterialTheme.typography.bodySmall,
+            val price = LabRepository.resolvePrice(t.price, rates[id])
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(t.name, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                if (kotlin.math.abs(t.price - price) > 0.005) {
+                    Text(
+                        "₹ ${formatDecimal2(t.price)}", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textDecoration = TextDecoration.LineThrough,
+                        modifier = Modifier.padding(end = 6.dp),
+                    )
+                }
+                Text("₹ ${formatDecimal2(price)}", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
+    }
+}
+
+/** The small "rate" chip marking a line priced off the referrer's B2B list. */
+@Composable
+internal fun RateTag() {
+    Surface(
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        shape = RoundedCornerShape(6.dp),
+    ) {
+        Text(
+            "rate", style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onTertiaryContainer,
+            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+        )
     }
 }

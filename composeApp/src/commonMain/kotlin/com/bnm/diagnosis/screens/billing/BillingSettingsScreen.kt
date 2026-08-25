@@ -75,6 +75,10 @@ fun BillingSettingsScreen(
     businessId: String,
     onBack: () -> Unit,
     onOpenLicense: (() -> Unit)? = null,
+    /** P4: opens Staff & roles. Null hides the card entirely. */
+    onOpenStaff: (() -> Unit)? = null,
+    /** P4: only the OWNER may manage staff — others see the card, disabled. */
+    staffManageAllowed: Boolean = false,
     /** P3: the lab sync spine — renders the "Sync now" card when provided. */
     labSync: LabSyncEngine? = null,
     /** License-bound lab name — printed on the report letterhead (read-only here). */
@@ -469,6 +473,34 @@ fun BillingSettingsScreen(
                             Text(if (clearing) "Clearing & re-syncing…" else "Clear local data & re-sync")
                         }
                         clearMsg?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
+                    }
+                }
+            }
+
+            // ── Staff & roles (P4) ──
+            if (onOpenStaff != null) {
+                item { Text("Staff & roles", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
+                item {
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                "Who works this lab and what each of them may do. Roles decide access — " +
+                                    "only a pathologist (or the owner) can approve results. People who leave " +
+                                    "are deactivated, never deleted, so their name stays on old reports.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            OutlinedButton(
+                                onClick = onOpenStaff,
+                                enabled = staffManageAllowed,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("Staff & roles") }
+                            if (!staffManageAllowed) Text(
+                                "Only the lab owner can manage staff.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             }

@@ -8,6 +8,13 @@ sealed class Screen(val route: String) {
     data object Login : Screen("login")
     data object BusinessSelector : Screen("business_selector")
 
+    // ── Staff & RBAC (P4) ──
+    /** Seat sign-in gate: sits between the license check and LabHome, and is
+     *  where "Switch user" / "Sign out" / the 15-min auto-lock land. */
+    data object StaffSignIn : Screen("staff_sign_in")
+    /** Staff & roles management (owner only; reached from Settings). */
+    data object Staff : Screen("staff")
+
     // ── LIMS (P1b) — the app's main surface ──
     /** LIMS home: counters + New order + THE status-tabbed worklist panel
      *  (the separate Worklist page is retired) + masters/bills/settings. */
