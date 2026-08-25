@@ -664,6 +664,34 @@ class LabRepository(
             }
         }
 
+        /** Shown wherever a parameter has no range matching this patient. */
+        const val NO_RANGE = "—"
+
+        /**
+         * The range that WILL be frozen onto this parameter's result for this
+         * patient — resolved from the CATALOG test (the authority) against the
+         * patient's age/sex, before any value is entered. Same brain as
+         * [enterResult]: [resolveAgeYears] + [pickRange], no duplicated rules.
+         *
+         * Results entry uses it to show the expected range (and to flag a value
+         * live) WHILE the technician types; the frozen `lab_results.ref_display`
+         * remains the historical truth once a value is committed.
+         */
+        fun rangeFor(test: LabTest, param: TestParameter, patient: Patient): RefRange? {
+            val p = test.parameters.firstOrNull { it.key == param.key } ?: param
+            return pickRange(p.ranges, patient.sex, resolveAgeYears(patient.dob, patient.ageYears))
+        }
+
+        /**
+         * [rangeFor] rendered exactly as the report prints it ("13 - 17",
+         * "< 200", "Non-reactive"), or [NO_RANGE] when this patient's age/sex
+         * matches no range at all.
+         */
+        fun refDisplayFor(test: LabTest, param: TestParameter, patient: Patient): String {
+            val p = test.parameters.firstOrNull { it.key == param.key } ?: param
+            return refDisplay(rangeFor(test, p, patient), p.decimals) ?: NO_RANGE
+        }
+
         /** The range exactly as the report prints it. */
         fun refDisplay(range: RefRange?, decimals: Int): String? = when {
             range == null -> null

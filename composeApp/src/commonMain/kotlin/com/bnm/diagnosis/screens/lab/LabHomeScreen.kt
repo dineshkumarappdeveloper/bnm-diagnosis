@@ -153,6 +153,10 @@ fun LabHomeScreen(
     onNewPatient: () -> Unit = {},
     /** License & devices management (also reachable via Settings). */
     onLicenseDevices: () -> Unit = {},
+    /** Subscription runway notice (null = perpetual or comfortably active). */
+    subscriptionNotice: String? = null,
+    /** True once the subscription is in grace/expired — renders as danger. */
+    subscriptionUrgent: Boolean = false,
     /** License identity for the header chip + License & sync card. */
     licenseMode: String? = null,
     licenseSeats: Int = 0,
@@ -284,6 +288,8 @@ fun LabHomeScreen(
                     // carry the pipeline numbers; the KPI card row is retired) ──
                     AttentionBar(
                         criticalCount = criticals.size,
+                        subscriptionNotice = subscriptionNotice,
+                        subscriptionUrgent = subscriptionUrgent,
                         enteredCount = statusCounts[LabStatus.ENTERED] ?: 0L,
                         emrPending = emrPending,
                         syncEnabled = syncState != null && !syncState.disabled,
@@ -337,6 +343,8 @@ fun LabHomeScreen(
                 // chips below carry the pipeline numbers) ──
                 AttentionBar(
                     criticalCount = criticals.size,
+                    subscriptionNotice = subscriptionNotice,
+                    subscriptionUrgent = subscriptionUrgent,
                     enteredCount = statusCounts[LabStatus.ENTERED] ?: 0L,
                     emrPending = emrPending,
                     syncEnabled = syncState != null && !syncState.disabled,
@@ -406,6 +414,8 @@ fun LabHomeScreen(
 @Composable
 private fun AttentionBar(
     criticalCount: Int,
+    subscriptionNotice: String? = null,
+    subscriptionUrgent: Boolean = false,
     enteredCount: Long,
     emrPending: Long,
     syncEnabled: Boolean,
@@ -415,11 +425,17 @@ private fun AttentionBar(
 ) {
     val c = AppTheme.colors
     val anyAlert = criticalCount > 0 || enteredCount > 0 ||
-        (emrPending > 0 && syncEnabled) || syncDisabled
+        (emrPending > 0 && syncEnabled) || syncDisabled || subscriptionNotice != null
     FlowRow(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        if (subscriptionNotice != null) AttentionCard(
+            icon = Icons.Outlined.WarningAmber,
+            bg = if (subscriptionUrgent) c.dangerSoft else c.warningSoft,
+            fg = if (subscriptionUrgent) c.danger else c.warning,
+            label = subscriptionNotice,
+        )
         if (criticalCount > 0) AttentionCard(
             icon = Icons.Outlined.WarningAmber, bg = c.dangerSoft, fg = c.danger,
             count = criticalCount.toLong(),

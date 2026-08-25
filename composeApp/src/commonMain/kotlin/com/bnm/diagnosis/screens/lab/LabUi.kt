@@ -33,6 +33,7 @@ import com.bnm.diagnosis.staff.Staff
 import com.russhwolf.settings.Settings
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
+import com.bnm.diagnosis.ui.theme.AppTheme
 
 /** Persisted device-local LIMS UI preferences (same Settings store as
  *  BillingPrefs/DiagnosisPrefs — new keys, no overlap). */
@@ -128,13 +129,29 @@ fun StaffHeaderChip(
 @Composable
 fun FlagChip(flag: String?, modifier: Modifier = Modifier) {
     if (flag.isNullOrBlank()) return
+    // Semantic theme tokens (NOT literals) so flags stay legible in dark mode.
+    val c = AppTheme.colors
     val (bg, fg) = when (flag) {
-        "N" -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
-        "L", "H", "A" -> Color(0xFFFFF3E0) to Color(0xFFE65100)      // amber
-        "CL", "CH" -> Color(0xFFFFEBEE) to Color(0xFFC62828)          // red (critical)
+        "L", "H", "A" -> c.warningSoft to c.warning
+        "CL", "CH" -> c.dangerSoft to c.danger
         else -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
     }
     Box(modifier.background(bg, RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 2.dp)) {
         Text(flag, color = fg, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+/** Results-grid flag cell: the [FlagChip] plus the word CRITICAL for CL/CH — a
+ *  panicking value must never read as "just another two-letter code". */
+@Composable
+fun FlagCell(flag: String?, modifier: Modifier = Modifier) {
+    if (flag.isNullOrBlank()) return
+    val critical = flag == "CL" || flag == "CH"
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        FlagChip(flag)
+        if (critical) {
+            Text("CRITICAL", color = Color(0xFFC62828), fontSize = 9.sp, fontWeight = FontWeight.Bold,
+                maxLines = 1, overflow = TextOverflow.Clip)
+        }
     }
 }

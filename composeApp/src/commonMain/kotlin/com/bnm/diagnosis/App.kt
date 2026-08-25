@@ -80,6 +80,7 @@ import com.bnm.diagnosis.ui.theme.AppTheme
 import com.bnm.diagnosis.ui.theme.ThemeManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import com.bnm.diagnosis.license.subscriptionStatus
 
 @Composable
 fun App() {
@@ -357,6 +358,14 @@ fun App() {
                             if (licState.blocked) LicenseBlockedBanner()
                             Box(Modifier.fillMaxWidth().weight(1f)) {
                                 LabHomeScreen(
+                    subscriptionNotice = run {
+                        val sub = licenseManager.subscriptionStatus()
+                        sub.notice
+                    },
+                    subscriptionUrgent = licenseManager.subscriptionStatus().state in setOf(
+                        com.bnm.diagnosis.license.SubscriptionState.IN_GRACE,
+                        com.bnm.diagnosis.license.SubscriptionState.EXPIRED,
+                    ),
                                     labName = labName,
                                     licenseBlocked = licState.blocked,
                                     accessionNotice = lastAccession,
