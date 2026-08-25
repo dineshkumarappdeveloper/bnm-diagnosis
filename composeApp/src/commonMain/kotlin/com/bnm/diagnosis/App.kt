@@ -15,7 +15,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -56,10 +58,16 @@ import com.bnm.diagnosis.screens.billing.CreateInvoiceScreen
 import com.bnm.diagnosis.screens.billing.CustomerDetailsScreen
 import com.bnm.diagnosis.screens.billing.InvoiceDetailScreen
 import com.bnm.diagnosis.screens.business.BusinessSelectorScreen
+import com.bnm.diagnosis.screens.lab.CatalogScreen
+import com.bnm.diagnosis.screens.lab.LabHomeScreen
+import com.bnm.diagnosis.screens.lab.NewOrderScreen
+import com.bnm.diagnosis.screens.lab.OrderDetailScreen
+import com.bnm.diagnosis.screens.lab.PatientsScreen
+import com.bnm.diagnosis.screens.lab.ReferrersScreen
+import com.bnm.diagnosis.screens.lab.WorklistScreen
 import com.bnm.diagnosis.screens.license.ActivationScreen
 import com.bnm.diagnosis.screens.license.LicenseDevicesScreen
 import com.bnm.diagnosis.screens.login.LoginScreen
-import com.bnm.diagnosis.screens.main.BillingHomeScreen
 import com.bnm.diagnosis.screens.main.BillsScreen
 import com.bnm.diagnosis.ui.theme.AppTheme
 import com.bnm.diagnosis.ui.theme.ThemeManager
@@ -162,8 +170,11 @@ fun App() {
             // from the entry flow — license activation replaces pairing.
             key(isLoggedIn) {
                 val navController = rememberNavController()
+                // Accession of the order just registered (P1b) — shown as the
+                // confirmation snackbar once LabHome is back on screen.
+                var lastAccession by remember { mutableStateOf<String?>(null) }
                 val startDestination = remember(isLoggedIn) {
-                    if (!licenseManager.isLicensed()) Screen.Activation.route else Screen.Main.route
+                    if (!licenseManager.isLicensed()) Screen.Activation.route else Screen.LabHome.route
                 }
                 NavHost(navController = navController, startDestination = startDestination) {
 
@@ -179,7 +190,7 @@ fun App() {
                                 }
                             },
                             onEnterApp = {
-                                navController.navigate(Screen.Main.route) {
+                                navController.navigate(Screen.LabHome.route) {
                                     popUpTo(Screen.Activation.route) { inclusive = true }
                                 }
                             },
@@ -220,7 +231,7 @@ fun App() {
                             authRepository = authRepository,
                             onBusinessSelected = { bid, name ->
                                 authRepository.saveSelectedBusiness(bid, name)
-                                navController.navigate(Screen.Main.route) {
+                                navController.navigate(Screen.LabHome.route) {
                                     popUpTo(Screen.BusinessSelector.route) { inclusive = true }
                                 }
                             },
@@ -228,14 +239,19 @@ fun App() {
                         )
                     }
 
-                    composable(Screen.Main.route) {
+                    // ── LIMS home (P1b) — the app's main surface. The legacy
+                    // billing home (product grid + ≥840dp inline cart) is NOT
+                    // registered anymore, which also closes the P2 gate hole:
+                    // a license-blocked device now has no cart to save from —
+                    // NewOrder is the only entry into new work, and it's gated.
+                    composable(Screen.LabHome.route) {
                         // Licensed devices don't need a business pick: a licensed
                         // standalone lab runs fully offline-first (blank id) and a
                         // BNM-bound license carries its business_id.
                         val businessId = authRepository.getSelectedBusinessId()
                             ?: licState.businessId
                             ?: ""
-                        val businessName = licState.labName
+                        val labName = licState.labName
                             ?: authRepository.getSelectedBusinessName()
                             ?: "BNM Diagnosis"
 
@@ -249,20 +265,80 @@ fun App() {
                         Column(Modifier.fillMaxSize()) {
                             if (licState.blocked) LicenseBlockedBanner()
                             Box(Modifier.fillMaxWidth().weight(1f)) {
-                                BillingHomeScreen(
-                                    businessId = businessId,
-                                    businessName = businessName,
-                                    onOpenInvoice = { id -> navController.navigate(Screen.InvoiceDetail.createRoute(id)) },
+                                LabHomeScreen(
+                                    labName = labName,
+                                    licenseBlocked = licState.blocked,
+                                    accessionNotice = lastAccession,
+                                    onNoticeShown = { lastAccession = null },
                                     // License-blocked devices keep everything readable/
                                     // printable/exportable but can't START new work.
-                                    onViewCart = { if (!licState.blocked) navController.navigate(Screen.Cart.route) },
-                                    onSaved = { id -> navController.navigate(Screen.InvoiceDetail.createRoute(id)) },
+                                    onNewOrder = { if (!licState.blocked) navController.navigate(Screen.NewOrder.route) },
+                                    onWorklist = { tab -> navController.navigate(Screen.Worklist.createRoute(tab)) },
+                                    onPatients = { navController.navigate(Screen.Patients.route) },
+                                    onReferrers = { navController.navigate(Screen.Referrers.route) },
+                                    onCatalog = { navController.navigate(Screen.Catalog.route) },
                                     onBills = { navController.navigate(Screen.Bills.route) },
                                     onSettings = { navController.navigate(Screen.Settings.route) },
-                                    onManual = { if (!licState.blocked) navController.navigate(Screen.CreateInvoice.route) },
                                 )
                             }
                         }
+                    }
+
+                    composable(Screen.NewOrder.route) {
+                        if (licState.blocked) {
+                            LicenseBlockedNotice(onBack = { navController.popBackStack() })
+                            return@composable
+                        }
+                        val businessId = authRepository.getSelectedBusinessId() ?: licState.businessId ?: ""
+                        val labName = licState.labName ?: authRepository.getSelectedBusinessName() ?: "BNM Diagnosis"
+                        NewOrderScreen(
+                            businessId = businessId,
+                            labName = labName,
+                            onBack = { navController.popBackStack() },
+                            onFinished = { accession, invoiceId ->
+                                lastAccession = accession
+                                navController.popBackStack() // → LabHome (snackbar shows the accession)
+                                invoiceId?.let { navController.navigate(Screen.InvoiceDetail.createRoute(it)) }
+                            },
+                        )
+                    }
+
+                    composable(
+                        route = Screen.Worklist.route,
+                        arguments = listOf(navArgument("tab") { type = NavType.StringType })
+                    ) { backStack ->
+                        val tab = NavType.StringType.get(backStack.arguments!!, "tab") ?: "registered"
+                        WorklistScreen(
+                            initialStatus = tab,
+                            onOpenOrder = { id -> navController.navigate(Screen.LabOrderDetail.createRoute(id)) },
+                            onBack = { navController.popBackStack() },
+                        )
+                    }
+
+                    composable(
+                        route = Screen.LabOrderDetail.route,
+                        arguments = listOf(navArgument("orderId") { type = NavType.StringType })
+                    ) { backStack ->
+                        val orderId = NavType.StringType.get(backStack.arguments!!, "orderId") ?: return@composable
+                        val labName = licState.labName ?: authRepository.getSelectedBusinessName() ?: "BNM Diagnosis"
+                        OrderDetailScreen(
+                            orderId = orderId,
+                            labName = labName,
+                            onBack = { navController.popBackStack() },
+                            onOpenInvoice = { id -> navController.navigate(Screen.InvoiceDetail.createRoute(id)) },
+                        )
+                    }
+
+                    composable(Screen.Patients.route) {
+                        PatientsScreen(onBack = { navController.popBackStack() })
+                    }
+
+                    composable(Screen.Referrers.route) {
+                        ReferrersScreen(onBack = { navController.popBackStack() })
+                    }
+
+                    composable(Screen.Catalog.route) {
+                        CatalogScreen(onBack = { navController.popBackStack() })
                     }
 
                     composable(Screen.CreateInvoice.route) {
