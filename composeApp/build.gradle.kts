@@ -34,6 +34,7 @@ kotlin {
         androidMain.dependencies {
             implementation(libs.compose.uiToolingPreview)
             implementation(libs.androidx.activity.compose)
+            implementation(libs.androidx.core.ktx) // FileProvider (open generated report PDFs)
             implementation(libs.ktor.client.okhttp)
             implementation(libs.sqldelight.android.driver)
         }
@@ -47,6 +48,7 @@ kotlin {
                 implementation(libs.ktor.client.okhttp)
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.8.0")
                 implementation(libs.sqldelight.sqlite.driver)
+                implementation(libs.pdfbox) // styled A4 lab-report PDFs (report/ReportPdf.desktop.kt)
             }
         }
         commonMain.dependencies {
@@ -157,7 +159,8 @@ compose.desktop {
             //   java.sql        → SQLDelight JDBC driver ("java/sql/DriverManager" crash)
             //   java.naming     → OkHttp/Ktor TLS internals
             //   jdk.unsupported → sun.misc.Unsafe (sqlite-jdbc / okio)
-            modules("java.sql", "java.naming", "jdk.unsupported")
+            //   java.logging    → PDFBox / commons-logging (JUL backend)
+            modules("java.sql", "java.naming", "jdk.unsupported", "java.logging")
             description = "BNM Diagnosis — offline-first diagnostic laboratory (LIMS)"
             vendor = "BNM"
             windows {

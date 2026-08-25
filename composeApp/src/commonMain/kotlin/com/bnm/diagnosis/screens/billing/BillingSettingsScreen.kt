@@ -1,6 +1,10 @@
 package com.bnm.diagnosis.screens.billing
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -9,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AlertDialog
@@ -39,6 +44,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.bnm.diagnosis.api.BillingApi
@@ -49,6 +55,11 @@ import com.bnm.diagnosis.chat.LocalSyncEngine
 import com.bnm.diagnosis.chat.currentFy
 import com.bnm.diagnosis.print.BtPrinter
 import com.bnm.diagnosis.print.EscPos
+import com.bnm.diagnosis.report.ReportPalette
+import com.bnm.diagnosis.report.ReportPrefs
+import com.bnm.diagnosis.report.openPdf
+import com.bnm.diagnosis.report.sampleReportDoc
+import com.bnm.diagnosis.report.writeLabReportPdf
 import com.bnm.diagnosis.sync.LabSyncEngine
 import com.bnm.diagnosis.print.printReceipt
 import com.bnm.diagnosis.print.printToNetworkPrinter
@@ -66,6 +77,8 @@ fun BillingSettingsScreen(
     onOpenLicense: (() -> Unit)? = null,
     /** P3: the lab sync spine — renders the "Sync now" card when provided. */
     labSync: LabSyncEngine? = null,
+    /** License-bound lab name — printed on the report letterhead (read-only here). */
+    labName: String = "BNM Diagnosis",
 ) {
     val repo = LocalBillingRepository.current
     val scope = rememberCoroutineScope()
@@ -105,6 +118,18 @@ fun BillingSettingsScreen(
     var btAddress by remember { mutableStateOf(prefs.printerBtAddress) }
     var btName by remember { mutableStateOf(prefs.printerBtName) }
     var showBtPicker by remember { mutableStateOf(false) }
+
+    // ── Report & letterhead (A4 PDF reports) ──
+    val reportPrefs = remember { ReportPrefs() }
+    var lhMode by remember { mutableStateOf(reportPrefs.letterheadMode) }
+    var headerMm by remember { mutableStateOf(reportPrefs.headerMm.toString()) }
+    var footerMm by remember { mutableStateOf(reportPrefs.footerMm.toString()) }
+    var lhAddress by remember { mutableStateOf(reportPrefs.addressLine) }
+    var lhPhone by remember { mutableStateOf(reportPrefs.phoneLine) }
+    var lhEmail by remember { mutableStateOf(reportPrefs.emailLine) }
+    var lhExtra by remember { mutableStateOf(reportPrefs.extraLine) }
+    var accent by remember { mutableStateOf(reportPrefs.accentRgb) }
+    var reportMsg by remember { mutableStateOf<String?>(null) }
 
     if (showBtPicker) {
         // Swap the whole screen for the picker page; back restores the settings screen.
@@ -272,6 +297,109 @@ fun BillingSettingsScreen(
                 }
             }
 
+            // ── Report & letterhead (A4 PDF lab reports) ──
+            item { Text("Report & letterhead", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            "A4 lab reports print as a styled PDF. The lab name on the letterhead is always \"$labName\" (set by your license).",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text("Letterhead", style = MaterialTheme.typography.labelLarge)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ChoiceChip("Print letterhead", lhMode == "printed") {
+                                lhMode = "printed"; reportPrefs.letterheadMode = "printed"
+                            }
+                            ChoiceChip("Pre-printed letterpad", lhMode == "preprinted") {
+                                lhMode = "preprinted"; reportPrefs.letterheadMode = "preprinted"
+                            }
+                        }
+                        Text(
+                            if (lhMode == "preprinted")
+                                "Nothing is drawn in the header/footer areas — the space below is reserved blank so results land under your letterpad's printed header."
+                            else
+                                "The app draws the letterhead (accent band, lab name, the lines below) inside the header space on every page.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = headerMm,
+                                onValueChange = { v ->
+                                    headerMm = v.filter { it.isDigit() }.take(3)
+                                    headerMm.toIntOrNull()?.let { reportPrefs.headerMm = it }
+                                },
+                                label = { Text("Header space (mm)") }, singleLine = true,
+                                modifier = Modifier.weight(1f),
+                            )
+                            OutlinedTextField(
+                                value = footerMm,
+                                onValueChange = { v ->
+                                    footerMm = v.filter { it.isDigit() }.take(3)
+                                    footerMm.toIntOrNull()?.let { reportPrefs.footerMm = it }
+                                },
+                                label = { Text("Footer space (mm)") }, singleLine = true,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        OutlinedTextField(
+                            value = lhAddress, onValueChange = { lhAddress = it; reportPrefs.addressLine = it },
+                            label = { Text("Address line") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = lhPhone, onValueChange = { lhPhone = it; reportPrefs.phoneLine = it },
+                                label = { Text("Phone") }, singleLine = true, modifier = Modifier.weight(1f),
+                            )
+                            OutlinedTextField(
+                                value = lhEmail, onValueChange = { lhEmail = it; reportPrefs.emailLine = it },
+                                label = { Text("Email") }, singleLine = true, modifier = Modifier.weight(1f),
+                            )
+                        }
+                        OutlinedTextField(
+                            value = lhExtra, onValueChange = { lhExtra = it; reportPrefs.extraLine = it },
+                            label = { Text("Extra line (NABL / GSTIN / tagline)") }, singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Text("Accent colour", style = MaterialTheme.typography.labelLarge)
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            ReportPalette.presets.forEach { (name, rgb) ->
+                                AccentSwatch(
+                                    rgb = rgb, name = name, selected = accent == rgb,
+                                    onClick = { accent = rgb; reportPrefs.accentRgb = rgb },
+                                )
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    reportMsg = "Rendering sample…"
+                                    reportMsg = try {
+                                        withContext(Dispatchers.Default) {
+                                            val path = writeLabReportPdf(
+                                                sampleReportDoc(
+                                                    labName = labName,
+                                                    mode = reportPrefs.mode(),
+                                                    headerMm = reportPrefs.headerMm.toFloat(),
+                                                    footerMm = reportPrefs.footerMm.toFloat(),
+                                                    accentRgb = reportPrefs.accentRgb,
+                                                    letterheadLines = reportPrefs.letterheadLines(),
+                                                )
+                                            )
+                                            if (path.isBlank()) "PDF reports arrive on iOS later" else openPdf(path)
+                                        }
+                                    } catch (e: Throwable) {
+                                        "Preview failed: ${e.message}"
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Preview sample report") }
+                        reportMsg?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
+                    }
+                }
+            }
+
             // ── Barcode scanner ──
             item { Text("Barcode scanner", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
             item {
@@ -430,6 +558,26 @@ private fun SettingRow(label: String, checked: Boolean, onChange: (Boolean) -> U
 @Composable
 private fun ChoiceChip(label: String, selected: Boolean, onClick: () -> Unit) {
     FilterChip(selected = selected, onClick = onClick, label = { Text(label) })
+}
+
+/** One report accent-colour preset: a filled circle, ringed when selected. */
+@Composable
+private fun AccentSwatch(rgb: Int, name: String, selected: Boolean, onClick: () -> Unit) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Box(
+            Modifier
+                .size(34.dp)
+                .then(
+                    if (selected) Modifier.border(3.dp, MaterialTheme.colorScheme.primary, CircleShape)
+                    else Modifier.border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
+                )
+                .padding(4.dp)
+                .background(Color(0xFF000000.toInt() or rgb), CircleShape)
+                .clickable(onClick = onClick),
+        )
+        Text(name, style = MaterialTheme.typography.labelSmall,
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+    }
 }
 
 private fun sampleReceipt(width: Int): String = buildString {

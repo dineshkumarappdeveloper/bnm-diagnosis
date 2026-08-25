@@ -472,6 +472,7 @@ fun App() {
                             onBack = { navController.popBackStack() },
                             onOpenLicense = { navController.navigate(Screen.LicenseDevices.route) },
                             labSync = labSync,
+                            labName = licState.labName ?: authRepository.getSelectedBusinessName() ?: "BNM Diagnosis",
                         )
                     }
                 }

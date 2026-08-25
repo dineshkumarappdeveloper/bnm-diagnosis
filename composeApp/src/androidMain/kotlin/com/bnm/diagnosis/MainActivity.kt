@@ -16,6 +16,7 @@ class MainActivity : ComponentActivity() {
         com.bnm.diagnosis.connectivity.initConnectivityContext(this)
         com.bnm.diagnosis.print.initPrintContext(this)
         com.bnm.diagnosis.print.initBtPrinterContext(this)
+        com.bnm.diagnosis.report.initReportContext(this) // A4 PDF reports (open/print)
         setContent { App() }
     }
 }

@@ -60,9 +60,14 @@ import com.bnm.diagnosis.lab.Referrer
 import com.bnm.diagnosis.lab.TestParameter
 import com.bnm.diagnosis.print.BtPrinter
 import com.bnm.diagnosis.print.EscPos
-import com.bnm.diagnosis.print.printReceipt
 import com.bnm.diagnosis.print.printToNetworkPrinter
 import com.bnm.diagnosis.print.renderLabReport
+import com.bnm.diagnosis.report.ReportDoc
+import com.bnm.diagnosis.report.ReportPrefs
+import com.bnm.diagnosis.report.buildReportDoc
+import com.bnm.diagnosis.report.openPdf
+import com.bnm.diagnosis.report.printPdf
+import com.bnm.diagnosis.report.writeLabReportPdf
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -100,6 +105,7 @@ fun OrderDetailScreen(
     var message by remember { mutableStateOf<String?>(null) }
     var showApprove by remember { mutableStateOf(false) }
     var showCancel by remember { mutableStateOf(false) }
+    var showPrintChooser by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
 
     LaunchedEffect(orderId, reloadTick) {
@@ -118,35 +124,78 @@ fun OrderDetailScreen(
     val enteredCount = results.values.count { it.isEntered }
     val totalCount = results.size
 
-    /** Render + print the report on the configured transport; first successful
-     *  print of an approved order marks it `reported`. Reprints always allowed. */
-    suspend fun printReport(): Boolean {
+    /** Catalog parameter display name for a result row (raw key fallback). */
+    val nameOf: (LabResult) -> String = { r ->
+        paramsByTest[r.testId]?.firstOrNull { it.key == r.parameterKey }?.name ?: r.parameterKey
+    }
+
+    /** First successful print/open of an APPROVED order marks it `reported`.
+     *  Reprints stay unlimited (reported/delivered orders reprint freely). */
+    suspend fun markReportedIfApproved() {
+        val ord = order ?: return
+        if (ord.status == LabStatus.APPROVED) {
+            repo.setOrderStatus(ord.id, LabStatus.REPORTED)
+            reloadTick++
+        }
+    }
+
+    /** Assemble the styled-A4 document from the frozen results + this device's
+     *  letterhead prefs (lab name ALWAYS the license-bound one). */
+    fun buildDoc(): ReportDoc? {
+        val ord = order ?: return null
+        val pat = patient ?: return null
+        val rp = ReportPrefs()
+        return buildReportDoc(
+            labName = labName, order = ord, patient = pat, tests = tests,
+            results = results.values.toList(), referrerName = referrer?.name,
+            mode = rp.mode(), headerMm = rp.headerMm.toFloat(), footerMm = rp.footerMm.toFloat(),
+            accentRgb = rp.accentRgb, letterheadLines = rp.letterheadLines(),
+            paramName = nameOf,
+        )
+    }
+
+    /** Styled A4 PDF path: write, then open in the viewer or send to the OS
+     *  print pipeline. Success (not cancelled/failed) marks approved → reported. */
+    suspend fun pdfReport(print: Boolean): Boolean {
+        val doc = buildDoc() ?: return false
+        val status = withContext(Dispatchers.Default) {
+            val path = writeLabReportPdf(doc)
+            when {
+                path.isBlank() -> "PDF reports arrive on iOS later"
+                print -> printPdf(path)
+                else -> openPdf(path)
+            }
+        }
+        message = status
+        val ok = !status.contains("failed", ignoreCase = true) &&
+            !status.contains("cancelled", ignoreCase = true) &&
+            !status.contains("not found", ignoreCase = true) &&
+            !status.contains("later", ignoreCase = true)
+        if (ok) markReportedIfApproved()
+        return ok
+    }
+
+    /** Legacy monospace slip on the configured LAN/BT thermal printer (the
+     *  renderLabReport text path — kept for sample-tube counter slips). */
+    suspend fun printThermalSlip(): Boolean {
         val ord = order ?: return false
         val pat = patient ?: return false
         val bp = BillingPrefs()
-        val thermal = bp.printerConnection == "network" || bp.printerConnection == "bluetooth"
-        val width = if (thermal) bp.paperWidth else 64
-        val nameOf: (LabResult) -> String = { r ->
-            paramsByTest[r.testId]?.firstOrNull { it.key == r.parameterKey }?.name ?: r.parameterKey
-        }
         val result = withContext(Dispatchers.Default) {
             val body = renderLabReport(
                 labName = labName, order = ord, patient = pat, tests = tests,
                 results = results.values.toList(), referrerName = referrer?.name,
-                widthChars = width, paramName = nameOf,
+                widthChars = bp.paperWidth, paramName = nameOf,
             )
             when (bp.printerConnection) {
                 "network" -> printToNetworkPrinter(bp.printerIp, bp.printerPort, EscPos.encode(body))
                 "bluetooth" -> BtPrinter.getInstance().printBytes(bp.printerBtAddress, EscPos.encode(body))
-                else -> printReceipt("Report ${ord.accessionNo}", body)
+                else -> "No thermal printer configured"
             }
         }
-        val ok = result.startsWith("Sent to") || !thermal
+        val ok = result.startsWith("Sent to")
         message = if (ok) "Report sent to printer" else result
-        if (ok && ord.status == LabStatus.APPROVED) {
-            repo.setOrderStatus(ord.id, LabStatus.REPORTED)
-            reloadTick++
-        }
+        if (ok) markReportedIfApproved()
         return ok
     }
 
@@ -207,14 +256,7 @@ fun OrderDetailScreen(
                                 }
                             },
                             onApprove = { showApprove = true },
-                            onPrint = {
-                                if (busy) return@ActionBar
-                                busy = true; message = "Printing…"
-                                scope.launch {
-                                    try { printReport() } catch (e: Throwable) { message = "Print failed: ${e.message}" }
-                                    busy = false
-                                }
-                            },
+                            onPrint = { if (!busy) showPrintChooser = true },
                         )
                     }
                 }
@@ -310,6 +352,49 @@ fun OrderDetailScreen(
                 }) { Text("Approve") }
             },
             dismissButton = { TextButton(onClick = { showApprove = false }) { Text("Cancel") } },
+        )
+    }
+
+    // ── Print chooser: styled A4 PDF (open / print) + optional thermal slip ──
+    if (showPrintChooser && o != null) {
+        val thermalAvailable = remember {
+            val conn = BillingPrefs().printerConnection
+            conn == "network" || conn == "bluetooth"
+        }
+        fun run(block: suspend () -> Unit) {
+            showPrintChooser = false
+            if (busy) return
+            busy = true; message = "Preparing report…"
+            scope.launch {
+                try { block() } catch (e: Throwable) { message = "Report failed: ${e.message}" }
+                busy = false
+            }
+        }
+        AlertDialog(
+            onDismissRequest = { showPrintChooser = false },
+            title = { Text("Report ${o.accessionNo}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "The A4 report uses this device's letterhead settings (Settings → Report & letterhead).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Button(onClick = { run { pdfReport(print = false) } }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Open PDF")
+                    }
+                    Button(onClick = { run { pdfReport(print = true) } }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Print")
+                    }
+                    if (thermalAvailable) {
+                        OutlinedButton(onClick = { run { printThermalSlip() } }, modifier = Modifier.fillMaxWidth()) {
+                            Text("Thermal slip")
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { showPrintChooser = false }) { Text("Close") } },
         )
     }
 

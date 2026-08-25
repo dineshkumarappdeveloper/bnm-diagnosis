@@ -21,6 +21,7 @@ kotlinx-serialization = "1.7.1"
 ktor = "3.1.0"
 material3 = "1.10.0-alpha05"
 multiplatform-settings = "1.1.1"
+pdfbox = "2.0.33"
 qrose = "1.0.1"
 sqldelight = "2.3.2"
 googleFirebaseAppdistribution = "5.2.1"
@@ -57,6 +58,8 @@ ktor-client-logging = { module = "io.ktor:ktor-client-logging", version.ref = "k
 ktor-network = { module = "io.ktor:ktor-network", version.ref = "ktor" }
 ktor-serialization-kotlinx-json = { module = "io.ktor:ktor-serialization-kotlinx-json", version.ref = "ktor" }
 multiplatform-settings = { module = "com.russhwolf:multiplatform-settings", version.ref = "multiplatform-settings" }
+# Apache PDFBox (desktop only) — styled A4 lab-report PDFs (battle-tested 2.0.x line)
+pdfbox = { module = "org.apache.pdfbox:pdfbox", version.ref = "pdfbox" }
 # QR rendering (pure-KMM Compose painter) — UPI pay QR + payment-link QR
 qrose = { module = "io.github.alexzhirkevich:qrose", version.ref = "qrose" }
 # SQLDelight — local DB for offline-first chat (chat-only scope)
