@@ -3,6 +3,7 @@ package com.bnm.diagnosis.screens.lab
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -12,19 +13,22 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.automirrored.outlined.ListAlt
 import androidx.compose.material.icons.automirrored.outlined.ReceiptLong
 import androidx.compose.material.icons.outlined.Biotech
 import androidx.compose.material.icons.outlined.Call
@@ -42,6 +46,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -77,6 +82,7 @@ import com.bnm.diagnosis.lab.LocalLabRepository
 import com.bnm.diagnosis.lab.WorklistEntry
 import com.bnm.diagnosis.sync.LabSyncEngine
 import com.bnm.diagnosis.ui.theme.AppTheme
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
@@ -85,13 +91,38 @@ import kotlinx.datetime.toLocalDateTime
  *  dashboard; below it, the stacked phone layout. */
 private val WIDE_BREAKPOINT = 900.dp
 
+/** One home-worklist tab: label + the statuses it aggregates. `statuses = null`
+ *  is the "Open" pipeline view (openOrdersFlow: registered → approved).
+ *  "Registered" folds in `collected` so sample-collected orders never vanish
+ *  between tabs. */
+private data class HomeWorklistTab(val label: String, val statuses: List<String>?)
+
+private val HOME_TABS = listOf(
+    HomeWorklistTab("Open", null),
+    HomeWorklistTab("Registered", listOf(LabStatus.REGISTERED, LabStatus.COLLECTED)),
+    HomeWorklistTab("In progress", listOf(LabStatus.IN_PROGRESS)),
+    HomeWorklistTab("Entered", listOf(LabStatus.ENTERED)),
+    HomeWorklistTab("Verified", listOf(LabStatus.VERIFIED)),
+    HomeWorklistTab("Approved", listOf(LabStatus.APPROVED)),
+    HomeWorklistTab("Reported", listOf(LabStatus.REPORTED)),
+)
+
+// KPI cards / stat chips jump straight to a tab (local state, no navigation).
+private const val TAB_REGISTERED = 1
+private const val TAB_IN_PROGRESS = 2
+private const val TAB_ENTERED = 3
+private const val TAB_APPROVED = 5
+private const val TAB_REPORTED = 6
+
 /**
  * LIMS home — the app's main surface. Desktop (primary target) gets a REAL
  * dashboard: header band with the lab identity + New order/New patient CTAs,
- * a KPI row of today's pipeline counters (deep-linked into the worklist), an
- * open-orders table, and a right rail with critical results, the EMR inbox,
- * license & sync, and shortcuts. Narrow screens (Android) keep the stacked
- * layout. 100% offline (LabRepository); sync/EMR/billing bits are additive.
+ * a KPI row of today's pipeline counters (each switches the worklist tab), THE
+ * worklist itself — a status-tabbed table filling the viewport (the separate
+ * Worklist page is retired) — and a right rail with critical results, the EMR
+ * inbox, license & sync, and shortcuts. Narrow screens (Android) keep the
+ * stacked layout with the same tab chips over a compact list. 100% offline
+ * (LabRepository); sync/EMR/billing bits are additive.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -101,7 +132,6 @@ fun LabHomeScreen(
     accessionNotice: String?,
     onNoticeShown: () -> Unit,
     onNewOrder: () -> Unit,
-    onWorklist: (tab: String) -> Unit,
     onPatients: () -> Unit,
     onReferrers: () -> Unit,
     onCatalog: () -> Unit,
@@ -128,9 +158,23 @@ fun LabHomeScreen(
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val emrPending by remember(repo) { repo.emrPendingCountFlow() }.collectAsState(0L)
-    val openOrders by remember(repo) { repo.openOrdersFlow(12) }.collectAsState(emptyList())
     val criticals by remember(repo) { repo.criticalsTodayFlow(6) }.collectAsState(emptyList())
     val syncState = if (labSync != null) labSync.state.collectAsState().value else null
+
+    // The worklist IS the home's main panel: one selected tab, fully reactive.
+    // "Open" rides openOrdersFlow (uncapped — the panel scrolls internally);
+    // status tabs merge their worklistFlow(s) (Registered folds in collected).
+    var worklistTab by remember { mutableStateOf(0) }
+    val tabEntries by remember(repo, worklistTab) {
+        val statuses = HOME_TABS[worklistTab].statuses
+        if (statuses == null) repo.openOrdersFlow(Long.MAX_VALUE)
+        else statuses.map { repo.worklistFlow(it) }
+            .reduce { acc, f -> acc.combine(f) { a, b -> a + b } }
+    }.collectAsState(emptyList())
+    // distinctBy guards the brief double-emission while an order hops status.
+    val worklist = remember(tabEntries) {
+        tabEntries.distinctBy { it.order.id }.sortedByDescending { it.order.createdAt }
+    }
 
     // Today's pipeline counters (orders CREATED today, per stage).
     var registered by remember { mutableStateOf(0L) }
@@ -173,11 +217,11 @@ fun LabHomeScreen(
             snackbarHost = { SnackbarHost(snackbar) },
         ) { inner ->
             if (wide) Column(
-                Modifier.padding(inner).fillMaxSize().verticalScroll(rememberScrollState()),
+                Modifier.padding(inner).fillMaxSize(),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Column(
-                    Modifier.widthIn(max = 1400.dp).fillMaxWidth()
+                    Modifier.widthIn(max = 1400.dp).fillMaxWidth().weight(1f)
                         .padding(horizontal = 24.dp, vertical = 20.dp),
                     verticalArrangement = Arrangement.spacedBy(20.dp),
                 ) {
@@ -217,28 +261,34 @@ fun LabHomeScreen(
                     // ── KPI row: today's pipeline → the matching worklist tab ──
                     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         KpiCard("Registered", registered, Icons.Outlined.PersonAddAlt, KpiTint.Neutral,
-                            Modifier.weight(1f)) { onWorklist(LabStatus.REGISTERED) }
+                            Modifier.weight(1f)) { worklistTab = TAB_REGISTERED }
                         KpiCard("In progress", inProgress, Icons.Outlined.Science, KpiTint.Info,
-                            Modifier.weight(1f)) { onWorklist(LabStatus.IN_PROGRESS) }
+                            Modifier.weight(1f)) { worklistTab = TAB_IN_PROGRESS }
                         KpiCard("Awaiting verify", awaitingVerify, Icons.Outlined.PendingActions, KpiTint.Warning,
-                            Modifier.weight(1f)) { onWorklist(LabStatus.ENTERED) }
+                            Modifier.weight(1f)) { worklistTab = TAB_ENTERED }
                         KpiCard("Approved", approved, Icons.Outlined.TaskAlt, KpiTint.Success,
-                            Modifier.weight(1f)) { onWorklist(LabStatus.APPROVED) }
+                            Modifier.weight(1f)) { worklistTab = TAB_APPROVED }
                         KpiCard("Reported", reported, Icons.Outlined.Description, KpiTint.Teal,
-                            Modifier.weight(1f)) { onWorklist(LabStatus.REPORTED) }
+                            Modifier.weight(1f)) { worklistTab = TAB_REPORTED }
                         billsToday?.let { bills ->
                             KpiCard("Bills today", bills, Icons.AutoMirrored.Outlined.ReceiptLong, KpiTint.Neutral,
                                 Modifier.weight(1f)) { onBills() }
                         }
                     }
 
-                    // ── Main grid: worklist table left, action rail right ──
-                    Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                        Box(Modifier.weight(0.65f)) {
-                            OpenOrdersTable(openOrders, onOpenOrder = onOpenOrder,
-                                onViewAll = { onWorklist(LabStatus.REGISTERED) })
+                    // ── Main grid: THE worklist left (fills the viewport, scrolls
+                    // internally), action rail right (scrolls on short windows) ──
+                    Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                        Box(Modifier.weight(0.65f).fillMaxHeight()) {
+                            WorklistPanel(
+                                tabIndex = worklistTab,
+                                onTabChange = { worklistTab = it },
+                                entries = worklist,
+                                onOpenOrder = onOpenOrder,
+                            )
                         }
-                        Column(Modifier.weight(0.35f), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        Column(Modifier.weight(0.35f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(16.dp)) {
                             CriticalsCard(criticals, onOpenOrder)
                             if (syncState != null && !syncState.disabled) {
                                 EmrCard(emrPending, onEmrInbox)
@@ -265,14 +315,14 @@ fun LabHomeScreen(
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                // ── Today counters → worklist tabs ──
+                // ── Today counters → worklist tabs (below, on this same page) ──
                 Text("Today", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    StatChip("Registered", registered) { onWorklist(LabStatus.REGISTERED) }
-                    StatChip("In progress", inProgress) { onWorklist(LabStatus.IN_PROGRESS) }
-                    StatChip("Awaiting verify", awaitingVerify) { onWorklist(LabStatus.ENTERED) }
-                    StatChip("Approved", approved) { onWorklist(LabStatus.APPROVED) }
-                    StatChip("Reported", reported) { onWorklist(LabStatus.REPORTED) }
+                    StatChip("Registered", registered) { worklistTab = TAB_REGISTERED }
+                    StatChip("In progress", inProgress) { worklistTab = TAB_IN_PROGRESS }
+                    StatChip("Awaiting verify", awaitingVerify) { worklistTab = TAB_ENTERED }
+                    StatChip("Approved", approved) { worklistTab = TAB_APPROVED }
+                    StatChip("Reported", reported) { worklistTab = TAB_REPORTED }
                     billsToday?.let { bills -> StatChip("Bills today", bills) { onBills() } }
                 }
 
@@ -316,19 +366,16 @@ fun LabHomeScreen(
                     )
                 }
 
-                // ── Open orders (compact list, cap 6) ──
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Open orders", style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                    TextButton(onClick = { onWorklist(LabStatus.REGISTERED) }) { Text("View all") }
-                }
-                if (openOrders.isEmpty()) {
-                    Text("No open orders — start with New order",
+                // ── Worklist: same tabbed panel, scaled down (chips + list) ──
+                Text("Worklist", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                WorklistTabChips(selected = worklistTab, onSelect = { worklistTab = it })
+                if (worklist.isEmpty()) {
+                    Text(emptyWorklistLabel(worklistTab),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        openOrders.take(6).forEach { e -> CompactOrderRow(e) { onOpenOrder(e.order.id) } }
+                        worklist.forEach { e -> CompactOrderRow(e) { onOpenOrder(e.order.id) } }
                     }
                 }
 
@@ -337,7 +384,6 @@ fun LabHomeScreen(
 
                 // ── Navigation cards ──
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    HomeCard("Worklist", "Pipeline by stage", Icons.AutoMirrored.Outlined.ListAlt) { onWorklist(LabStatus.REGISTERED) }
                     HomeCard("Patients", "Search & manage", Icons.Outlined.PersonAddAlt) { onPatients() }
                     HomeCard("Referrers", "Doctors & clinics", Icons.Outlined.People) { onReferrers() }
                     HomeCard("Test catalog", "Tests, panels & prices", Icons.Outlined.Biotech) { onCatalog() }
@@ -433,31 +479,53 @@ private fun LabStatusChip(status: String, priority: String) {
     }
 }
 
-/** Desktop worklist: a real table of the open (non-terminal) orders. */
+/** Friendly per-tab empty state (shared by both layouts). */
+private fun emptyWorklistLabel(tabIndex: Int): String =
+    if (HOME_TABS[tabIndex].statuses == null) "No open orders — start with New order"
+    else "No ${HOME_TABS[tabIndex].label.lowercase()} orders yet"
+
+/** The worklist's status filter chips (shared by both layouts). */
 @Composable
-private fun OpenOrdersTable(
+private fun WorklistTabChips(selected: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        HOME_TABS.forEachIndexed { i, t ->
+            FilterChip(selected = i == selected, onClick = { onSelect(i) }, label = { Text(t.label) })
+        }
+    }
+}
+
+/** Desktop main panel: THE worklist — status filter chips over a real table.
+ *  Fills the remaining viewport height; long lists scroll inside the card. */
+@Composable
+private fun WorklistPanel(
+    tabIndex: Int,
+    onTabChange: (Int) -> Unit,
     entries: List<WorklistEntry>,
     onOpenOrder: (String) -> Unit,
-    onViewAll: () -> Unit,
 ) {
     Card(
+        modifier = Modifier.fillMaxSize(),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
     ) {
-        Column {
-            Row(
-                Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Worklist — open orders", style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                TextButton(onClick = onViewAll) { Text("View all") }
-            }
+        Column(Modifier.fillMaxSize()) {
+            Text("Worklist", style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp))
+            WorklistTabChips(
+                selected = tabIndex, onSelect = onTabChange,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            )
+            Spacer(Modifier.height(8.dp))
             if (entries.isEmpty()) {
-                Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 40.dp),
+                Box(Modifier.fillMaxWidth().weight(1f).padding(horizontal = 16.dp),
                     contentAlignment = Alignment.Center) {
-                    Text("No open orders — start with New order",
+                    Text(emptyWorklistLabel(tabIndex),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -475,33 +543,35 @@ private fun OpenOrdersTable(
                     TableHeadCell("REGISTERED", Modifier.width(92.dp))
                     Spacer(Modifier.width(64.dp))
                 }
-                entries.forEach { e ->
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-                    Row(
-                        Modifier.fillMaxWidth().clickable { onOpenOrder(e.order.id) }
-                            .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            e.order.accessionNo,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold,
-                            modifier = Modifier.width(150.dp),
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        )
-                        Column(Modifier.weight(1f).padding(end = 8.dp)) {
-                            Text(e.patientName, style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(ageSexLabel(e.patientDob, e.patientAgeYears, e.patientSex),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+                    items(entries, key = { it.order.id }) { e ->
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                        Row(
+                            Modifier.fillMaxWidth().clickable { onOpenOrder(e.order.id) }
+                                .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                e.order.accessionNo,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold,
+                                modifier = Modifier.width(150.dp),
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                            Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text(e.patientName, style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(ageSexLabel(e.patientDob, e.patientAgeYears, e.patientSex),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Text("${e.testCount}", style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.width(52.dp))
+                            Box(Modifier.width(120.dp)) { LabStatusChip(e.order.status, e.order.priority) }
+                            Text(shortTimeLabel(e.order.createdAt), style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(92.dp))
+                            TextButton(onClick = { onOpenOrder(e.order.id) }) { Text("Open") }
                         }
-                        Text("${e.testCount}", style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.width(52.dp))
-                        Box(Modifier.width(120.dp)) { LabStatusChip(e.order.status, e.order.priority) }
-                        Text(shortTimeLabel(e.order.createdAt), style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(92.dp))
-                        TextButton(onClick = { onOpenOrder(e.order.id) }) { Text("Open") }
                     }
                 }
             }

@@ -9,7 +9,8 @@ sealed class Screen(val route: String) {
     data object BusinessSelector : Screen("business_selector")
 
     // ── LIMS (P1b) — the app's main surface ──
-    /** LIMS home: counters + New order + worklist/masters/bills/settings. */
+    /** LIMS home: counters + New order + THE status-tabbed worklist panel
+     *  (the separate Worklist page is retired) + masters/bills/settings. */
     data object LabHome : Screen("lab_home")
     /** Registration desk: patient + tests + referrer → order + GST bill.
      *  Optional `emrId` pre-fills from an EMR inbox row (P3 bridge). */
@@ -19,10 +20,6 @@ sealed class Screen(val route: String) {
     }
     /** Clinic lab orders routed to this lab (P3 EMR bridge inbox). */
     data object EmrInbox : Screen("emr_inbox")
-    /** Status-tabbed pipeline worklist; tab = the initial LabStatus. */
-    data object Worklist : Screen("worklist/{tab}") {
-        fun createRoute(tab: String = "registered") = "worklist/$tab"
-    }
     /** One order's workbench (entry → verify → approve → report). */
     data object LabOrderDetail : Screen("lab_order/{orderId}") {
         fun createRoute(orderId: String) = "lab_order/$orderId"

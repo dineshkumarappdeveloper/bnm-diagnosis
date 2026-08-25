@@ -65,7 +65,6 @@ import com.bnm.diagnosis.screens.lab.NewOrderScreen
 import com.bnm.diagnosis.screens.lab.OrderDetailScreen
 import com.bnm.diagnosis.screens.lab.PatientsScreen
 import com.bnm.diagnosis.screens.lab.ReferrersScreen
-import com.bnm.diagnosis.screens.lab.WorklistScreen
 import com.bnm.diagnosis.sync.LabSyncEngine
 import com.bnm.diagnosis.screens.license.ActivationScreen
 import com.bnm.diagnosis.screens.license.LicenseDevicesScreen
@@ -301,7 +300,6 @@ fun App() {
                                     // License-blocked devices keep everything readable/
                                     // printable/exportable but can't START new work.
                                     onNewOrder = { if (!licState.blocked) navController.navigate(Screen.NewOrder.createRoute()) },
-                                    onWorklist = { tab -> navController.navigate(Screen.Worklist.createRoute(tab)) },
                                     onPatients = { navController.navigate(Screen.Patients.route) },
                                     onReferrers = { navController.navigate(Screen.Referrers.route) },
                                     onCatalog = { navController.navigate(Screen.Catalog.route) },
@@ -357,18 +355,6 @@ fun App() {
                                     navController.navigate(Screen.NewOrder.createRoute(emrId))
                                 }
                             },
-                        )
-                    }
-
-                    composable(
-                        route = Screen.Worklist.route,
-                        arguments = listOf(navArgument("tab") { type = NavType.StringType })
-                    ) { backStack ->
-                        val tab = NavType.StringType.get(backStack.arguments!!, "tab") ?: "registered"
-                        WorklistScreen(
-                            initialStatus = tab,
-                            onOpenOrder = { id -> navController.navigate(Screen.LabOrderDetail.createRoute(id)) },
-                            onBack = { navController.popBackStack() },
                         )
                     }
 
