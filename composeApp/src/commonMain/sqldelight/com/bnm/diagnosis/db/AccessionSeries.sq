@@ -1,0 +1,29 @@
+-- Per-seat accession-number series — the counter_series never-rewind concept
+-- applied to sample accessioning. Each device/seat ('S1', 'S2', …) issues from
+-- its own series so multi-seat offline devices can never collide. allocate =
+-- bump then read inside ONE transaction (LabRepository.createLabOrder), so a
+-- crash never reissues an accession number.
+
+CREATE TABLE accession_series (
+    seat TEXT NOT NULL PRIMARY KEY,
+    prefix TEXT NOT NULL DEFAULT 'ACC',
+    high_water INTEGER NOT NULL DEFAULT 0
+);
+
+-- Idempotent seed of this seat's row (no-op when the seat already exists —
+-- never touches an existing high_water).
+init:
+INSERT OR IGNORE INTO accession_series(seat, prefix, high_water) VALUES (?, ?, 0);
+
+getSeries:
+SELECT * FROM accession_series WHERE seat = ?;
+
+bump:
+UPDATE accession_series SET high_water = high_water + 1 WHERE seat = ?;
+
+highWater:
+SELECT high_water FROM accession_series WHERE seat = ?;
+
+-- Raise (never lower) — adopt a server/peer high-water on future sync.
+raiseHighWater:
+UPDATE accession_series SET high_water = MAX(high_water, ?) WHERE seat = ?;

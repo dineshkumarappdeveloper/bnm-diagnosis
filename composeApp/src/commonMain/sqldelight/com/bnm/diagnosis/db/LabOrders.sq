@@ -1,0 +1,91 @@
+-- Lab orders (one accession = one patient visit's sample set) + the tests on
+-- each order (name/price snapshotted at order time so later catalog edits
+-- never rewrite history). Status is a linear pipeline:
+-- registered → collected → in_progress → entered → verified → approved →
+-- reported → delivered (+ cancelled). Guards live in LabRepository.
+
+CREATE TABLE lab_orders (
+    id TEXT NOT NULL PRIMARY KEY,
+    accession_no TEXT NOT NULL UNIQUE,   -- ACC-S1-00042 (per-seat, never-rewind)
+    patient_id TEXT NOT NULL,
+    referrer_id TEXT,
+    invoice_id TEXT,                     -- links the GST bill (ecom_entity invoice)
+    status TEXT NOT NULL DEFAULT 'registered',
+    priority TEXT NOT NULL DEFAULT 'routine',   -- routine | urgent | stat
+    notes TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    collected_at TEXT,
+    approved_at TEXT,
+    reported_at TEXT
+);
+
+CREATE INDEX lab_orders_status ON lab_orders(status, created_at);
+CREATE INDEX lab_orders_patient ON lab_orders(patient_id, created_at);
+
+CREATE TABLE lab_order_tests (
+    id TEXT NOT NULL PRIMARY KEY,
+    order_id TEXT NOT NULL,
+    test_id TEXT NOT NULL,
+    test_name TEXT NOT NULL,             -- snapshot at order time
+    price REAL NOT NULL DEFAULT 0,       -- snapshot at order time
+    status TEXT NOT NULL DEFAULT 'pending'   -- pending | in_progress | entered
+);
+
+CREATE INDEX lab_order_tests_order ON lab_order_tests(order_id);
+
+-- ── Orders ──
+
+insertOrder:
+INSERT INTO lab_orders(id, accession_no, patient_id, referrer_id, invoice_id, status, priority, notes, created_at, updated_at, collected_at, approved_at, reported_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL);
+
+byId:
+SELECT * FROM lab_orders WHERE id = ?;
+
+byAccession:
+SELECT * FROM lab_orders WHERE accession_no = ?;
+
+-- Worklist for one pipeline stage, joined with the patient (name/sex/age drive
+-- both the list row and range resolution) + how many tests ride the order.
+worklistByStatus:
+SELECT o.*, p.name AS patient_name, p.sex AS patient_sex, p.dob AS patient_dob, p.age_years AS patient_age_years,
+       (SELECT count(*) FROM lab_order_tests t WHERE t.order_id = o.id) AS test_count
+FROM lab_orders o
+JOIN patients p ON p.id = o.patient_id
+WHERE o.status = ?
+ORDER BY o.created_at DESC;
+
+ordersForPatient:
+SELECT * FROM lab_orders WHERE patient_id = ? ORDER BY created_at DESC;
+
+setStatus:
+UPDATE lab_orders SET status = ?, updated_at = ? WHERE id = ?;
+
+stampCollected:
+UPDATE lab_orders SET collected_at = ? WHERE id = ?;
+
+stampApproved:
+UPDATE lab_orders SET approved_at = ? WHERE id = ?;
+
+stampReported:
+UPDATE lab_orders SET reported_at = ? WHERE id = ?;
+
+linkInvoice:
+UPDATE lab_orders SET invoice_id = ?, updated_at = ? WHERE id = ?;
+
+-- created_at is an ISO instant; the caller passes today's local date (yyyy-MM-dd).
+countByStatusToday:
+SELECT count(*) FROM lab_orders WHERE status = ? AND substr(created_at, 1, 10) = ?;
+
+-- ── Order tests ──
+
+insertOrderTest:
+INSERT INTO lab_order_tests(id, order_id, test_id, test_name, price, status)
+VALUES (?, ?, ?, ?, ?, ?);
+
+testsForOrder:
+SELECT * FROM lab_order_tests WHERE order_id = ? ORDER BY rowid;
+
+setOrderTestStatus:
+UPDATE lab_order_tests SET status = ? WHERE order_id = ? AND test_id = ?;

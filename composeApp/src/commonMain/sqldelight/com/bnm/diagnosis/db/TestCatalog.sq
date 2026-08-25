@@ -1,0 +1,78 @@
+-- Test catalog: every orderable test with its parameters embedded as JSON
+-- (parameters_json = [{key, name, unit, decimals, ranges:[{sex?, ageMinY?,
+-- ageMaxY?, low?, high?, criticalLow?, criticalHigh?, text?}]}]) — the Kotlin
+-- layer (LabModels/LabRepository) is the only reader/writer of that JSON.
+-- Panels are priced bundles of test ids (test_ids_json = ["..."]).
+
+CREATE TABLE lab_tests (
+    id TEXT NOT NULL PRIMARY KEY,
+    code TEXT NOT NULL UNIQUE,           -- short order code, e.g. 'CBC'
+    name TEXT NOT NULL,
+    category TEXT,                       -- Hematology / Biochemistry / ...
+    price REAL NOT NULL DEFAULT 0,
+    sample_type TEXT NOT NULL DEFAULT 'blood',  -- blood|serum|urine|stool|swab|other
+    method TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    parameters_json TEXT NOT NULL
+);
+
+CREATE TABLE lab_panels (
+    id TEXT NOT NULL PRIMARY KEY,
+    code TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    price REAL NOT NULL DEFAULT 0,
+    test_ids_json TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1
+);
+
+-- ── Tests ──
+
+upsertTest:
+INSERT OR REPLACE INTO lab_tests(id, code, name, category, price, sample_type, method, active, sort_order, parameters_json)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+testById:
+SELECT * FROM lab_tests WHERE id = ?;
+
+testByCode:
+SELECT * FROM lab_tests WHERE code = ?;
+
+listTests:
+SELECT * FROM lab_tests WHERE active = 1 ORDER BY sort_order, name;
+
+listAllTests:
+SELECT * FROM lab_tests ORDER BY sort_order, name;
+
+setTestActive:
+UPDATE lab_tests SET active = ? WHERE id = ?;
+
+deleteTest:
+DELETE FROM lab_tests WHERE id = ?;
+
+countTests:
+SELECT count(*) FROM lab_tests;
+
+-- ── Panels ──
+
+upsertPanel:
+INSERT OR REPLACE INTO lab_panels(id, code, name, price, test_ids_json, active)
+VALUES (?, ?, ?, ?, ?, ?);
+
+panelById:
+SELECT * FROM lab_panels WHERE id = ?;
+
+listPanels:
+SELECT * FROM lab_panels WHERE active = 1 ORDER BY name;
+
+listAllPanels:
+SELECT * FROM lab_panels ORDER BY name;
+
+setPanelActive:
+UPDATE lab_panels SET active = ? WHERE id = ?;
+
+deletePanel:
+DELETE FROM lab_panels WHERE id = ?;
+
+countPanels:
+SELECT count(*) FROM lab_panels;

@@ -1,0 +1,26 @@
+-- Referring doctors/clinics who send samples. commission_pct feeds the
+-- per-referrer monthly payout report (core Indian-lab economics). Soft-delete
+-- only — orders keep their referrer link for historical reports.
+
+CREATE TABLE referrers (
+    id TEXT NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'doctor',   -- 'doctor' | 'clinic' | 'walk_in'
+    phone TEXT,
+    commission_pct REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    deleted_at TEXT
+);
+
+upsert:
+INSERT OR REPLACE INTO referrers(id, name, kind, phone, commission_pct, created_at, deleted_at)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+byId:
+SELECT * FROM referrers WHERE id = ?;
+
+list:
+SELECT * FROM referrers WHERE deleted_at IS NULL ORDER BY name;
+
+softDelete:
+UPDATE referrers SET deleted_at = ? WHERE id = ?;

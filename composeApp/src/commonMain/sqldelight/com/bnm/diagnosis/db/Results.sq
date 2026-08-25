@@ -1,0 +1,65 @@
+-- Per-parameter results. EMPTY rows (value NULL) are pre-created for every
+-- parameter of every ordered test at order time, so the worklist/entry grid is
+-- driven by this table alone. flag: N/L/H/CL/CH numeric, A = abnormal
+-- qualitative; ref_display = the range exactly as it prints on the report
+-- (frozen at entry time against the patient's then-age/sex). The entered/
+-- verified/approved audit trio is a legal requirement (pathologist sign-off).
+
+CREATE TABLE lab_results (
+    id TEXT NOT NULL PRIMARY KEY,
+    order_id TEXT NOT NULL,
+    test_id TEXT NOT NULL,
+    parameter_key TEXT NOT NULL,
+    value TEXT,                         -- NULL/'' = not entered yet
+    unit TEXT,
+    flag TEXT,                          -- 'N'|'L'|'H'|'CL'|'CH'|'A' | NULL
+    ref_display TEXT,
+    notes TEXT,
+    entered_by TEXT,
+    entered_at TEXT,
+    verified_by TEXT,
+    verified_at TEXT,
+    approved_by TEXT,
+    approved_at TEXT
+);
+
+CREATE UNIQUE INDEX lab_results_key ON lab_results(order_id, test_id, parameter_key);
+CREATE INDEX lab_results_order ON lab_results(order_id);
+
+-- Pre-create the empty grid row at order time (idempotent).
+insertEmpty:
+INSERT OR IGNORE INTO lab_results(id, order_id, test_id, parameter_key, value, unit, flag, ref_display, notes, entered_by, entered_at, verified_by, verified_at, approved_by, approved_at)
+VALUES (?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+
+insertResult:
+INSERT INTO lab_results(id, order_id, test_id, parameter_key, value, unit, flag, ref_display, notes, entered_by, entered_at, verified_by, verified_at, approved_by, approved_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL);
+
+updateValue:
+UPDATE lab_results
+SET value = ?, unit = ?, flag = ?, ref_display = ?, entered_by = ?, entered_at = ?
+WHERE order_id = ? AND test_id = ? AND parameter_key = ?;
+
+byKey:
+SELECT * FROM lab_results WHERE order_id = ? AND test_id = ? AND parameter_key = ?;
+
+resultsForOrder:
+SELECT * FROM lab_results WHERE order_id = ? ORDER BY rowid;
+
+resultsForOrderTest:
+SELECT * FROM lab_results WHERE order_id = ? AND test_id = ? ORDER BY rowid;
+
+countEmptyForOrder:
+SELECT count(*) FROM lab_results WHERE order_id = ? AND (value IS NULL OR value = '');
+
+countEmptyForTest:
+SELECT count(*) FROM lab_results WHERE order_id = ? AND test_id = ? AND (value IS NULL OR value = '');
+
+markVerified:
+UPDATE lab_results SET verified_by = ?, verified_at = ? WHERE order_id = ?;
+
+markApproved:
+UPDATE lab_results SET approved_by = ?, approved_at = ? WHERE order_id = ?;
+
+setNotes:
+UPDATE lab_results SET notes = ? WHERE order_id = ? AND test_id = ? AND parameter_key = ?;

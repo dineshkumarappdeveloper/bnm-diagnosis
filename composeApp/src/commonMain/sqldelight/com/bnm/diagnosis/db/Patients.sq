@@ -1,0 +1,43 @@
+-- Local patient registry — the SQLDelight DB is the system of record (offline
+-- LIMS). Age/sex drive reference-range selection: dob preferred, age_years is
+-- the fallback when the birth date is unknown (common in India). Soft-delete
+-- only (deleted_at) — results/orders keep pointing at the row forever.
+
+CREATE TABLE patients (
+    id TEXT NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL,
+    sex TEXT NOT NULL DEFAULT 'O',      -- 'M' | 'F' | 'O'
+    dob TEXT,                           -- ISO date; preferred age source
+    age_years INTEGER,                  -- fallback when dob unknown
+    phone TEXT,
+    address TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+);
+
+CREATE INDEX patients_name ON patients(name);
+CREATE INDEX patients_phone ON patients(phone);
+
+upsert:
+INSERT OR REPLACE INTO patients(id, name, sex, dob, age_years, phone, address, created_at, updated_at, deleted_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+byId:
+SELECT * FROM patients WHERE id = ?;
+
+-- Registration-desk lookup: prefix on name or phone, newest activity first.
+search:
+SELECT * FROM patients
+WHERE deleted_at IS NULL AND (name LIKE :q || '%' OR phone LIKE :q || '%')
+ORDER BY updated_at DESC
+LIMIT 50;
+
+recent:
+SELECT * FROM patients WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 50;
+
+softDelete:
+UPDATE patients SET deleted_at = ?, updated_at = ? WHERE id = ?;
+
+countAll:
+SELECT count(*) FROM patients WHERE deleted_at IS NULL;

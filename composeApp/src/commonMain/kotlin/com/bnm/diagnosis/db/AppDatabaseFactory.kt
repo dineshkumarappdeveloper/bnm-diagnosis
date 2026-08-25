@@ -33,5 +33,48 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
         "CREATE INDEX IF NOT EXISTS billing_outbox_drain ON billing_outbox(status, created_at, seq_local)", 0)
     driver.execute(null,
         "CREATE UNIQUE INDEX IF NOT EXISTS billing_outbox_idem ON billing_outbox(idempotency_key)", 0)
+    // ── LIMS tables (P1a) — same self-heal for devices installed before them ──
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS patients (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, " +
+        "sex TEXT NOT NULL DEFAULT 'O', dob TEXT, age_years INTEGER, phone TEXT, address TEXT, " +
+        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT)", 0)
+    driver.execute(null, "CREATE INDEX IF NOT EXISTS patients_name ON patients(name)", 0)
+    driver.execute(null, "CREATE INDEX IF NOT EXISTS patients_phone ON patients(phone)", 0)
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS referrers (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, " +
+        "kind TEXT NOT NULL DEFAULT 'doctor', phone TEXT, commission_pct REAL NOT NULL DEFAULT 0, " +
+        "created_at TEXT NOT NULL, deleted_at TEXT)", 0)
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS lab_tests (id TEXT NOT NULL PRIMARY KEY, code TEXT NOT NULL UNIQUE, " +
+        "name TEXT NOT NULL, category TEXT, price REAL NOT NULL DEFAULT 0, " +
+        "sample_type TEXT NOT NULL DEFAULT 'blood', method TEXT, active INTEGER NOT NULL DEFAULT 1, " +
+        "sort_order INTEGER NOT NULL DEFAULT 0, parameters_json TEXT NOT NULL)", 0)
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS lab_panels (id TEXT NOT NULL PRIMARY KEY, code TEXT NOT NULL UNIQUE, " +
+        "name TEXT NOT NULL, price REAL NOT NULL DEFAULT 0, test_ids_json TEXT NOT NULL, " +
+        "active INTEGER NOT NULL DEFAULT 1)", 0)
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS lab_orders (id TEXT NOT NULL PRIMARY KEY, accession_no TEXT NOT NULL UNIQUE, " +
+        "patient_id TEXT NOT NULL, referrer_id TEXT, invoice_id TEXT, status TEXT NOT NULL DEFAULT 'registered', " +
+        "priority TEXT NOT NULL DEFAULT 'routine', notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, " +
+        "collected_at TEXT, approved_at TEXT, reported_at TEXT)", 0)
+    driver.execute(null, "CREATE INDEX IF NOT EXISTS lab_orders_status ON lab_orders(status, created_at)", 0)
+    driver.execute(null, "CREATE INDEX IF NOT EXISTS lab_orders_patient ON lab_orders(patient_id, created_at)", 0)
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS lab_order_tests (id TEXT NOT NULL PRIMARY KEY, order_id TEXT NOT NULL, " +
+        "test_id TEXT NOT NULL, test_name TEXT NOT NULL, price REAL NOT NULL DEFAULT 0, " +
+        "status TEXT NOT NULL DEFAULT 'pending')", 0)
+    driver.execute(null, "CREATE INDEX IF NOT EXISTS lab_order_tests_order ON lab_order_tests(order_id)", 0)
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS lab_results (id TEXT NOT NULL PRIMARY KEY, order_id TEXT NOT NULL, " +
+        "test_id TEXT NOT NULL, parameter_key TEXT NOT NULL, value TEXT, unit TEXT, flag TEXT, " +
+        "ref_display TEXT, notes TEXT, entered_by TEXT, entered_at TEXT, verified_by TEXT, verified_at TEXT, " +
+        "approved_by TEXT, approved_at TEXT)", 0)
+    driver.execute(null,
+        "CREATE UNIQUE INDEX IF NOT EXISTS lab_results_key ON lab_results(order_id, test_id, parameter_key)", 0)
+    driver.execute(null, "CREATE INDEX IF NOT EXISTS lab_results_order ON lab_results(order_id)", 0)
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS accession_series (seat TEXT NOT NULL PRIMARY KEY, " +
+        "prefix TEXT NOT NULL DEFAULT 'ACC', high_water INTEGER NOT NULL DEFAULT 0)", 0)
     return AppDatabase(driver)
 }
