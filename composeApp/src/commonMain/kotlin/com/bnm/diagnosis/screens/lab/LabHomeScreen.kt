@@ -37,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,9 +71,14 @@ fun LabHomeScreen(
     onCatalog: () -> Unit,
     onBills: () -> Unit,
     onSettings: () -> Unit,
+    /** P3: opens the EMR inbox (badge shows only when something is pending). */
+    onEmrInbox: () -> Unit = {},
+    /** P3: one-line note (e.g. "Sync off — standalone license"). */
+    syncNote: String? = null,
 ) {
     val repo = LocalLabRepository.current
     val snackbar = remember { SnackbarHostState() }
+    val emrPending by repo.emrPendingCountFlow().collectAsState(0L)
 
     // Today's pipeline counters (orders CREATED today, per stage).
     var registered by remember { mutableStateOf(0L) }
@@ -125,6 +131,29 @@ fun LabHomeScreen(
                 StatChip("Reported", reported) { onWorklist(LabStatus.REPORTED) }
             }
 
+            // ── P3: EMR bridge badge — clinic orders awaiting registration ──
+            if (emrPending > 0) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    modifier = Modifier.fillMaxWidth().widthIn(max = 560.dp).clickable(onClick = onEmrInbox),
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Outlined.Biotech, contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.size(22.dp))
+                        Text(
+                            "  EMR orders: $emrPending pending — tap to review",
+                            style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        )
+                    }
+                }
+            }
+
             // ── Primary action: register a new order ──
             Button(
                 onClick = onNewOrder,
@@ -150,6 +179,12 @@ fun LabHomeScreen(
                 HomeCard("Test catalog", "Tests, panels & prices", Icons.Outlined.Biotech) { onCatalog() }
                 HomeCard("Bills", "GST invoices", Icons.AutoMirrored.Outlined.ReceiptLong) { onBills() }
                 HomeCard("Settings", "Printer · License", Icons.Outlined.Settings) { onSettings() }
+            }
+
+            // ── P3: one-line sync note (standalone license → sync disabled) ──
+            syncNote?.let {
+                Text(it, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }

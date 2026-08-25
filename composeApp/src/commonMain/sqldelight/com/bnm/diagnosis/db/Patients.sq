@@ -39,5 +39,11 @@ SELECT * FROM patients WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 5
 softDelete:
 UPDATE patients SET deleted_at = ?, updated_at = ? WHERE id = ?;
 
+-- Sync sweep (P3): rows touched since the push watermark (ISO string compare;
+-- the engine passes the watermark minus a slack window). Soft delete bumps
+-- updated_at, so one predicate covers edits + deletes.
+changedSince:
+SELECT * FROM patients WHERE updated_at > :since;
+
 countAll:
 SELECT count(*) FROM patients WHERE deleted_at IS NULL;

@@ -76,5 +76,12 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
     driver.execute(null,
         "CREATE TABLE IF NOT EXISTS accession_series (seat TEXT NOT NULL PRIMARY KEY, " +
         "prefix TEXT NOT NULL DEFAULT 'ACC', high_water INTEGER NOT NULL DEFAULT 0)", 0)
+    // ── P3 sync: EMR bridge inbox ──
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS emr_inbox (id TEXT NOT NULL PRIMARY KEY, visit_id TEXT, " +
+        "test_name TEXT NOT NULL, instructions TEXT, status TEXT, lab_status TEXT, accession_no TEXT, " +
+        "matched_order_id TEXT, seq INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0, " +
+        "status_pushed INTEGER NOT NULL DEFAULT 0, created_at TEXT)", 0)
+    driver.execute(null, "CREATE INDEX IF NOT EXISTS emr_inbox_open ON emr_inbox(done, seq)", 0)
     return AppDatabase(driver)
 }

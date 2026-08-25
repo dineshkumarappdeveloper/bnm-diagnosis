@@ -82,6 +82,50 @@ sealed interface LabHeartbeatResult {
 /** GET /devices response: all seats + which row is THIS device. */
 data class LabDevicesInfo(val devices: List<LabSeatDevice>, val selfId: String?)
 
+// ── P3 sync models ────────────────────────────────────────────────────────────
+
+/**
+ * Every sync endpoint returns 409 `{code:'no_business'}` for a STANDALONE
+ * license (no BNM business linked). The engine treats it as "sync disabled":
+ * silent, no retries within a run, a one-line note on the home screen only.
+ */
+class LabSyncDisabledException(message: String) : Exception(message)
+
+/** One row of `POST admin-lab/sync/push` — the app's doc mirrored to `lab_entities`. */
+@Serializable
+data class LabSyncPushRow(
+    val entity: String,
+    val id: String,
+    val json: kotlinx.serialization.json.JsonElement,
+    @SerialName("deleted_at") val deletedAt: String? = null,
+)
+
+/** One row of `GET admin-lab/sync/pull` (ordered by server seq). */
+@Serializable
+data class LabSyncPullRow(
+    val entity: String,
+    val id: String,
+    val seq: Long = 0,
+    @SerialName("deleted_at") val deletedAt: String? = null,
+    val json: kotlinx.serialization.json.JsonElement? = null,
+)
+
+/** One clinic order from `GET admin-lab/emr-orders` (clinical_lab_orders projection). */
+@Serializable
+data class LabEmrOrder(
+    val id: String,
+    @SerialName("visit_id") val visitId: String? = null,
+    @SerialName("test_name") val testName: String? = null,
+    val instructions: String? = null,
+    val status: String? = null,          // clinic side: ordered | completed | cancelled…
+    @SerialName("lab_status") val labStatus: String? = null,
+    @SerialName("accession_no") val accessionNo: String? = null,
+    val seq: Long = 0,
+    @SerialName("created_at") val createdAt: String? = null,
+    @SerialName("result_value") val resultValue: String? = null,
+    @SerialName("resulted_at") val resultedAt: String? = null,
+)
+
 /**
  * Client for the `admin-lab` edge fn — license activation + device management.
  * Auth is the license `device_token` (NOT the BusinessStudio session token);
@@ -216,6 +260,122 @@ class LabApi(
                 }
             }.getOrNull()
             LabDevicesInfo(devices, selfId)
+        }
+    }
+
+    // ── P3 sync endpoints ────────────────────────────────────────────────────
+
+    /** Throw the typed sync-disabled error on 409 no_business, else a plain error. */
+    private fun syncFail(status: HttpStatusCode, text: String): Nothing {
+        val obj = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull()
+        if (status == HttpStatusCode.Conflict && obj.strField("code") == "no_business") {
+            throw LabSyncDisabledException(
+                obj.strField("error") ?: "This license is standalone — sync is disabled"
+            )
+        }
+        error(obj.strField("error") ?: "HTTP ${status.value}: ${text.take(200)}")
+    }
+
+    /** `POST admin-lab/sync/push` {rows:[…]} (≤500/batch) → upserted count. */
+    suspend fun syncPush(rows: List<LabSyncPushRow>): Result<Int> = withContext(Dispatchers.Default) {
+        runCatching {
+            val auth = deviceAuth()
+            val resp = httpClient.post(edgeUrl("/sync/push")) {
+                header(auth.first, auth.second)
+                contentType(ContentType.Application.Json)
+                setBody(
+                    buildJsonObject {
+                        put("rows", json.encodeToJsonElement(ListSerializer(LabSyncPushRow.serializer()), rows))
+                    }.toString()
+                )
+            }
+            val text = resp.bodyAsText()
+            if (!resp.status.isSuccess()) syncFail(resp.status, text)
+            runCatching {
+                json.parseToJsonElement(text).jsonObject["upserted"]?.jsonPrimitive?.intOrNull
+            }.getOrNull() ?: rows.size
+        }
+    }
+
+    /** `GET admin-lab/sync/pull?sinceSeq=N&limit=…` → rows ordered by seq. */
+    suspend fun syncPull(sinceSeq: Long, limit: Int = 500): Result<List<LabSyncPullRow>> =
+        withContext(Dispatchers.Default) {
+            runCatching {
+                val auth = deviceAuth()
+                val resp = httpClient.get(edgeUrl("/sync/pull?sinceSeq=$sinceSeq&limit=$limit")) {
+                    header(auth.first, auth.second)
+                }
+                val text = resp.bodyAsText()
+                if (!resp.status.isSuccess()) syncFail(resp.status, text)
+                json.parseToJsonElement(text).jsonObject["rows"]?.let {
+                    json.decodeFromJsonElement(ListSerializer(LabSyncPullRow.serializer()), it)
+                } ?: emptyList()
+            }
+        }
+
+    /** `GET admin-lab/emr-orders?sinceSeq=N` — clinic orders routed to this lab. */
+    suspend fun emrOrders(sinceSeq: Long): Result<List<LabEmrOrder>> = withContext(Dispatchers.Default) {
+        runCatching {
+            val auth = deviceAuth()
+            val resp = httpClient.get(edgeUrl("/emr-orders?sinceSeq=$sinceSeq")) {
+                header(auth.first, auth.second)
+            }
+            val text = resp.bodyAsText()
+            if (!resp.status.isSuccess()) syncFail(resp.status, text)
+            json.parseToJsonElement(text).jsonObject["orders"]?.let {
+                json.decodeFromJsonElement(ListSerializer(LabEmrOrder.serializer()), it)
+            } ?: emptyList()
+        }
+    }
+
+    /** `POST admin-lab/emr-orders/{id}/status` — acknowledge {lab_status, accession_no?}. */
+    suspend fun emrOrderStatus(id: String, labStatus: String, accessionNo: String? = null): Result<Unit> =
+        withContext(Dispatchers.Default) {
+            runCatching {
+                val auth = deviceAuth()
+                val resp = httpClient.post(edgeUrl("/emr-orders/$id/status")) {
+                    header(auth.first, auth.second)
+                    contentType(ContentType.Application.Json)
+                    setBody(
+                        buildJsonObject {
+                            put("lab_status", labStatus)
+                            accessionNo?.let { put("accession_no", it) }
+                        }.toString()
+                    )
+                }
+                if (!resp.status.isSuccess()) syncFail(resp.status, resp.bodyAsText())
+            }
+        }
+
+    /**
+     * `POST admin-lab/emr-orders/{id}/result` — write the result back onto the
+     * clinic's row. `resultFlag` is the APP code (N/L/H/A/CL/CH) — the server
+     * translates to the EMR's word vocabulary at the bridge.
+     */
+    suspend fun emrOrderResult(
+        id: String,
+        resultValue: String,
+        resultUnit: String? = null,
+        referenceRange: String? = null,
+        resultFlag: String? = null,
+        resultNotes: String? = null,
+    ): Result<Unit> = withContext(Dispatchers.Default) {
+        runCatching {
+            val auth = deviceAuth()
+            val resp = httpClient.post(edgeUrl("/emr-orders/$id/result")) {
+                header(auth.first, auth.second)
+                contentType(ContentType.Application.Json)
+                setBody(
+                    buildJsonObject {
+                        put("result_value", resultValue)
+                        resultUnit?.let { put("result_unit", it) }
+                        referenceRange?.let { put("reference_range", it) }
+                        resultFlag?.let { put("result_flag", it) }
+                        resultNotes?.let { put("result_notes", it) }
+                    }.toString()
+                )
+            }
+            if (!resp.status.isSuccess()) syncFail(resp.status, resp.bodyAsText())
         }
     }
 

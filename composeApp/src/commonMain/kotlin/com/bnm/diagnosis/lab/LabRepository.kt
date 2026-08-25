@@ -2,7 +2,9 @@ package com.bnm.diagnosis.lab
 
 import app.cash.sqldelight.coroutines.asFlow
 import app.cash.sqldelight.coroutines.mapToList
+import app.cash.sqldelight.coroutines.mapToOne
 import com.bnm.diagnosis.db.AppDatabase
+import com.bnm.diagnosis.db.Emr_inbox
 import com.bnm.diagnosis.db.Lab_order_tests
 import com.bnm.diagnosis.db.Lab_orders
 import com.bnm.diagnosis.db.Lab_panels
@@ -55,6 +57,7 @@ class LabRepository(
     private val oQ get() = db.labOrdersQueries
     private val resQ get() = db.resultsQueries
     private val accQ get() = db.accessionSeriesQueries
+    private val emrQ get() = db.emrInboxQueries
 
     private val paramsSerializer = ListSerializer(TestParameter.serializer())
     private val idsSerializer = ListSerializer(String.serializer())
@@ -375,6 +378,21 @@ class LabRepository(
         }
     }
 
+    // ── EMR inbox (P3 bridge; rows are written by LabSyncEngine) ─────────────
+
+    /** Unregistered clinic orders — drives the LabHome badge. */
+    fun emrPendingCountFlow(): Flow<Long> =
+        emrQ.countPending().asFlow().mapToOne(Dispatchers.Default).catch { emit(0L) }
+
+    /** All open inbox rows, unregistered first (the inbox screen's list). */
+    suspend fun emrOpen(): List<EmrInboxItem> = withContext(Dispatchers.Default) {
+        emrQ.open().executeAsList().map { it.toModel() }
+    }
+
+    suspend fun emrById(id: String): EmrInboxItem? = withContext(Dispatchers.Default) {
+        emrQ.byId(id).executeAsOneOrNull()?.toModel()
+    }
+
     // ── Row → model mappers ──────────────────────────────────────────────────
 
     private fun Patients.toModel() = Patient(id, name, sex, dob, age_years, phone, address,
@@ -402,6 +420,9 @@ class LabRepository(
 
     private fun Lab_results.toModel() = LabResult(id, order_id, test_id, parameter_key, value_, unit,
         flag, ref_display, notes, entered_by, entered_at, verified_by, verified_at, approved_by, approved_at)
+
+    private fun Emr_inbox.toModel() = EmrInboxItem(id, visit_id, test_name, instructions, status,
+        lab_status, accession_no, matched_order_id, done == 1L, created_at)
 
     private fun WorklistByStatus.toEntry() = WorklistEntry(
         order = LabOrder(id, accession_no, patient_id, referrer_id, invoice_id, status, priority,

@@ -63,3 +63,19 @@ UPDATE lab_results SET approved_by = ?, approved_at = ? WHERE order_id = ?;
 
 setNotes:
 UPDATE lab_results SET notes = ? WHERE order_id = ? AND test_id = ? AND parameter_key = ?;
+
+-- ── P3 sync ──
+
+-- Push sweep: orders whose result bundle changed since the watermark.
+changedResultOrders:
+SELECT DISTINCT order_id FROM lab_results
+WHERE (entered_at IS NOT NULL AND entered_at > :since)
+   OR (verified_at IS NOT NULL AND verified_at > :since)
+   OR (approved_at IS NOT NULL AND approved_at > :since);
+
+-- Pull apply: whole-row upsert of one remote result. INSERT OR REPLACE also
+-- resolves a (order,test,param) unique-index clash against a locally-minted
+-- empty row (the remote row id wins; ids are internal).
+upsertFull:
+INSERT OR REPLACE INTO lab_results(id, order_id, test_id, parameter_key, value, unit, flag, ref_display, notes, entered_by, entered_at, verified_by, verified_at, approved_by, approved_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);

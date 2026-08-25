@@ -59,18 +59,21 @@ import com.bnm.diagnosis.screens.billing.CustomerDetailsScreen
 import com.bnm.diagnosis.screens.billing.InvoiceDetailScreen
 import com.bnm.diagnosis.screens.business.BusinessSelectorScreen
 import com.bnm.diagnosis.screens.lab.CatalogScreen
+import com.bnm.diagnosis.screens.lab.EmrInboxScreen
 import com.bnm.diagnosis.screens.lab.LabHomeScreen
 import com.bnm.diagnosis.screens.lab.NewOrderScreen
 import com.bnm.diagnosis.screens.lab.OrderDetailScreen
 import com.bnm.diagnosis.screens.lab.PatientsScreen
 import com.bnm.diagnosis.screens.lab.ReferrersScreen
 import com.bnm.diagnosis.screens.lab.WorklistScreen
+import com.bnm.diagnosis.sync.LabSyncEngine
 import com.bnm.diagnosis.screens.license.ActivationScreen
 import com.bnm.diagnosis.screens.license.LicenseDevicesScreen
 import com.bnm.diagnosis.screens.login.LoginScreen
 import com.bnm.diagnosis.screens.main.BillsScreen
 import com.bnm.diagnosis.ui.theme.AppTheme
 import com.bnm.diagnosis.ui.theme.ThemeManager
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 
 @Composable
@@ -111,6 +114,10 @@ fun App() {
     val licenseManager = remember { LicenseManager() }
     val labApi = remember { LabApi(httpClient, deviceTokenProvider = { licenseManager.deviceToken() }) }
 
+    // ── P3: additive lab sync (push/pull lab_entities + EMR inbox). The app is
+    // the system of record — every phase is best-effort and never blocks UI. ──
+    val labSync = remember { LabSyncEngine(database, ApiClient.json, labApi, licenseManager) }
+
     // Heartbeat on app start (when online) + on every reconnect: refresh the
     // license JWT; 403 device_revoked/license_inactive → persist the blocked
     // flag (banner + new-work gate); 401 = ignore (offline semantics unchanged).
@@ -130,6 +137,27 @@ fun App() {
             }
             first = false
             wasOnline = online
+        }
+    }
+
+    // P3 lab sync sweeps: app start (after the license check above; online
+    // only) + every reconnect. Failures are silent — next trigger retries.
+    LaunchedEffect(Unit) {
+        var first = true
+        var wasOnline = false
+        connectivity.isOnline.collect { online ->
+            if (online && (first || !wasOnline) && licenseManager.deviceToken() != null) {
+                labSync.syncNow()
+            }
+            first = false
+            wasOnline = online
+        }
+    }
+    // P3 lab sync: periodic sweep while the app is open.
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(5 * 60_000L)
+            if (licenseManager.deviceToken() != null) labSync.syncNow()
         }
     }
 
@@ -262,6 +290,7 @@ fun App() {
                             if (everSynced == null) runCatching { syncEngine.syncAll(businessId) }
                         }
 
+                        val syncState by labSync.state.collectAsState()
                         Column(Modifier.fillMaxSize()) {
                             if (licState.blocked) LicenseBlockedBanner()
                             Box(Modifier.fillMaxWidth().weight(1f)) {
@@ -272,23 +301,35 @@ fun App() {
                                     onNoticeShown = { lastAccession = null },
                                     // License-blocked devices keep everything readable/
                                     // printable/exportable but can't START new work.
-                                    onNewOrder = { if (!licState.blocked) navController.navigate(Screen.NewOrder.route) },
+                                    onNewOrder = { if (!licState.blocked) navController.navigate(Screen.NewOrder.createRoute()) },
                                     onWorklist = { tab -> navController.navigate(Screen.Worklist.createRoute(tab)) },
                                     onPatients = { navController.navigate(Screen.Patients.route) },
                                     onReferrers = { navController.navigate(Screen.Referrers.route) },
                                     onCatalog = { navController.navigate(Screen.Catalog.route) },
                                     onBills = { navController.navigate(Screen.Bills.route) },
                                     onSettings = { navController.navigate(Screen.Settings.route) },
+                                    onEmrInbox = { navController.navigate(Screen.EmrInbox.route) },
+                                    syncNote = if (syncState.disabled)
+                                        "Sync off — standalone license (not linked to a BNM business)."
+                                    else null,
                                 )
                             }
                         }
                     }
 
-                    composable(Screen.NewOrder.route) {
+                    composable(
+                        route = Screen.NewOrder.route,
+                        arguments = listOf(navArgument("emrId") {
+                            type = NavType.StringType
+                            nullable = true
+                            defaultValue = null
+                        })
+                    ) { backStack ->
                         if (licState.blocked) {
                             LicenseBlockedNotice(onBack = { navController.popBackStack() })
                             return@composable
                         }
+                        val emrId = backStack.arguments?.let { NavType.StringType.get(it, "emrId") }
                         val businessId = authRepository.getSelectedBusinessId() ?: licState.businessId ?: ""
                         val labName = licState.labName ?: authRepository.getSelectedBusinessName() ?: "BNM Diagnosis"
                         NewOrderScreen(
@@ -299,6 +340,19 @@ fun App() {
                                 lastAccession = accession
                                 navController.popBackStack() // → LabHome (snackbar shows the accession)
                                 invoiceId?.let { navController.navigate(Screen.InvoiceDetail.createRoute(it)) }
+                            },
+                            emrOrderId = emrId,
+                            onEmrRegistered = { id, order -> labSync.onEmrOrderRegistered(id, order) },
+                        )
+                    }
+
+                    composable(Screen.EmrInbox.route) {
+                        EmrInboxScreen(
+                            onBack = { navController.popBackStack() },
+                            onRegister = { emrId ->
+                                if (!licState.blocked) {
+                                    navController.navigate(Screen.NewOrder.createRoute(emrId))
+                                }
                             },
                         )
                     }
@@ -417,6 +471,7 @@ fun App() {
                             businessId = businessId,
                             onBack = { navController.popBackStack() },
                             onOpenLicense = { navController.navigate(Screen.LicenseDevices.route) },
+                            labSync = labSync,
                         )
                     }
                 }

@@ -94,6 +94,11 @@ fun NewOrderScreen(
     /** Registration finished: pop home (snackbar shows [accession]); non-null
      *  invoiceId = the operator asked to view the bill's details. */
     onFinished: (accession: String, invoiceId: String?) -> Unit,
+    /** P3 EMR bridge: registering FOR this inbox row — pre-selects the test
+     *  matched by name (else the order note carries it) and reports the match
+     *  back through [onEmrRegistered] after the order is created. */
+    emrOrderId: String? = null,
+    onEmrRegistered: suspend (emrId: String, order: LabOrder) -> Unit = { _, _ -> },
 ) {
     val labRepo = LocalLabRepository.current
     val billing = LocalBillingRepository.current
@@ -132,6 +137,28 @@ fun NewOrderScreen(
     var priority by remember { mutableStateOf("routine") }
     LaunchedEffect(Unit) { referrers = runCatching { labRepo.listReferrers() }.getOrDefault(emptyList()) }
 
+    // ── P3 EMR prefill: match the clinic's test by name; the row carries no
+    // demographics, so the patient is created from the walk-in as usual. ──
+    var emrRow by remember { mutableStateOf<com.bnm.diagnosis.lab.EmrInboxItem?>(null) }
+    var orderNotes by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(emrOrderId) {
+        val row = emrOrderId?.let { runCatching { labRepo.emrById(it) }.getOrNull() } ?: return@LaunchedEffect
+        emrRow = row
+        val tests = runCatching { labRepo.listTests() }.getOrDefault(emptyList())
+        val wanted = row.testName.trim()
+        val match = tests.firstOrNull { it.name.equals(wanted, ignoreCase = true) }
+            ?: tests.firstOrNull { it.code.equals(wanted, ignoreCase = true) }
+            ?: tests.firstOrNull {
+                it.name.contains(wanted, ignoreCase = true) || wanted.contains(it.name, ignoreCase = true)
+            }
+        if (match != null && match.id !in selectedTestIds) selectedTestIds.add(match.id)
+        orderNotes = buildString {
+            append("EMR order: ").append(row.testName)
+            row.instructions?.takeIf { it.isNotBlank() }?.let { append(" — ").append(it) }
+            if (match == null) append(" (not in catalog — pick the closest test)")
+        }
+    }
+
     // ── Save flow state ──
     var saving by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -154,7 +181,13 @@ fun NewOrderScreen(
                 panelIds = selectedPanelIds.toList(),
                 referrerId = referrer?.id,
                 priority = priority,
+                notes = orderNotes,
             ).onSuccess { order ->
+                // P3 EMR bridge: store the match + best-effort acknowledge the
+                // clinic (fire-and-forget; the sync sweep catches up offline).
+                if (emrOrderId != null) {
+                    scope.launch { runCatching { onEmrRegistered(emrOrderId, order) } }
+                }
                 // Snapshot the bill lines from the ORDER (names/prices frozen
                 // there) — diagnostic services are NIL-GST in India (gstRate 0).
                 val orderTests = runCatching { labRepo.orderTests(order.id) }.getOrDefault(emptyList())
@@ -239,6 +272,7 @@ fun NewOrderScreen(
                             .padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(14.dp),
                     ) {
+                        emrRow?.let { EmrBanner(it) }
                         PatientSection(patient, onPatient = { patient = it })
                         ReferrerSection(referrers, referrer, onPick = { referrer = it }, onQuickAdd = { showAddReferrer = true })
                         PrioritySection(priority) { priority = it }
@@ -255,6 +289,7 @@ fun NewOrderScreen(
                 }
             } else {
                 Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    emrRow?.let { EmrBanner(it) }
                     PatientSection(patient, onPatient = { patient = it })
                     ReferrerSection(referrers, referrer, onPick = { referrer = it }, onQuickAdd = { showAddReferrer = true })
                     PrioritySection(priority) { priority = it }
@@ -331,6 +366,28 @@ fun NewOrderScreen(
                     TextButton(onClick = { onFinished(order.accessionNo, null) }) { Text("OK") }
                 },
             )
+        }
+    }
+}
+
+/** P3: the clinic's order being registered — the row has NO demographics, the
+ *  walk-in patient supplies them at the desk. */
+@Composable
+private fun EmrBanner(row: com.bnm.diagnosis.lab.EmrInboxItem) {
+    Card(
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(12.dp)) {
+            Text("EMR order · ${row.testName}", style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onTertiaryContainer)
+            row.instructions?.takeIf { it.isNotBlank() }?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer)
+            }
+            Text("Ask the patient for their details below — the clinic doesn't share demographics.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer)
         }
     }
 }

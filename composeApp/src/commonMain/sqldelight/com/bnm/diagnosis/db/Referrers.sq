@@ -24,3 +24,7 @@ SELECT * FROM referrers WHERE deleted_at IS NULL ORDER BY name;
 
 softDelete:
 UPDATE referrers SET deleted_at = ? WHERE id = ?;
+
+-- Sync sweep (P3): referrers only have created_at + deleted_at stamps.
+changedSince:
+SELECT * FROM referrers WHERE created_at > :since OR (deleted_at IS NOT NULL AND deleted_at > :since);

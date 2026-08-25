@@ -133,6 +133,22 @@ data class LabResult(
     val isEntered: Boolean get() = !value.isNullOrBlank()
 }
 
+/** One clinic order in the local EMR inbox (P3 bridge; `emr_inbox` table).
+ *  The row carries NO patient demographics — the clinic keeps those; the lab
+ *  asks the walk-in patient and registers them locally. */
+data class EmrInboxItem(
+    val id: String,                   // clinical_lab_orders.id
+    val visitId: String?,
+    val testName: String,
+    val instructions: String?,
+    val status: String?,
+    val labStatus: String?,
+    val accessionNo: String?,
+    val matchedOrderId: String?,      // local lab_orders.id once registered
+    val done: Boolean = false,
+    val createdAt: String? = null,
+)
+
 /** One worklist row: the order + joined patient identity + test count. */
 data class WorklistEntry(
     val order: LabOrder,

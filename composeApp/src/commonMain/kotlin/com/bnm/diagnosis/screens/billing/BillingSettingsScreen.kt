@@ -49,6 +49,7 @@ import com.bnm.diagnosis.chat.LocalSyncEngine
 import com.bnm.diagnosis.chat.currentFy
 import com.bnm.diagnosis.print.BtPrinter
 import com.bnm.diagnosis.print.EscPos
+import com.bnm.diagnosis.sync.LabSyncEngine
 import com.bnm.diagnosis.print.printReceipt
 import com.bnm.diagnosis.print.printToNetworkPrinter
 import kotlinx.coroutines.Dispatchers
@@ -63,6 +64,8 @@ fun BillingSettingsScreen(
     businessId: String,
     onBack: () -> Unit,
     onOpenLicense: (() -> Unit)? = null,
+    /** P3: the lab sync spine — renders the "Sync now" card when provided. */
+    labSync: LabSyncEngine? = null,
 ) {
     val repo = LocalBillingRepository.current
     val scope = rememberCoroutineScope()
@@ -282,6 +285,42 @@ fun BillingSettingsScreen(
                         }
                         Text("Scan a product barcode to add it to the open bill. USB/Bluetooth scanners act as a keyboard on every platform; camera scanning (Android/iOS) is being wired up.",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+
+            // ── Lab data sync (P3) ──
+            if (labSync != null) {
+                item { Text("Lab data sync", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
+                item {
+                    val syncState by labSync.state.collectAsState()
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                if (syncState.disabled)
+                                    "Sync is off — this license is standalone (not linked to a BNM business). Everything keeps working fully offline."
+                                else
+                                    "Backs up patients, orders and results to BNM, converges other seats, and exchanges EMR orders with partner clinics. The app never needs it to work.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                "Last synced: ${syncState.lastSyncAt?.replace('T', ' ')?.take(16) ?: "never"}",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            OutlinedButton(
+                                onClick = { scope.launch { labSync.syncNow() } },
+                                enabled = !syncState.syncing,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                if (syncState.syncing) CircularProgressIndicator(Modifier.padding(end = 8.dp).size(16.dp), strokeWidth = 2.dp)
+                                Text(if (syncState.syncing) "Syncing…" else "Sync now")
+                            }
+                            syncState.lastError?.let {
+                                Text("Last attempt failed: $it", style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.error)
+                            }
+                        }
                     }
                 }
             }

@@ -11,8 +11,14 @@ sealed class Screen(val route: String) {
     // ── LIMS (P1b) — the app's main surface ──
     /** LIMS home: counters + New order + worklist/masters/bills/settings. */
     data object LabHome : Screen("lab_home")
-    /** Registration desk: patient + tests + referrer → order + GST bill. */
-    data object NewOrder : Screen("new_order")
+    /** Registration desk: patient + tests + referrer → order + GST bill.
+     *  Optional `emrId` pre-fills from an EMR inbox row (P3 bridge). */
+    data object NewOrder : Screen("new_order?emrId={emrId}") {
+        fun createRoute(emrId: String? = null) =
+            if (emrId.isNullOrBlank()) "new_order" else "new_order?emrId=$emrId"
+    }
+    /** Clinic lab orders routed to this lab (P3 EMR bridge inbox). */
+    data object EmrInbox : Screen("emr_inbox")
     /** Status-tabbed pipeline worklist; tab = the initial LabStatus. */
     data object Worklist : Screen("worklist/{tab}") {
         fun createRoute(tab: String = "registered") = "worklist/$tab"
