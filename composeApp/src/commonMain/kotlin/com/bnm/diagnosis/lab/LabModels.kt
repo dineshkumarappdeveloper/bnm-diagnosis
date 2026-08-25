@@ -149,6 +149,20 @@ data class EmrInboxItem(
     val createdAt: String? = null,
 )
 
+/** One critical result (CL/CH) with the identity a lab needs to PHONE it out.
+ *  Drives the home dashboard's "Critical results today" card. */
+data class CriticalResult(
+    val orderId: String,
+    val testId: String,
+    val parameterKey: String,
+    val value: String?,
+    val unit: String?,
+    val flag: String?,            // CL | CH
+    val accessionNo: String,
+    val patientName: String,
+    val patientPhone: String?,
+)
+
 /** One worklist row: the order + joined patient identity + test count. */
 data class WorklistEntry(
     val order: LabOrder,

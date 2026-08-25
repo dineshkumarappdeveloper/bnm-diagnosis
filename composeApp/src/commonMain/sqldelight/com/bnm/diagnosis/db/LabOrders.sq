@@ -78,6 +78,18 @@ UPDATE lab_orders SET invoice_id = ?, updated_at = ? WHERE id = ?;
 countByStatusToday:
 SELECT count(*) FROM lab_orders WHERE status = ? AND substr(created_at, 1, 10) = ?;
 
+-- Dashboard worklist: every order still moving through the pipeline (any day),
+-- newest first, capped. Approved-but-not-yet-reported stays visible; reported/
+-- delivered/cancelled are terminal for the home dashboard.
+openOrders:
+SELECT o.*, p.name AS patient_name, p.sex AS patient_sex, p.dob AS patient_dob, p.age_years AS patient_age_years,
+       (SELECT count(*) FROM lab_order_tests t WHERE t.order_id = o.id) AS test_count
+FROM lab_orders o
+JOIN patients p ON p.id = o.patient_id
+WHERE o.status IN ('registered', 'collected', 'in_progress', 'entered', 'verified', 'approved')
+ORDER BY o.created_at DESC
+LIMIT :limit;
+
 -- ── P3 sync ──
 
 -- Push sweep: orders touched since the watermark (every mutation bumps updated_at).

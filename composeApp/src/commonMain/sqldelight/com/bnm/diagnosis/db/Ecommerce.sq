@@ -35,3 +35,8 @@ DELETE FROM ecom_entity;
 
 countEntity:
 SELECT count(*) FROM ecom_entity WHERE entity = ? AND business_id = ?;
+
+-- Dashboard: rows created today (created_at is ISO; caller passes yyyy-MM-dd).
+countEntityToday:
+SELECT count(*) FROM ecom_entity
+WHERE entity = ? AND business_id = ? AND substr(created_at, 1, 10) = ?;

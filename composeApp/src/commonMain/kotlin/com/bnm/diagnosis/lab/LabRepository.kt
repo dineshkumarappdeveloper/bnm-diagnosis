@@ -10,6 +10,7 @@ import com.bnm.diagnosis.db.Lab_orders
 import com.bnm.diagnosis.db.Lab_panels
 import com.bnm.diagnosis.db.Lab_results
 import com.bnm.diagnosis.db.Lab_tests
+import com.bnm.diagnosis.db.OpenOrders
 import com.bnm.diagnosis.db.Patients
 import com.bnm.diagnosis.db.Referrers
 import com.bnm.diagnosis.db.WorklistByStatus
@@ -245,6 +246,29 @@ class LabRepository(
         oQ.countByStatusToday(status, todayLocalDate()).executeAsOne()
     }
 
+    /** Dashboard: every order still moving through the pipeline (registered →
+     *  approved; reported/delivered/cancelled are terminal), newest first. */
+    fun openOrdersFlow(limit: Long): Flow<List<WorklistEntry>> =
+        oQ.openOrders(limit).asFlow().mapToList(Dispatchers.Default)
+            .map { rows -> rows.map { it.toEntry() } }
+            .catch { emit(emptyList()) }
+
+    /** Dashboard: today's critical results (CL/CH) with the patient's name and
+     *  phone — the call-out list (labs must phone criticals). */
+    fun criticalsTodayFlow(limit: Long): Flow<List<CriticalResult>> =
+        resQ.criticalsToday(todayLocalDate(), limit).asFlow().mapToList(Dispatchers.Default)
+            .map { rows ->
+                rows.map {
+                    CriticalResult(
+                        orderId = it.order_id, testId = it.test_id, parameterKey = it.parameter_key,
+                        value = it.value_, unit = it.unit, flag = it.flag,
+                        accessionNo = it.accession_no, patientName = it.patient_name,
+                        patientPhone = it.patient_phone,
+                    )
+                }
+            }
+            .catch { emit(emptyList()) }
+
     /** Attach the GST bill to an order (a lab bill IS a GST invoice). */
     suspend fun linkInvoice(orderId: String, invoiceId: String) = withContext(Dispatchers.Default) {
         oQ.linkInvoice(invoiceId, nowIso(), orderId)
@@ -425,6 +449,16 @@ class LabRepository(
         lab_status, accession_no, matched_order_id, done == 1L, created_at)
 
     private fun WorklistByStatus.toEntry() = WorklistEntry(
+        order = LabOrder(id, accession_no, patient_id, referrer_id, invoice_id, status, priority,
+            notes, created_at, updated_at, collected_at, approved_at, reported_at),
+        patientName = patient_name,
+        patientSex = patient_sex,
+        patientDob = patient_dob,
+        patientAgeYears = patient_age_years,
+        testCount = test_count,
+    )
+
+    private fun OpenOrders.toEntry() = WorklistEntry(
         order = LabOrder(id, accession_no, patient_id, referrer_id, invoice_id, status, priority,
             notes, created_at, updated_at, collected_at, approved_at, reported_at),
         patientName = patient_name,

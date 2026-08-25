@@ -290,7 +290,6 @@ fun App() {
                             if (everSynced == null) runCatching { syncEngine.syncAll(businessId) }
                         }
 
-                        val syncState by labSync.state.collectAsState()
                         Column(Modifier.fillMaxSize()) {
                             if (licState.blocked) LicenseBlockedBanner()
                             Box(Modifier.fillMaxWidth().weight(1f)) {
@@ -309,9 +308,13 @@ fun App() {
                                     onBills = { navController.navigate(Screen.Bills.route) },
                                     onSettings = { navController.navigate(Screen.Settings.route) },
                                     onEmrInbox = { navController.navigate(Screen.EmrInbox.route) },
-                                    syncNote = if (syncState.disabled)
-                                        "Sync off — standalone license (not linked to a BNM business)."
-                                    else null,
+                                    onOpenOrder = { id -> navController.navigate(Screen.LabOrderDetail.createRoute(id)) },
+                                    onNewPatient = { navController.navigate(Screen.Patients.route) },
+                                    onLicenseDevices = { navController.navigate(Screen.LicenseDevices.route) },
+                                    licenseMode = licState.mode,
+                                    licenseSeats = licState.seats,
+                                    businessId = businessId,
+                                    labSync = labSync,
                                 )
                             }
                         }

@@ -64,6 +64,19 @@ UPDATE lab_results SET approved_by = ?, approved_at = ? WHERE order_id = ?;
 setNotes:
 UPDATE lab_results SET notes = ? WHERE order_id = ? AND test_id = ? AND parameter_key = ?;
 
+-- Dashboard: today's CRITICAL results (CL/CH) with patient identity + phone
+-- joined — labs must phone criticals out. entered_at is an ISO instant; the
+-- caller passes today's local date (yyyy-MM-dd).
+criticalsToday:
+SELECT r.order_id, r.test_id, r.parameter_key, r.value, r.unit, r.flag,
+       o.accession_no, p.name AS patient_name, p.phone AS patient_phone
+FROM lab_results r
+JOIN lab_orders o ON o.id = r.order_id
+JOIN patients p ON p.id = o.patient_id
+WHERE r.flag IN ('CL', 'CH') AND substr(r.entered_at, 1, 10) = :today
+ORDER BY r.entered_at DESC
+LIMIT :limit;
+
 -- ── P3 sync ──
 
 -- Push sweep: orders whose result bundle changed since the watermark.

@@ -66,6 +66,14 @@ class BillingRepository(
             ?.let { runCatching { json.decodeFromString<Invoice>(it) }.getOrNull() }
     }
 
+    /** Dashboard: invoices created today — a cheap count over the extracted
+     *  created_at column of the local doc store (no JSON parsing). */
+    suspend fun countInvoicesToday(businessId: String): Long = withContext(Dispatchers.Default) {
+        val today = kotlin.time.Clock.System.now()
+            .toLocalDateTime(TimeZone.currentSystemDefault()).date.toString()
+        q.countEntityToday(INVOICE, businessId, today).executeAsOne()
+    }
+
     /** productId → category NAME for the given ids (offline; one pass over the
      *  synced catalog). Used to bucket a bill's lines into collection stations. */
     suspend fun categoriesFor(businessId: String, productIds: Collection<String>): Map<String, String> =
