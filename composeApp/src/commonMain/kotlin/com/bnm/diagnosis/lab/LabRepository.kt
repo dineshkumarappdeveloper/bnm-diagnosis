@@ -242,9 +242,12 @@ class LabRepository(
             .map { rows -> rows.map { it.toEntry() } }
             .catch { emit(emptyList()) }
 
-    suspend fun countByStatusToday(status: String): Long = withContext(Dispatchers.Default) {
-        oQ.countByStatusToday(status, todayLocalDate()).executeAsOne()
-    }
+    /** Dashboard tab badges: live per-status row counts (cancelled excluded) —
+     *  ONE reactive query; every worklist tab derives its number from the map. */
+    fun statusCountsFlow(): Flow<Map<String, Long>> =
+        oQ.countsByStatus().asFlow().mapToList(Dispatchers.Default)
+            .map { rows -> rows.associate { it.status to it.n } }
+            .catch { emit(emptyMap()) }
 
     /** Dashboard: every order still moving through the pipeline (registered →
      *  approved; reported/delivered/cancelled are terminal), newest first. */

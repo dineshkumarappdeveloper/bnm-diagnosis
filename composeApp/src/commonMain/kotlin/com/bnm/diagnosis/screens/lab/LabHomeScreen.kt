@@ -32,11 +32,10 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.automirrored.outlined.ReceiptLong
 import androidx.compose.material.icons.outlined.Biotech
 import androidx.compose.material.icons.outlined.Call
-import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.PendingActions
 import androidx.compose.material.icons.outlined.People
 import androidx.compose.material.icons.outlined.PersonAddAlt
-import androidx.compose.material.icons.outlined.Science
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.TaskAlt
 import androidx.compose.material.icons.outlined.VerifiedUser
@@ -107,22 +106,30 @@ private val HOME_TABS = listOf(
     HomeWorklistTab("Reported", listOf(LabStatus.REPORTED)),
 )
 
-// KPI cards / stat chips jump straight to a tab (local state, no navigation).
-private const val TAB_REGISTERED = 1
-private const val TAB_IN_PROGRESS = 2
+// The attention bar's "awaiting verification" card jumps straight to this tab.
 private const val TAB_ENTERED = 3
-private const val TAB_APPROVED = 5
-private const val TAB_REPORTED = 6
+
+/** Statuses the "Open" pipeline tab aggregates (mirrors openOrders in LabOrders.sq). */
+private val OPEN_STATUSES = listOf(
+    LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS,
+    LabStatus.ENTERED, LabStatus.VERIFIED, LabStatus.APPROVED,
+)
+
+/** One tab's badge, derived from the single statusCountsFlow map. */
+private fun tabCount(tab: HomeWorklistTab, counts: Map<String, Long>): Long =
+    (tab.statuses ?: OPEN_STATUSES).sumOf { counts[it] ?: 0L }
 
 /**
  * LIMS home — the app's main surface. Desktop (primary target) gets a REAL
  * dashboard: header band with the lab identity + New order/New patient CTAs,
- * a KPI row of today's pipeline counters (each switches the worklist tab), THE
- * worklist itself — a status-tabbed table filling the viewport (the separate
- * Worklist page is retired) — and a right rail with critical results, the EMR
- * inbox, license & sync, and shortcuts. Narrow screens (Android) keep the
- * stacked layout with the same tab chips over a compact list. 100% offline
- * (LabRepository); sync/EMR/billing bits are additive.
+ * an ATTENTION bar (criticals / awaiting-verification / EMR-pending / sync-off
+ * cards, each shown only when actionable), THE worklist itself — a
+ * status-tabbed table filling the viewport whose tabs carry live counts (the
+ * KPI card row is retired; one statusCountsFlow feeds every badge) — and a
+ * right rail with critical results, the EMR inbox, license & sync, and
+ * shortcuts. Narrow screens (Android) keep the stacked layout with the same
+ * counted tab chips over a compact list. 100% offline (LabRepository);
+ * sync/EMR/billing bits are additive.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -148,7 +155,7 @@ fun LabHomeScreen(
     /** License identity for the header chip + License & sync card. */
     licenseMode: String? = null,
     licenseSeats: Int = 0,
-    /** Bills-today KPI counts this business's local invoice docs ("" = standalone). */
+    /** Bills-shortcut "N today" caption counts this business's local invoice docs ("" = standalone). */
     businessId: String = "",
     /** P3: the lab sync spine — last-synced/Sync now; null hides all sync UI. */
     labSync: LabSyncEngine? = null,
@@ -176,23 +183,15 @@ fun LabHomeScreen(
         tabEntries.distinctBy { it.order.id }.sortedByDescending { it.order.createdAt }
     }
 
-    // Today's pipeline counters (orders CREATED today, per stage).
-    var registered by remember { mutableStateOf(0L) }
-    var inProgress by remember { mutableStateOf(0L) }
-    var awaitingVerify by remember { mutableStateOf(0L) }
-    var approved by remember { mutableStateOf(0L) }
-    var reported by remember { mutableStateOf(0L) }
+    // ONE reactive per-status rollup feeds every tab badge + the attention bar.
+    val statusCounts by remember(repo) { repo.statusCountsFlow() }.collectAsState(emptyMap())
+
+    // Bills-shortcut live caption ("N today"); null/0 falls back to the static label.
     var billsToday by remember { mutableStateOf<Long?>(null) }
     LaunchedEffect(Unit) {
-        runCatching {
-            registered = repo.countByStatusToday(LabStatus.REGISTERED) + repo.countByStatusToday(LabStatus.COLLECTED)
-            inProgress = repo.countByStatusToday(LabStatus.IN_PROGRESS)
-            awaitingVerify = repo.countByStatusToday(LabStatus.ENTERED)
-            approved = repo.countByStatusToday(LabStatus.APPROVED)
-            reported = repo.countByStatusToday(LabStatus.REPORTED)
-        }
         runCatching { billsToday = billingRepo.countInvoicesToday(businessId) }
     }
+    val billsCaption = billsToday?.takeIf { it > 0 }?.let { "$it today" } ?: "GST invoices"
 
     // Post-registration confirmation: the accession number, prominent.
     LaunchedEffect(accessionNotice) {
@@ -258,23 +257,17 @@ fun LabHomeScreen(
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
                     )
 
-                    // ── KPI row: today's pipeline → the matching worklist tab ──
-                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        KpiCard("Registered", registered, Icons.Outlined.PersonAddAlt, KpiTint.Neutral,
-                            Modifier.weight(1f)) { worklistTab = TAB_REGISTERED }
-                        KpiCard("In progress", inProgress, Icons.Outlined.Science, KpiTint.Info,
-                            Modifier.weight(1f)) { worklistTab = TAB_IN_PROGRESS }
-                        KpiCard("Awaiting verify", awaitingVerify, Icons.Outlined.PendingActions, KpiTint.Warning,
-                            Modifier.weight(1f)) { worklistTab = TAB_ENTERED }
-                        KpiCard("Approved", approved, Icons.Outlined.TaskAlt, KpiTint.Success,
-                            Modifier.weight(1f)) { worklistTab = TAB_APPROVED }
-                        KpiCard("Reported", reported, Icons.Outlined.Description, KpiTint.Teal,
-                            Modifier.weight(1f)) { worklistTab = TAB_REPORTED }
-                        billsToday?.let { bills ->
-                            KpiCard("Bills today", bills, Icons.AutoMirrored.Outlined.ReceiptLong, KpiTint.Neutral,
-                                Modifier.weight(1f)) { onBills() }
-                        }
-                    }
+                    // ── Attention bar: only what needs a human right now (tabs
+                    // carry the pipeline numbers; the KPI card row is retired) ──
+                    AttentionBar(
+                        criticalCount = criticals.size,
+                        enteredCount = statusCounts[LabStatus.ENTERED] ?: 0L,
+                        emrPending = emrPending,
+                        syncEnabled = syncState != null && !syncState.disabled,
+                        syncDisabled = syncState?.disabled == true,
+                        onAwaitingVerify = { worklistTab = TAB_ENTERED },
+                        onEmrInbox = onEmrInbox,
+                    )
 
                     // ── Main grid: THE worklist left (fills the viewport, scrolls
                     // internally), action rail right (scrolls on short windows) ──
@@ -284,6 +277,7 @@ fun LabHomeScreen(
                                 tabIndex = worklistTab,
                                 onTabChange = { worklistTab = it },
                                 entries = worklist,
+                                counts = statusCounts,
                                 onOpenOrder = onOpenOrder,
                             )
                         }
@@ -303,6 +297,7 @@ fun LabHomeScreen(
                                 onLicenseDevices = onLicenseDevices,
                             )
                             ShortcutsCard(
+                                billsCaption = billsCaption,
                                 onPatients = onPatients, onReferrers = onReferrers,
                                 onCatalog = onCatalog, onBills = onBills, onSettings = onSettings,
                             )
@@ -315,39 +310,17 @@ fun LabHomeScreen(
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                // ── Today counters → worklist tabs (below, on this same page) ──
-                Text("Today", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    StatChip("Registered", registered) { worklistTab = TAB_REGISTERED }
-                    StatChip("In progress", inProgress) { worklistTab = TAB_IN_PROGRESS }
-                    StatChip("Awaiting verify", awaitingVerify) { worklistTab = TAB_ENTERED }
-                    StatChip("Approved", approved) { worklistTab = TAB_APPROVED }
-                    StatChip("Reported", reported) { worklistTab = TAB_REPORTED }
-                    billsToday?.let { bills -> StatChip("Bills today", bills) { onBills() } }
-                }
-
-                // ── P3: EMR bridge badge — clinic orders awaiting registration ──
-                if (emrPending > 0) {
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = MaterialTheme.colorScheme.tertiaryContainer,
-                        modifier = Modifier.fillMaxWidth().widthIn(max = 560.dp).clickable(onClick = onEmrInbox),
-                    ) {
-                        Row(
-                            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(Icons.Outlined.Biotech, contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onTertiaryContainer,
-                                modifier = Modifier.size(22.dp))
-                            Text(
-                                "  EMR orders: $emrPending pending — tap to review",
-                                style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer,
-                            )
-                        }
-                    }
-                }
+                // ── Attention bar: only what needs a human right now (the tab
+                // chips below carry the pipeline numbers) ──
+                AttentionBar(
+                    criticalCount = criticals.size,
+                    enteredCount = statusCounts[LabStatus.ENTERED] ?: 0L,
+                    emrPending = emrPending,
+                    syncEnabled = syncState != null && !syncState.disabled,
+                    syncDisabled = syncState?.disabled == true,
+                    onAwaitingVerify = { worklistTab = TAB_ENTERED },
+                    onEmrInbox = onEmrInbox,
+                )
 
                 // ── Primary action: register a new order (full-width is fine on phones) ──
                 Button(
@@ -368,7 +341,9 @@ fun LabHomeScreen(
 
                 // ── Worklist: same tabbed panel, scaled down (chips + list) ──
                 Text("Worklist", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                WorklistTabChips(selected = worklistTab, onSelect = { worklistTab = it })
+                // Narrow chips only badge non-zero tabs (width is precious).
+                WorklistTabChips(selected = worklistTab, onSelect = { worklistTab = it },
+                    counts = statusCounts, showZeroCounts = false)
                 if (worklist.isEmpty()) {
                     Text(emptyWorklistLabel(worklistTab),
                         style = MaterialTheme.typography.bodySmall,
@@ -387,16 +362,10 @@ fun LabHomeScreen(
                     HomeCard("Patients", "Search & manage", Icons.Outlined.PersonAddAlt) { onPatients() }
                     HomeCard("Referrers", "Doctors & clinics", Icons.Outlined.People) { onReferrers() }
                     HomeCard("Test catalog", "Tests, panels & prices", Icons.Outlined.Biotech) { onCatalog() }
-                    HomeCard("Bills", "GST invoices", Icons.AutoMirrored.Outlined.ReceiptLong) { onBills() }
+                    HomeCard("Bills", billsCaption, Icons.AutoMirrored.Outlined.ReceiptLong) { onBills() }
                     HomeCard("Settings", "Printer · License", Icons.Outlined.Settings) { onSettings() }
                 }
-
-                // ── P3: one-line sync note (standalone license → sync disabled) ──
-                if (syncState?.disabled == true) {
-                    Text("Sync off — standalone license (not linked to a BNM business).",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+                // (The standalone "Sync off" footer note now lives in the attention bar.)
             }
         }
     }
@@ -406,48 +375,86 @@ fun LabHomeScreen(
 // Wide-layout building blocks
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** KPI accent family — all resolved from AppTheme tokens (no raw hex). */
-private enum class KpiTint { Neutral, Info, Warning, Success, Teal }
-
+/** Important-notifications band (both layouts): compact alert cards, each
+ *  rendered ONLY when actionable — sourced from flows the screen already
+ *  collects (no extra polling). When nothing applies, a single slim all-clear
+ *  line keeps the band from looking broken. All colors are AppTheme tokens. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun kpiColors(tint: KpiTint): Pair<Color, Color> {
+private fun AttentionBar(
+    criticalCount: Int,
+    enteredCount: Long,
+    emrPending: Long,
+    syncEnabled: Boolean,
+    syncDisabled: Boolean,
+    onAwaitingVerify: () -> Unit,
+    onEmrInbox: () -> Unit,
+) {
     val c = AppTheme.colors
-    val teal = lerp(c.info, c.success, 0.45f)
-    return when (tint) {
-        KpiTint.Neutral -> c.surfaceMuted to c.textSecondary
-        KpiTint.Info -> c.infoSoft to c.info
-        KpiTint.Warning -> c.warningSoft to c.warning
-        KpiTint.Success -> c.successSoft to c.accentTextOnSoft
-        KpiTint.Teal -> teal.copy(alpha = if (c.isDark) 0.25f else 0.14f) to teal
+    val anyAlert = criticalCount > 0 || enteredCount > 0 ||
+        (emrPending > 0 && syncEnabled) || syncDisabled
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (criticalCount > 0) AttentionCard(
+            icon = Icons.Outlined.WarningAmber, bg = c.dangerSoft, fg = c.danger,
+            count = criticalCount.toLong(),
+            label = if (criticalCount == 1) "critical result today — call the patient"
+            else "critical results today — call the patients",
+            caption = "see panel →",
+        )
+        if (enteredCount > 0) AttentionCard(
+            icon = Icons.Outlined.PendingActions, bg = c.warningSoft, fg = c.warning,
+            count = enteredCount, label = "awaiting verification",
+            onClick = onAwaitingVerify,
+        )
+        if (emrPending > 0 && syncEnabled) AttentionCard(
+            icon = Icons.Outlined.Biotech, bg = c.infoSoft, fg = c.info,
+            count = emrPending,
+            label = if (emrPending == 1L) "EMR order pending" else "EMR orders pending",
+            onClick = onEmrInbox,
+        )
+        if (syncDisabled) AttentionCard(
+            icon = Icons.Outlined.CloudOff, bg = c.surfaceMuted, fg = c.textSecondary,
+            label = "Sync off — standalone license",
+        )
+        if (!anyAlert) AttentionCard(
+            icon = Icons.Outlined.TaskAlt, bg = c.successSoft, fg = c.accentTextOnSoft,
+            label = "All clear — nothing needs attention",
+        )
     }
 }
 
+/** One attention card: icon + bold count + short label (+ optional caption). */
 @Composable
-private fun KpiCard(
-    label: String,
-    count: Long,
+private fun AttentionCard(
     icon: ImageVector,
-    tint: KpiTint,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit,
+    bg: Color,
+    fg: Color,
+    label: String,
+    count: Long? = null,
+    caption: String? = null,
+    onClick: (() -> Unit)? = null,
 ) {
-    val (bg, fg) = kpiColors(tint)
-    Card(
-        modifier = modifier.clickable(onClick = onClick),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = bg,
+        modifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier,
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Box(
-                Modifier.size(34.dp).background(bg, RoundedCornerShape(10.dp)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(19.dp))
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(18.dp))
+            if (count != null) Text("$count", style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold, color = fg)
+            Text(label, style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium, color = fg)
+            caption?.let {
+                Text(it, style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.7f))
             }
-            Text("$count", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            Text(label, style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -484,16 +491,27 @@ private fun emptyWorklistLabel(tabIndex: Int): String =
     if (HOME_TABS[tabIndex].statuses == null) "No open orders — start with New order"
     else "No ${HOME_TABS[tabIndex].label.lowercase()} orders yet"
 
-/** The worklist's status filter chips (shared by both layouts). */
+/** The worklist's status filter chips (shared by both layouts). Every chip
+ *  carries its live count from statusCountsFlow — "Label · N". The wide panel
+ *  shows 0s too (scanability); narrow chips badge only non-zero tabs
+ *  (`showZeroCounts = false`) to save width. */
 @Composable
-private fun WorklistTabChips(selected: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
+private fun WorklistTabChips(
+    selected: Int,
+    onSelect: (Int) -> Unit,
+    counts: Map<String, Long>,
+    showZeroCounts: Boolean,
+    modifier: Modifier = Modifier,
+) {
     Row(
         modifier.horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         HOME_TABS.forEachIndexed { i, t ->
-            FilterChip(selected = i == selected, onClick = { onSelect(i) }, label = { Text(t.label) })
+            val n = tabCount(t, counts)
+            val label = if (showZeroCounts || n > 0) "${t.label} · $n" else t.label
+            FilterChip(selected = i == selected, onClick = { onSelect(i) }, label = { Text(label) })
         }
     }
 }
@@ -505,6 +523,7 @@ private fun WorklistPanel(
     tabIndex: Int,
     onTabChange: (Int) -> Unit,
     entries: List<WorklistEntry>,
+    counts: Map<String, Long>,
     onOpenOrder: (String) -> Unit,
 ) {
     Card(
@@ -519,6 +538,7 @@ private fun WorklistPanel(
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp))
             WorklistTabChips(
                 selected = tabIndex, onSelect = onTabChange,
+                counts = counts, showZeroCounts = true,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
             )
             Spacer(Modifier.height(8.dp))
@@ -775,6 +795,7 @@ private fun LicenseModeChip(mode: String?) {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ShortcutsCard(
+    billsCaption: String,
     onPatients: () -> Unit,
     onReferrers: () -> Unit,
     onCatalog: () -> Unit,
@@ -794,18 +815,26 @@ private fun ShortcutsCard(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 maxItemsInEachRow = 2,
             ) {
-                ShortcutTile("Patients", Icons.Outlined.PersonAddAlt, Modifier.weight(1f), onPatients)
-                ShortcutTile("Referrers", Icons.Outlined.People, Modifier.weight(1f), onReferrers)
-                ShortcutTile("Test catalog", Icons.Outlined.Biotech, Modifier.weight(1f), onCatalog)
-                ShortcutTile("Bills", Icons.AutoMirrored.Outlined.ReceiptLong, Modifier.weight(1f), onBills)
-                ShortcutTile("Settings", Icons.Outlined.Settings, Modifier.weight(1f), onSettings)
+                ShortcutTile("Patients", Icons.Outlined.PersonAddAlt, Modifier.weight(1f), onClick = onPatients)
+                ShortcutTile("Referrers", Icons.Outlined.People, Modifier.weight(1f), onClick = onReferrers)
+                ShortcutTile("Test catalog", Icons.Outlined.Biotech, Modifier.weight(1f), onClick = onCatalog)
+                ShortcutTile("Bills", Icons.AutoMirrored.Outlined.ReceiptLong, Modifier.weight(1f),
+                    caption = billsCaption, onClick = onBills)
+                ShortcutTile("Settings", Icons.Outlined.Settings, Modifier.weight(1f), onClick = onSettings)
             }
         }
     }
 }
 
 @Composable
-private fun ShortcutTile(label: String, icon: ImageVector, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun ShortcutTile(
+    label: String,
+    icon: ImageVector,
+    modifier: Modifier = Modifier,
+    /** Optional live second line (e.g. Bills' "N today"). */
+    caption: String? = null,
+    onClick: () -> Unit,
+) {
     Surface(
         shape = RoundedCornerShape(10.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -818,8 +847,15 @@ private fun ShortcutTile(label: String, icon: ImageVector, modifier: Modifier = 
         ) {
             Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(18.dp))
-            Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Column {
+                Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                caption?.let {
+                    Text(it, style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
         }
     }
 }
@@ -851,22 +887,6 @@ private fun CompactOrderRow(e: WorklistEntry, onOpen: () -> Unit) {
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-        }
-    }
-}
-
-@Composable
-private fun StatChip(label: String, count: Long, onClick: () -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        modifier = Modifier.clickable(onClick = onClick),
-    ) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("$count", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSecondaryContainer)
-            Text(label, style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSecondaryContainer)
         }
     }
 }

@@ -55,6 +55,9 @@ class DashboardQueriesTest {
         assertEquals("Dash Patient", open.first().patientName)
         assertEquals(1L, open.first().testCount)
 
+        // Tab-badge rollup: one map, per status.
+        assertEquals(mapOf(LabStatus.REGISTERED to 2L), repo.statusCountsFlow().first())
+
         // A critical entry (480 > criticalHigh 400) lands on today's call-out
         // list with the patient's phone number.
         repo.enterResult(o2.id, "t-dash-glu", "glu", "480", enteredBy = "Tech").getOrThrow()
@@ -76,5 +79,11 @@ class DashboardQueriesTest {
         open = repo.openOrdersFlow(12).first()
         assertEquals(1, open.size)
         assertEquals(o2.id, open.first().order.id)
+
+        // The rollup tracks the walk: o1 reported, o2 fully entered.
+        assertEquals(
+            mapOf(LabStatus.ENTERED to 1L, LabStatus.REPORTED to 1L),
+            repo.statusCountsFlow().first(),
+        )
     }
 }
