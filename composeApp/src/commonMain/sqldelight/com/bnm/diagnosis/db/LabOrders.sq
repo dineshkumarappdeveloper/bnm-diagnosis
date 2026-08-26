@@ -50,6 +50,10 @@ SELECT * FROM lab_orders WHERE accession_no = ?;
 -- both the list row and range resolution) + how many tests ride the order.
 worklistByStatus:
 SELECT o.*, p.name AS patient_name, p.sex AS patient_sex, p.dob AS patient_dob, p.age_years AS patient_age_years,
+       (SELECT count(*) FROM lab_order_tests t WHERE t.order_id = o.id
+          AND NOT EXISTS (SELECT 1 FROM lab_results r
+                          WHERE r.order_id = o.id AND r.test_id = t.test_id
+                            AND (r.value IS NULL OR trim(r.value) = ''))) AS done_count,
        (SELECT count(*) FROM lab_order_tests t WHERE t.order_id = o.id) AS test_count
 FROM lab_orders o
 JOIN patients p ON p.id = o.patient_id
@@ -84,6 +88,10 @@ SELECT status, count(*) AS n FROM lab_orders WHERE status != 'cancelled' GROUP B
 -- delivered/cancelled are terminal for the home dashboard.
 openOrders:
 SELECT o.*, p.name AS patient_name, p.sex AS patient_sex, p.dob AS patient_dob, p.age_years AS patient_age_years,
+       (SELECT count(*) FROM lab_order_tests t WHERE t.order_id = o.id
+          AND NOT EXISTS (SELECT 1 FROM lab_results r
+                          WHERE r.order_id = o.id AND r.test_id = t.test_id
+                            AND (r.value IS NULL OR trim(r.value) = ''))) AS done_count,
        (SELECT count(*) FROM lab_order_tests t WHERE t.order_id = o.id) AS test_count
 FROM lab_orders o
 JOIN patients p ON p.id = o.patient_id

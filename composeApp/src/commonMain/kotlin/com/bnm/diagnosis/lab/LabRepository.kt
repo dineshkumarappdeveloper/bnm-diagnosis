@@ -597,6 +597,7 @@ class LabRepository(
         patientDob = patient_dob,
         patientAgeYears = patient_age_years,
         testCount = test_count,
+        doneCount = done_count,
     )
 
     private fun OpenOrders.toEntry() = WorklistEntry(
@@ -607,6 +608,7 @@ class LabRepository(
         patientDob = patient_dob,
         patientAgeYears = patient_age_years,
         testCount = test_count,
+        doneCount = done_count,
     )
 
     companion object {

@@ -244,6 +244,8 @@ data class WorklistEntry(
     val patientDob: String?,
     val patientAgeYears: Long?,
     val testCount: Long,
+    /** Tests whose every parameter already has a value — the "3 of 7" numerator. */
+    val doneCount: Long = 0,
 )
 
 /** The linear order pipeline. Guards live in [LabRepository.setOrderStatus]. */

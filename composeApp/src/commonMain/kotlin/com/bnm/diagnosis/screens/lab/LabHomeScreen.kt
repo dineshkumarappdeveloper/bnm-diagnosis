@@ -86,6 +86,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
+import androidx.compose.material3.LinearProgressIndicator
 
 /** Desktop-first breakpoint: ≥ this width the home renders as a two-column
  *  dashboard; below it, the stacked phone layout. */
@@ -597,7 +598,7 @@ private fun WorklistPanel(
                 ) {
                     TableHeadCell("ACCESSION", Modifier.width(150.dp))
                     TableHeadCell("PATIENT", Modifier.weight(1f))
-                    TableHeadCell("TESTS", Modifier.width(52.dp))
+                    TableHeadCell("PROGRESS", Modifier.width(96.dp))
                     TableHeadCell("STATUS", Modifier.width(120.dp))
                     TableHeadCell("REGISTERED", Modifier.width(92.dp))
                     Spacer(Modifier.width(64.dp))
@@ -624,8 +625,7 @@ private fun WorklistPanel(
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            Text("${e.testCount}", style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.width(52.dp))
+                            TestProgressCell(e.doneCount, e.testCount, Modifier.width(96.dp))
                             Box(Modifier.width(120.dp)) { LabStatusChip(e.order.status, e.order.priority) }
                             Text(shortTimeLabel(e.order.createdAt), style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(92.dp))
@@ -922,7 +922,7 @@ private fun CompactOrderRow(e: WorklistEntry, onOpen: () -> Unit) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("${e.patientName} · ${ageSexLabel(e.patientDob, e.patientAgeYears, e.patientSex)}",
                     style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("${e.testCount} test${if (e.testCount == 1L) "" else "s"} · ${shortTimeLabel(e.order.createdAt)}",
+                Text("${e.doneCount}/${e.testCount} test${if (e.testCount == 1L) "" else "s"} done · ${shortTimeLabel(e.order.createdAt)}",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -954,4 +954,31 @@ private fun todayLabel(): String {
     val dows = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
     val mons = listOf("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
     return "${dows[d.dayOfWeek.ordinal]}, ${d.day} ${mons[d.month.ordinal]} ${d.year}"
+}
+
+/**
+ * Worklist progress: how many of an order's tests have every parameter filled
+ * ("3/7"), with a hairline bar. A bare test count told you the size of the job
+ * but not how far along it was — this is what the bench actually scans for.
+ */
+@Composable
+private fun TestProgressCell(done: Long, total: Long, modifier: Modifier = Modifier) {
+    val c = AppTheme.colors
+    val complete = total > 0 && done >= total
+    Column(modifier.padding(end = 8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text(
+            "$done/$total",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = if (complete) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (complete) c.success else MaterialTheme.colorScheme.onSurface,
+        )
+        LinearProgressIndicator(
+            progress = { if (total <= 0) 0f else (done.toFloat() / total.toFloat()).coerceIn(0f, 1f) },
+            modifier = Modifier.fillMaxWidth().height(3.dp),
+            color = if (complete) c.success else MaterialTheme.colorScheme.primary,
+            trackColor = MaterialTheme.colorScheme.surfaceVariant,
+            gapSize = 0.dp,
+            drawStopIndicator = {},
+        )
+    }
 }
