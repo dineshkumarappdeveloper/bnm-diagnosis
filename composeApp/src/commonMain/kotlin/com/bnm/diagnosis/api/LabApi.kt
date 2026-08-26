@@ -285,7 +285,10 @@ class LabApi(
     /** Throw the typed sync-disabled error on 409 no_business, else a plain error. */
     private fun syncFail(status: HttpStatusCode, text: String): Nothing {
         val obj = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull()
-        if (status == HttpStatusCode.Conflict && obj.strField("code") == "no_business") {
+        val conflictCode = obj.strField("code")
+        if (status == HttpStatusCode.Conflict &&
+            (conflictCode == "no_business" || conflictCode == "standalone_edition")
+        ) {
             throw LabSyncDisabledException(
                 obj.strField("error") ?: "This license is standalone — sync is disabled"
             )

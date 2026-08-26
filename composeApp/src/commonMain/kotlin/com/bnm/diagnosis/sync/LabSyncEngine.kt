@@ -102,6 +102,14 @@ class LabSyncEngine(
      */
     suspend fun syncNow() {
         if (license.deviceToken() == null) return // not activated — nothing to talk to
+        // A STANDALONE licence is sold as offline-only: internet is needed once,
+        // at activation, and never again. Return before any network call so the
+        // app makes no requests at all — not even ones that would 409.
+        if (license.state.value.isStandalone) {
+            if (!prefs.syncDisabled) prefs.syncDisabled = true
+            _state.value = _state.value.copy(syncing = false, disabled = true)
+            return
+        }
         mutex.withLock {
             _state.value = _state.value.copy(syncing = true, lastError = null)
             try {

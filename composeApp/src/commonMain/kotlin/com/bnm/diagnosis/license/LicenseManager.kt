@@ -22,6 +22,7 @@ data class LicenseClaims(
     val mode: String?,       // "perpetual" | "subscription"
     val seats: Int?,
     val businessId: String?, // biz
+    val edition: String?,    // ed — "connected" | "standalone" (absent = connected)
     val licExp: Long?,       // subscription license expiry (epoch seconds)
     val issuedAt: Long?,     // iat
     val exp: Long?,          // JWS exp (subscription only: expiry + 45d grace)
@@ -37,7 +38,13 @@ data class LicenseState(
     val expiresAt: String? = null,
     val businessId: String? = null,
     val deviceRowId: String? = null,
-)
+    /** "connected" (ecosystem sync) or "standalone" (offline-only after the
+     *  one-time online activation). Absent in legacy licences = connected. */
+    val edition: String = LicenseManager.EDITION_CONNECTED,
+) {
+    /** Sold as offline-only: never sync, never nag about being offline. */
+    val isStandalone: Boolean get() = edition == LicenseManager.EDITION_STANDALONE
+}
 
 /**
  * Persists + evaluates the device's BNM Diagnosis license (P2).
@@ -73,6 +80,8 @@ class LicenseManager {
         const val ISSUER = "bnm-lab-license"
         const val MODE_PERPETUAL = "perpetual"
         const val MODE_SUBSCRIPTION = "subscription"
+        const val EDITION_CONNECTED = "connected"
+        const val EDITION_STANDALONE = "standalone"
 
         /** Subscriptions keep working 45 days past lic_exp (offline grace). */
         private const val GRACE_SECONDS = 45L * 24 * 60 * 60
@@ -163,6 +172,7 @@ class LicenseManager {
             mode = payload.str("mode"),
             seats = payload["seats"]?.jsonPrimitive?.intOrNull,
             businessId = payload.str("biz"),
+            edition = payload.str("ed"),
             licExp = payload["lic_exp"]?.jsonPrimitive?.longOrNull,
             issuedAt = payload["iat"]?.jsonPrimitive?.longOrNull,
             exp = payload["exp"]?.jsonPrimitive?.longOrNull,
@@ -200,6 +210,7 @@ class LicenseManager {
         seats = settings.getInt(KEY_SEATS, 0),
         expiresAt = settings.getStringOrNull(KEY_EXPIRES_AT),
         businessId = settings.getStringOrNull(KEY_BUSINESS_ID),
+        edition = claims()?.edition?.takeIf { it.isNotBlank() } ?: EDITION_CONNECTED,
         deviceRowId = settings.getStringOrNull(KEY_DEVICE_ROW_ID),
     )
 

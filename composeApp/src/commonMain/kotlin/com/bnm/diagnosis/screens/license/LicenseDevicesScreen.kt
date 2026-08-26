@@ -122,6 +122,18 @@ fun LicenseDevicesScreen(
                         )
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             ModeChip(license.mode)
+                            if (license.isStandalone) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    shape = RoundedCornerShape(8.dp),
+                                ) {
+                                    Text(
+                                        "Offline edition",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                    )
+                                }
+                            }
                             Text(
                                 "${license.seats} device${if (license.seats == 1) "" else "s"} allowed",
                                 style = MaterialTheme.typography.bodySmall,
@@ -131,6 +143,13 @@ fun LicenseDevicesScreen(
                         if (license.mode == LicenseManager.MODE_SUBSCRIPTION && !license.expiresAt.isNullOrBlank()) {
                             Text(
                                 "Valid until ${license.expiresAt!!.take(10)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (license.isStandalone) {
+                            Text(
+                                "Offline edition — everything stays on this computer. Internet was needed once, at activation, and is not needed again.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -148,7 +167,7 @@ fun LicenseDevicesScreen(
             // they are sold outright and must never nag.
             item {
                 val sub = licenseManager.subscriptionStatus()
-                if (sub.isSubscription) {
+                if (sub.isSubscription) {   // perpetual — offline or not — never nags
                     val tone = when (sub.state) {
                         SubscriptionState.EXPIRED -> AppTheme.colors.dangerSoft
                         SubscriptionState.IN_GRACE -> AppTheme.colors.warningSoft
