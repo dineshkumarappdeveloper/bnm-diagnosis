@@ -121,5 +121,47 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
         "role TEXT NOT NULL DEFAULT 'receptionist', pin_hash TEXT, active INTEGER NOT NULL DEFAULT 1, " +
         "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT)", 0)
     driver.execute(null, "CREATE INDEX IF NOT EXISTS staff_active ON staff(active, name)", 0)
+    // Round-1 columns. Existing P4 installs already have `staff`, so the CREATE
+    // above is a no-op there — add them one at a time, in the SAME order as the
+    // .sq CREATE, because every staff query is `SELECT *` and maps positionally.
+    driver.addColumn("staff", "username", "TEXT")
+    driver.addColumn("staff", "signature_png", "TEXT")
+    driver.addColumn("staff", "qualifications", "TEXT")
+    driver.addColumn("staff", "registration_no", "TEXT")
+
+    // ── Round 1: referrer/rate stamps so edits actually sync ──
+    driver.addColumn("referrers", "updated_at", "TEXT")
+    driver.addColumn("referrer_rates", "updated_at", "TEXT")
+
+    // ── Round 1: commission % frozen onto the order line at registration ──
+    driver.addColumn("lab_order_tests", "commission_pct", "REAL NOT NULL DEFAULT 0")
+
+    // ── Round 1: per-(referrer, test) commission overrides ──
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS referrer_commission_rates (referrer_id TEXT NOT NULL, " +
+        "test_id TEXT NOT NULL, commission_pct REAL NOT NULL, updated_at TEXT, " +
+        "PRIMARY KEY (referrer_id, test_id))", 0)
+
+    // ── Round 1: settled commission payouts ──
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS referrer_payouts (id TEXT NOT NULL PRIMARY KEY, " +
+        "referrer_id TEXT NOT NULL, period_from TEXT NOT NULL, period_to TEXT NOT NULL, " +
+        "gross REAL NOT NULL, payable REAL NOT NULL, paid_amount REAL NOT NULL DEFAULT 0, " +
+        "paid_at TEXT, method TEXT, notes TEXT, created_at TEXT NOT NULL, updated_at TEXT)", 0)
+    driver.execute(null,
+        "CREATE INDEX IF NOT EXISTS referrer_payouts_ref ON referrer_payouts(referrer_id, period_to)", 0)
+
+    // ── Round 1: lab-wide key/value settings (commission base lives here) ──
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS lab_settings (key TEXT NOT NULL PRIMARY KEY, " +
+        "value TEXT NOT NULL, updated_at TEXT)", 0)
+
+    // ── Round 1: report share tokens for the printed QR ──
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS lab_reports (order_id TEXT NOT NULL PRIMARY KEY, " +
+        "token TEXT NOT NULL, accession_no TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', " +
+        "published_at TEXT, expires_at TEXT, sha256 TEXT, created_at TEXT NOT NULL, updated_at TEXT)", 0)
+    driver.execute(null, "CREATE UNIQUE INDEX IF NOT EXISTS lab_reports_token ON lab_reports(token)", 0)
+
     return AppDatabase(driver)
 }

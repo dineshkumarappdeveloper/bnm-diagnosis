@@ -83,11 +83,13 @@ data class Referrer(
     val commissionPct: Double = 0.0,
     val createdAt: String = "",
     val deletedAt: String? = null,
+    /** Stamped on every write so edits reach the lab's other seats. */
+    val updatedAt: String? = null,
 )
 
-/** P4 · one line of a referrer's commission statement. `gross` is summed from
- *  the ORDER LINE SNAPSHOTS in the range (historical truth — already at the
- *  referrer's negotiated rate); `payable` = gross × commissionPct / 100. */
+/** P4 · one line of a referrer's commission statement. Both figures are summed
+ *  from the ORDER LINE SNAPSHOTS in the range (historical truth — already at
+ *  the price AND percentage that applied when the order was registered). */
 data class ReferrerCommissionRow(
     val referrerId: String,
     val referrerName: String,
@@ -95,9 +97,19 @@ data class ReferrerCommissionRow(
     val phone: String? = null,
     val ordersCount: Long = 0,
     val gross: Double = 0.0,
+    /** The referrer's CURRENT headline rate — display context only. */
     val commissionPct: Double = 0.0,
+    /**
+     * Commission actually owed, summed per line from the percentage frozen on
+     * each order line at registration. This is the payable figure; `gross *
+     * commissionPct` is NOT, because lines may carry per-test overrides and
+     * because the headline rate may have changed since the order was taken.
+     */
+    val payableSnapshot: Double = 0.0,
 ) {
-    val payable: Double get() = gross * commissionPct / 100.0
+    val payable: Double get() = payableSnapshot
+    /** Blended rate actually earned over the period, for the statement header. */
+    val effectivePct: Double get() = if (gross > 0) payableSnapshot / gross * 100.0 else 0.0
 }
 
 /** P4 · commission-report drill-down row: one of a referrer's orders in range. */
@@ -108,7 +120,112 @@ data class ReferrerOrderRow(
     val createdAt: String,
     val status: String,
     val amount: Double,
+    val reportedAt: String? = null,
 )
+
+// ── Commission (round-1 items 7 + 8) ────────────────────────────────────────
+
+/**
+ * The three commission levels for ONE referrer, read together so the editor can
+ * show not just what a test pays but WHERE that number came from.
+ *
+ * [overrides] holds only the per-(referrer, test) rows that actually exist. A
+ * missing key means INHERIT — never a stored copy of the inherited value, which
+ * is what lets the lab raise [labBasePct] and have it flow through everywhere.
+ */
+data class CommissionRateSheet(
+    val referrerId: String,
+    val labBasePct: Double = 0.0,
+    /** null = this referrer has no rate of their own and rides the lab base. */
+    val referrerPct: Double? = null,
+    val overrides: Map<String, Double> = emptyMap(),
+) {
+    /** What a test with NO per-test row pays — the editor's "inherited" hint. */
+    val inheritedPct: Double get() = LabRepository.resolveCommissionPct(labBasePct, referrerPct, null)
+
+    /** Where [inheritedPct] comes from, said in words for the editor caption. */
+    val inheritedFrom: String
+        get() = if (referrerPct != null) "this referrer's rate" else "the lab base"
+}
+
+/**
+ * One line of a referrer's PER-TEST commission breakdown (feedback item 7 —
+ * "well detail"). [effectivePct] is BLENDED from the frozen per-line
+ * percentages, so a test whose rate was renegotiated mid-period honestly reads
+ * as something between the old and the new rate rather than as today's.
+ */
+data class CommissionTestRow(
+    val testId: String,
+    val testName: String,
+    val timesOrdered: Long = 0,
+    val gross: Double = 0.0,
+    val payable: Double = 0.0,
+) {
+    val effectivePct: Double get() = if (gross > 0) payable / gross * 100.0 else 0.0
+}
+
+/**
+ * One SETTLEMENT against a referrer's commission. Earned commission is derived
+ * from orders; commission PAID is a fact, and only recording it lets the lab
+ * answer "what do I still owe Dr Rao?". Several payouts may cover the same
+ * period — a lab that pays half now and half later gets two rows, and the
+ * period's paid total is their sum.
+ */
+data class ReferrerPayout(
+    val id: String,
+    val referrerId: String,
+    val periodFrom: String,           // inclusive ISO date
+    val periodTo: String,             // inclusive ISO date
+    val gross: Double = 0.0,          // period totals, frozen at settlement time
+    val payable: Double = 0.0,
+    val paidAmount: Double = 0.0,
+    val paidAt: String? = null,
+    val method: String? = null,       // cash | upi | bank | adjustment
+    val notes: String? = null,
+    val createdAt: String = "",
+    val updatedAt: String? = null,
+)
+
+/** Lab-wide commission rollup over a range — the home dashboard's tile. */
+data class CommissionRollup(
+    val gross: Double = 0.0,
+    val payable: Double = 0.0,
+    val ordersCount: Long = 0,
+    /** Settled inside the range (payouts whose whole period falls in it). */
+    val paid: Double = 0.0,
+) {
+    /** Negative = the lab has paid ahead; shown as an advance, not clamped. */
+    val outstanding: Double get() = payable - paid
+    val effectivePct: Double get() = if (gross > 0) payable / gross * 100.0 else 0.0
+}
+
+/**
+ * Everything one referrer's statement shows: the period totals, the per-test
+ * breakdown, the orders behind them, and what has already been settled.
+ *
+ * [gross]/[payable] are summed from the frozen order lines — NEVER gross × the
+ * doctor's current rate, which is the bug this whole round exists to kill.
+ */
+data class ReferrerStatement(
+    val referrerId: String,
+    val referrerName: String,
+    val fromDate: String,
+    val toDate: String,
+    val gross: Double = 0.0,
+    val payable: Double = 0.0,
+    val paid: Double = 0.0,
+    val tests: List<CommissionTestRow> = emptyList(),
+    val orders: List<ReferrerOrderRow> = emptyList(),
+    val payouts: List<ReferrerPayout> = emptyList(),
+    /** The referrer's CURRENT headline rate — context, not arithmetic. */
+    val headlinePct: Double? = null,
+    val labBasePct: Double = 0.0,
+) {
+    val ordersCount: Int get() = orders.size
+    val outstanding: Double get() = payable - paid
+    /** Blended rate actually earned over the period. */
+    val effectivePct: Double get() = if (gross > 0) payable / gross * 100.0 else 0.0
+}
 
 @Serializable
 data class LabOrder(
@@ -135,6 +252,7 @@ data class LabOrderTest(
     val testName: String,             // snapshot at order time
     val price: Double = 0.0,          // snapshot at order time
     val status: String = "pending",   // pending | in_progress | entered
+    val commissionPct: Double = 0.0,  // snapshot at order time — never recomputed
 )
 
 @Serializable

@@ -399,6 +399,59 @@ class LabApi(
         }
     }
 
+    // ── Report publishing (the printed QR resolves to this) ──────────────────
+
+    /**
+     * `POST admin-lab/reports/publish` (device auth) — upload the approved PDF
+     * to the PRIVATE `lab-reports` bucket and register [token] as its resolver.
+     *
+     * NEVER on the printing path. The QR is printed from a locally-minted token
+     * (see `ReportShare`) and this call drains later, so a lab with no
+     * connectivity still hands the patient a correct sheet of paper.
+     *
+     * A standalone licence gets 409 standalone_edition, which surfaces as
+     * [LabSyncDisabledException] — the caller stops queueing rather than
+     * retrying forever, and those labs print no QR in the first place.
+     */
+    suspend fun publishReport(
+        token: String,
+        orderId: String,
+        accessionNo: String,
+        pdfBase64: String,
+    ): Result<Unit> = withContext(Dispatchers.Default) {
+        runCatching {
+            val auth = deviceAuth()
+            val resp = httpClient.post(edgeUrl("/reports/publish")) {
+                header(auth.first, auth.second)
+                contentType(ContentType.Application.Json)
+                setBody(
+                    buildJsonObject {
+                        put("token", token)
+                        put("orderId", orderId)
+                        put("accessionNo", accessionNo)
+                        put("pdfBase64", pdfBase64)
+                    }.toString()
+                )
+            }
+            if (!resp.status.isSuccess()) syncFail(resp.status, resp.bodyAsText())
+        }
+    }
+
+    /** `POST admin-lab/reports/{token}/revoke` — kill a link (wrong patient,
+     *  corrected report). The local row is marked revoked first, so a dropped
+     *  connection can never leave the lab thinking a live link is dead. */
+    suspend fun revokeReport(token: String): Result<Unit> = withContext(Dispatchers.Default) {
+        runCatching {
+            val auth = deviceAuth()
+            val resp = httpClient.post(edgeUrl("/reports/$token/revoke")) {
+                header(auth.first, auth.second)
+                contentType(ContentType.Application.Json)
+                setBody("{}")
+            }
+            if (!resp.status.isSuccess()) syncFail(resp.status, resp.bodyAsText())
+        }
+    }
+
     /** `POST admin-lab/devices/{id}/deactivate` (device auth; 422 if self). */
     suspend fun deactivateDevice(deviceRowId: String): Result<Unit> = withContext(Dispatchers.Default) {
         runCatching {

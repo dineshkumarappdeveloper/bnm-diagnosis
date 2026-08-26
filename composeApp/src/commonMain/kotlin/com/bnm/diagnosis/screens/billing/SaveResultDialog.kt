@@ -64,7 +64,16 @@ import kotlinx.coroutines.withContext
  *  the system dialog gets them appended into the one document). Token failures
  *  never fail the bill — the main receipt is already out. */
 @Composable
-fun SaveResultDialog(businessId: String, settings: InvoiceSettings?, businessName: String, invoice: Invoice, onView: () -> Unit, onDone: () -> Unit, changeDue: Double? = null) {
+fun SaveResultDialog(
+    businessId: String,
+    settings: InvoiceSettings?,
+    businessName: String,
+    invoice: Invoice,
+    onView: () -> Unit,
+    onDone: () -> Unit,
+    changeDue: Double? = null,
+    partPaid: Double? = null,
+) {
     val scope = rememberCoroutineScope()
     val prefs = remember { BillingPrefs() }
     val repo = LocalBillingRepository.current
@@ -185,9 +194,19 @@ fun SaveResultDialog(businessId: String, settings: InvoiceSettings?, businessNam
                 Icon(Icons.Default.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(44.dp))
                 Text("Bill saved", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Text(
-                    "${invoice.displayNumber} · ₹ ${formatDecimal2(invoice.total)} · ${invoice.paymentLabel}",
+                    "${invoice.displayNumber} · ₹ ${formatDecimal2(invoice.total)} · " +
+                        if (partPaid != null) "Part paid" else invoice.paymentLabel,
                     style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                // An advance leaves the counter owing an answer to "how much later?" —
+                // say it here, where they are still facing the customer.
+                partPaid?.let {
+                    Text(
+                        "Paid now ₹ ${formatDecimal2(it)} · balance ₹ ${formatDecimal2((invoice.total - it).coerceAtLeast(0.0))}",
+                        style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                }
                 (changeDue ?: invoice.changeDue)?.takeIf { it > 0.005 }?.let {
                     Text(
                         "Change: ₹ ${formatDecimal2(it)}",

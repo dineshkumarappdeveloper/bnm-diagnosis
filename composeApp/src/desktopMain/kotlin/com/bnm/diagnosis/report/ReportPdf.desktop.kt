@@ -7,6 +7,7 @@ import org.apache.pdfbox.pdmodel.PDPageContentStream.AppendMode
 import org.apache.pdfbox.pdmodel.common.PDRectangle
 import org.apache.pdfbox.pdmodel.font.PDFont
 import org.apache.pdfbox.pdmodel.font.PDType1Font
+import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject
 import org.apache.pdfbox.printing.PDFPageable
 import java.awt.Color
 import java.awt.Desktop
@@ -23,6 +24,11 @@ import java.io.File
 
 private const val MM = 72f / 25.4f
 private const val MARGIN_MM = 14f
+
+/** Side of the QR SYMBOL itself, in mm. The 4-module quiet zone is reserved
+ *  around it in the layout, so the printed block is a little wider than this.
+ *  20 mm keeps a ~49-module code at ~5 px per module on a 300 dpi print. */
+private const val QR_MM = 20f
 
 actual fun writeLabReportPdf(doc: ReportDoc): String {
     val dir = File(System.getProperty("java.io.tmpdir"), "bnm-diagnosis-reports").apply { mkdirs() }
@@ -120,6 +126,9 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
     private val fontR: PDFont = PDType1Font.HELVETICA
     private val fontB: PDFont = PDType1Font.HELVETICA_BOLD
     private val fontMonoB: PDFont = PDType1Font.COURIER_BOLD
+
+    /** Column the QR + its caption own, left of "Verified by". */
+    private val qrBlockW = 118f
 
     private val accent = awt(doc.accentRgb)
     private val ink = Color(0x21, 0x25, 0x29)
@@ -343,20 +352,135 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         y -= rowH + 1.5f
     }
 
+    /**
+     * Sign-off block, and the report-download QR when the report has one.
+     *
+     * Layout, left to right: the QR (only when [ReportDoc.qr] is set — standalone
+     * licences have none and get the pre-QR layout back, byte for byte), then
+     * "Verified by", then the approver's block hard against the right margin.
+     *
+     * An unsigned report is the baseline, not a degraded case: with no signature
+     * image, no credentials and no approval date, every measurement below
+     * collapses to exactly what this function drew before signatures existed.
+     */
     private fun drawSignatures() {
-        ensure(96f)
-        y -= 34f // physical signature gap
-        val lineY = y
+        val sig = doc.signature
+        // A local val, so the null check below smart-casts for drawSignatureImage.
+        val sigImage = sig?.imagePng?.takeIf { it.isNotEmpty() }
+        // The gap is where a pen would go; an image needs a little more room.
+        val gap = if (sigImage != null) 48f else 34f
+        val credentialLines = listOfNotNull(
+            sig?.qualifications?.takeIf { it.isNotBlank() },
+            sig?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
+            doc.approvedOn?.takeIf { it.isNotBlank() }?.let { "Approved on $it" },
+        )
+        val signOffH = gap + 25f + credentialLines.size * 10f
+
+        val qr = doc.qr?.takeIf { it.matrix.size > 0 }
+        val qrSide = QR_MM * MM
+        val qrCaption = qr?.let { wrapText(it.caption, fontB, 7f, qrBlockW) }.orEmpty()
+        val qrNote = qr?.let { wrapText(it.note, fontR, 6.2f, qrBlockW) }.orEmpty()
+        // Quiet zone: 4 modules of white on every side, per the QR spec. Nothing
+        // is DRAWN for it — the page is already white — but it must be reserved,
+        // or the caption crowds the code and scanners start missing it.
+        val quiet = if (qr == null) 0f else qrSide / qr.matrix.size * 4f
+        val qrH = if (qr == null) 0f else qrSide + quiet * 2f + 4f +
+            qrCaption.size * 9f + qrNote.size * 8f
+
+        ensure(maxOf(signOffH, qrH) + 30f)
+
+        val blockTop = y
+        val lineY = blockTop - gap
         val sigW = 150f
-        hline(left, left + sigW, lineY, Color(0x9A, 0xA2, 0xAA), 0.8f)
-        hline(right - sigW, right, lineY, Color(0x9A, 0xA2, 0xAA), 0.8f)
-        text(left, lineY - 12f, "Verified by: ${doc.verifiedBy ?: "-"}", fontR, 9f, ink)
+        val ruleColor = Color(0x9A, 0xA2, 0xAA)
+
+        if (sigImage != null) {
+            // Sits ON the rule, like an inked signature would. Clamped to the
+            // gap so it can never run up into the last result row.
+            drawSignatureImage(sigImage, right, lineY + 2f, gap - 8f, sigW)
+        }
+
+        // "Verified by" shifts right of the QR block when there is one.
+        val verifiedX = if (qr != null) left + qrBlockW + 14f else left
+        hline(verifiedX, verifiedX + sigW, lineY, ruleColor, 0.8f)
+        hline(right - sigW, right, lineY, ruleColor, 0.8f)
+        text(verifiedX, lineY - 12f, "Verified by: ${doc.verifiedBy ?: "-"}", fontR, 9f, ink)
         val approved = doc.approvedBy ?: "Authorised Signatory"
         textRight(right, lineY - 13f, approved, fontB, 10.5f, ink)
         textRight(right, lineY - 25f, "Approved by (Pathologist)", fontR, 8f, gray)
-        y = lineY - 40f
+        var cy = lineY - 35f
+        for (line in credentialLines) {
+            textRight(right, cy, line, fontR, 8f, gray)
+            cy -= 10f
+        }
+
+        var qrBottom = blockTop
+        if (qr != null) {
+            drawQrMatrix(qr.matrix, left + quiet, blockTop - quiet - qrSide, qrSide)
+            var ty = blockTop - quiet * 2f - qrSide - 4f
+            qrCaption.forEach { text(left, ty, it, fontB, 7f, ink); ty -= 9f }
+            qrNote.forEach { text(left, ty, it, fontR, 6.2f, gray); ty -= 8f }
+            qrBottom = ty
+        }
+
+        y = minOf(lineY - 40f - credentialLines.size * 10f, qrBottom - 6f)
+        // Flag key. Only present when something on this report is actually
+        // abnormal — a legend explaining marks that aren't there is noise on a
+        // patient's paper. Already WinAnsi-safe (ASCII + U+00B7), which matters
+        // because winAnsi() collapses anything else to '?'.
+        if (doc.flagLegendLine.isNotEmpty()) {
+            text(left, y, doc.flagLegendLine, fontR, 7.5f, gray)
+            y -= 12f
+        }
         textCenter(y, "--- End of report ---", fontR, 7.5f, gray)
         y -= 12f
+    }
+
+    /**
+     * Draw the approver's signature PNG, right-aligned at [xEnd], sitting on
+     * [baseY], scaled to fit inside [maxH] x [maxW].
+     *
+     * Failure is swallowed on purpose. A signature image that will not decode
+     * must not stop a pathologist-approved report from printing — the typed
+     * name and the rule under it are the part that carries weight, and they are
+     * already on the page.
+     */
+    private fun drawSignatureImage(bytes: ByteArray, xEnd: Float, baseY: Float, maxH: Float, maxW: Float) {
+        val c = cs ?: return
+        runCatching {
+            val img = PDImageXObject.createFromByteArray(pdf, bytes, "approver-signature")
+            if (img.width <= 0 || img.height <= 0) return
+            val scale = minOf(maxH / img.height.toFloat(), maxW / img.width.toFloat())
+            c.drawImage(img, xEnd - img.width * scale, baseY, img.width * scale, img.height * scale)
+        }
+    }
+
+    /**
+     * Fill the QR modules as rectangles — resolution-independent, no image
+     * codec, and it survives any printer scaling. [x]/[yBottom] are the bottom-
+     * left of the SYMBOL (the quiet zone is the caller's business).
+     *
+     * Runs of adjacent dark modules become one rectangle: identical ink, far
+     * fewer path operations on a 49x49 code.
+     */
+    private fun drawQrMatrix(matrix: QrMatrix, x: Float, yBottom: Float, side: Float) {
+        val c = cs ?: return
+        val n = matrix.size
+        if (n <= 0) return
+        val cell = side / n
+        c.setNonStrokingColor(Color.BLACK)
+        for (my in 0 until n) {
+            var mx = 0
+            while (mx < n) {
+                if (!matrix[mx, my]) { mx++; continue }
+                var run = 1
+                while (mx + run < n && matrix[mx + run, my]) run++
+                // Matrix row 0 is the TOP; PDF y grows upward, hence the flip.
+                c.addRect(x + mx * cell, yBottom + (n - 1 - my) * cell, cell * run, cell)
+                mx += run
+            }
+        }
+        c.fill()
     }
 
     /** Second pass: footer rule + note + "Page X of Y" (PRINTED mode only —

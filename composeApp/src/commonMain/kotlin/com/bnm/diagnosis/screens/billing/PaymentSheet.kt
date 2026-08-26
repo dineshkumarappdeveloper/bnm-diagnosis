@@ -47,10 +47,24 @@ import io.github.alexzhirkevich.qrose.rememberQrCodePainter
 import io.ktor.http.encodeURLParameter
 
 /**
+ * An amount collected now that does NOT settle the bill — the advance a lab
+ * takes at registration ("₹300 now, the rest when you collect the report").
+ * It is deliberately not a [PaymentChoice]: that type says how a bill was
+ * SETTLED, and a part payment settles nothing. The caller turns this into a
+ * queued tender (BillingRepository.recordPaymentLocal), which is what keeps the
+ * balance alive across a sync that replaces the whole invoice doc.
+ */
+data class PartPayment(val amount: Double, val method: String, val reference: String? = null)
+
+/**
  * Payment-mode step shown before a bill saves. Cash / UPI / Card confirm the
  * payment on the spot (bill saves as PAID); Payment link saves the bill unpaid
  * and hands off to [PaymentLinkDialog]; "Save without payment" keeps the old
  * behavior. Everything except the payment link works fully OFFLINE.
+ *
+ * Pass [onPartPayment] to let the counter collect LESS than [total]: the bill
+ * then saves unpaid and the amount rides along as an advance, leaving a visible
+ * balance. Callers that leave it null get exactly the old all-or-nothing sheet.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -62,8 +76,11 @@ fun PaymentSheet(
     onDismiss: () -> Unit,
     onConfirm: (PaymentChoice) -> Unit,
     onPaymentLink: () -> Unit,
+    onPartPayment: ((PartPayment) -> Unit)? = null,
 ) {
     var mode by remember { mutableStateOf("cash") }
+    val allowPart = onPartPayment != null
+    val emitPart: (PartPayment) -> Unit = onPartPayment ?: { _ -> }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
@@ -82,9 +99,9 @@ fun PaymentSheet(
                     Text("Payment link needs internet", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 when (mode) {
-                    "cash" -> CashPane(total, onConfirm)
-                    "upi" -> UpiPane(total, upiVpa, businessName, onConfirm)
-                    "card" -> CardPane(total, onConfirm)
+                    "cash" -> CashPane(total, allowPart, onConfirm, emitPart)
+                    "upi" -> UpiPane(total, upiVpa, businessName, allowPart, onConfirm, emitPart)
+                    "card" -> CardPane(total, allowPart, onConfirm, emitPart)
                     "link" -> LinkPane(isOnline, onPaymentLink)
                 }
                 TextButton(onClick = { onConfirm(PaymentChoice(method = null, markPaid = false)) }, modifier = Modifier.fillMaxWidth()) {
@@ -97,10 +114,20 @@ fun PaymentSheet(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun CashPane(total: Double, onConfirm: (PaymentChoice) -> Unit) {
+private fun CashPane(
+    total: Double,
+    allowPart: Boolean,
+    onConfirm: (PaymentChoice) -> Unit,
+    onPart: (PartPayment) -> Unit,
+) {
     var tenderedText by remember { mutableStateOf("") }
     val tendered = tenderedText.trim().toDoubleOrNull()
-    val short = tendered == null || tendered < total - 1e-9
+    // ONE box serves both cases, because the operator types the same thing: the
+    // notes in their hand. At or above the total it settles the bill and the
+    // drawer owes change; below it, it is an advance and the bill keeps a
+    // balance. Neither reading is a special mode the operator has to pick.
+    val full = tendered != null && tendered >= total - 1e-9
+    val part = allowPart && tendered != null && tendered > 0.0 && !full
     val change = (tendered ?: 0.0) - total
 
     fun setAmount(v: Double) {
@@ -122,27 +149,71 @@ private fun CashPane(total: Double, onConfirm: (PaymentChoice) -> Unit) {
                 AssistChip(onClick = { setAmount((tendered ?: 0.0) + add) }, label = { Text("+₹$add") })
             }
         }
-        Text(
-            "Change to return: ₹ ${formatDecimal2(change)}",
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.Bold,
-            color = if (short) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-        )
+        if (part) {
+            BalanceNote(total - (tendered ?: 0.0))
+        } else {
+            Text(
+                "Change to return: ₹ ${formatDecimal2(change)}",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = if (full) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.error,
+            )
+        }
         Button(
             onClick = {
                 val t = tendered ?: return@Button
-                onConfirm(PaymentChoice(method = "cash", markPaid = true, tendered = t, change = t - total))
+                if (full) onConfirm(PaymentChoice(method = "cash", markPaid = true, tendered = t, change = t - total))
+                else onPart(PartPayment(amount = t, method = "cash"))
             },
-            enabled = !short,
+            enabled = full || part,
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("Confirm cash received") }
+        ) { Text(if (part) "Take ₹ ${formatDecimal2(tendered ?: 0.0)} as part payment" else "Confirm cash received") }
     }
+}
+
+/** Shown whenever the amount on screen leaves something owing. */
+@Composable
+private fun BalanceNote(balance: Double) {
+    Text(
+        "Balance after this: ₹ ${formatDecimal2(balance)}",
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.tertiary,
+    )
+}
+
+/** "Amount to collect now", pre-filled with the full total. Used by the UPI and
+ *  card panes, where (unlike cash) there is no change to give back — so the
+ *  number typed here IS the amount charged, and the QR must carry it. */
+@Composable
+private fun CollectAmountField(total: Double, value: String, onChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onChange,
+        label = { Text("Amount to collect (full: ₹ ${formatDecimal2(total)})") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 @OptIn(kotlin.uuid.ExperimentalUuidApi::class)
 @Composable
-private fun UpiPane(total: Double, upiVpa: String?, businessName: String, onConfirm: (PaymentChoice) -> Unit) {
+private fun UpiPane(
+    total: Double,
+    upiVpa: String?,
+    businessName: String,
+    allowPart: Boolean,
+    onConfirm: (PaymentChoice) -> Unit,
+    onPart: (PartPayment) -> Unit,
+) {
     val vpa = upiVpa?.trim()?.takeIf { it.isNotEmpty() }
+    var amountText by remember(total) { mutableStateOf(formatDecimal2(total)) }
+    // Clamp to the bill: a UPI QR must never ask for more than is owed. Garbage
+    // in the box falls back to the full total rather than charging ₹0.
+    val amount = (amountText.trim().toDoubleOrNull() ?: total).coerceIn(0.0, total)
+    val full = !allowPart || amount >= total - 1e-9
+    val charge = if (full) total else amount
     // NPCI `tr` (Transaction Reference): unique per QR, alphanumeric, ≤35 chars
     // (uuid hex = 32). The payer's UPI app carries it into the transaction, so
     // the bank's payment-notification email quotes it — a future email webhook
@@ -150,9 +221,11 @@ private fun UpiPane(total: Double, upiVpa: String?, businessName: String, onConf
     val txRef = remember { kotlin.uuid.Uuid.random().toString().replace("-", "") }
     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
         if (vpa != null) {
+            if (allowPart) CollectAmountField(total, amountText) { amountText = it }
+            if (!full) BalanceNote(total - charge)
             val note = "Bill at ${businessName.take(30)}"
             val uri = "upi://pay?pa=$vpa&pn=${businessName.encodeURLParameter()}" +
-                "&am=${formatDecimal2(total)}&cu=INR" +
+                "&am=${formatDecimal2(charge)}&cu=INR" +
                 "&tn=${note.encodeURLParameter()}&tr=$txRef"
             // White backing keeps the QR scannable in dark theme.
             Surface(color = Color.White, shape = RoundedCornerShape(12.dp)) {
@@ -165,9 +238,13 @@ private fun UpiPane(total: Double, upiVpa: String?, businessName: String, onConf
             Text(vpa, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("Ref: $txRef", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Button(
-                onClick = { onConfirm(PaymentChoice(method = "upi", markPaid = true, reference = txRef)) },
+                onClick = {
+                    if (full) onConfirm(PaymentChoice(method = "upi", markPaid = true, reference = txRef))
+                    else onPart(PartPayment(amount = charge, method = "upi", reference = txRef))
+                },
+                enabled = charge > 0.0,
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("Payment received") }
+            ) { Text(if (full) "Payment received" else "Received ₹ ${formatDecimal2(charge)} (part)") }
         } else {
             Text(
                 "Set this counter's UPI ID in BNM Admin → Settings → Billing Counters",
@@ -180,14 +257,30 @@ private fun UpiPane(total: Double, upiVpa: String?, businessName: String, onConf
 }
 
 @Composable
-private fun CardPane(total: Double, onConfirm: (PaymentChoice) -> Unit) {
+private fun CardPane(
+    total: Double,
+    allowPart: Boolean,
+    onConfirm: (PaymentChoice) -> Unit,
+    onPart: (PartPayment) -> Unit,
+) {
+    var amountText by remember(total) { mutableStateOf(formatDecimal2(total)) }
+    val amount = (amountText.trim().toDoubleOrNull() ?: total).coerceIn(0.0, total)
+    val full = !allowPart || amount >= total - 1e-9
+    val charge = if (full) total else amount
+
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("Charge ₹ ${formatDecimal2(total)} on the card machine", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+        if (allowPart) CollectAmountField(total, amountText) { amountText = it }
+        Text("Charge ₹ ${formatDecimal2(charge)} on the card machine", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+        if (!full) BalanceNote(total - charge)
         Text("Confirm once the machine approves", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Button(
-            onClick = { onConfirm(PaymentChoice(method = "card", markPaid = true)) },
+            onClick = {
+                if (full) onConfirm(PaymentChoice(method = "card", markPaid = true))
+                else onPart(PartPayment(amount = charge, method = "card"))
+            },
+            enabled = charge > 0.0,
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("Payment approved") }
+        ) { Text(if (full) "Payment approved" else "Approved ₹ ${formatDecimal2(charge)} (part)") }
     }
 }
 

@@ -75,6 +75,15 @@ class LabSyncEngine(
     private val api: LabApi,
     private val license: LicenseManager,
     private val prefs: SyncPrefs = SyncPrefs(),
+    /**
+     * Drains queued report PDFs to the server (the printed QR's target).
+     *
+     * Injected as a lambda rather than a ReportUploader so the sync engine keeps
+     * knowing nothing about LabRepository/StaffRepository/the PDF stack. Null =
+     * no report publishing on this seat. Never allowed to fail a sweep: a report
+     * that does not upload just stays queued and its QR resolves once it does.
+     */
+    private val drainReports: (suspend () -> Unit)? = null,
 ) {
     private val mutex = Mutex()
 
@@ -90,6 +99,7 @@ class LabSyncEngine(
     private val resQ get() = db.resultsQueries
     private val emrQ get() = db.emrInboxQueries
     private val stQ get() = db.staffQueries
+    private val cQ get() = db.commissionQueries   // commission overrides · payouts · lab settings
 
     private val paramsSerializer = ListSerializer(TestParameter.serializer())
     private val idsSerializer = ListSerializer(String.serializer())
@@ -117,6 +127,11 @@ class LabSyncEngine(
                     pushAll()
                     pullAll()
                     syncEmr()
+                    // Last, and swallowing its own failures: publishing a report is
+                    // additive. A failed upload must not mark the whole sweep failed
+                    // and must not roll back the watermarks the pushes just advanced.
+                    runCatching { drainReports?.invoke() }
+                        .onFailure { println("[LabSync] report upload deferred: ${'$'}{it.message}") }
                 }
                 if (prefs.syncDisabled) prefs.syncDisabled = false
                 prefs.lastSyncAt = nowIso()
@@ -148,9 +163,12 @@ class LabSyncEngine(
         pushEntity(E_REFERRER) { since ->
             rQ.changedSince(since).executeAsList().map { row ->
                 val m = Referrer(row.id, row.name, row.kind, row.phone, row.commission_pct,
-                    row.created_at, row.deleted_at)
+                    row.created_at, row.deleted_at, row.updated_at)
+                // updated_at must be in the stamp, or an EDITED referrer (renamed,
+                // rate changed) pushes with its original created_at and loses LWW
+                // against the stale copy on the other seat.
                 PushCandidate(m.id, json.encodeToJsonElement(Referrer.serializer(), m), m.deletedAt,
-                    maxOf(ms(m.createdAt), ms(m.deletedAt)))
+                    maxOf(ms(m.updatedAt), ms(m.createdAt), ms(m.deletedAt)))
             }
         }
         // Staff (P4): roles + PINs converge across the lab's seats. pin_hash IS
@@ -167,12 +185,38 @@ class LabSyncEngine(
                     maxOf(ms(m.updatedAt), ms(m.createdAt), ms(m.deletedAt)))
             }
         }
+        // Composite-key rows: the sync spine keys on a single id, so encode the
+        // pair into one. Same shape both ways, so applyRow can split it back.
+        pushEntity(E_COMMISSION_RATE) { since ->
+            cQ.commissionsChangedSince(since).executeAsList().map { row ->
+                val m = CommissionRateDoc(row.referrer_id, row.test_id, row.commission_pct, row.updated_at)
+                PushCandidate("${'$'}{row.referrer_id}|${'$'}{row.test_id}",
+                    json.encodeToJsonElement(CommissionRateDoc.serializer(), m), null, ms(row.updated_at))
+            }
+        }
+        pushEntity(E_PAYOUT) { since ->
+            cQ.payoutsChangedSince(since).executeAsList().map { row ->
+                val m = PayoutDoc(row.id, row.referrer_id, row.period_from, row.period_to, row.gross,
+                    row.payable, row.paid_amount, row.paid_at, row.method, row.notes,
+                    row.created_at, row.updated_at)
+                PushCandidate(m.id, json.encodeToJsonElement(PayoutDoc.serializer(), m), null,
+                    maxOf(ms(m.updatedAt), ms(m.createdAt)))
+            }
+        }
+        pushEntity(E_SETTING) { since ->
+            cQ.settingsChangedSince(since).executeAsList().map { row ->
+                val m = SettingDoc(row.key, row.value_, row.updated_at)
+                PushCandidate(m.key, json.encodeToJsonElement(SettingDoc.serializer(), m), null,
+                    ms(m.updatedAt))
+            }
+        }
         pushCatalog()
         pushEntity(E_ORDER) { since ->
             oQ.changedSince(since).executeAsList().map { row ->
                 val order = row.toOrder()
                 val tests = oQ.testsForOrder(order.id).executeAsList().map {
-                    LabOrderTest(it.id, it.order_id, it.test_id, it.test_name, it.price, it.status)
+                    LabOrderTest(it.id, it.order_id, it.test_id, it.test_name, it.price, it.status,
+                        it.commission_pct)
                 }
                 PushCandidate(order.id,
                     json.encodeToJsonElement(LabOrderDoc.serializer(), LabOrderDoc(order, tests)),
@@ -272,7 +316,32 @@ class LabSyncEngine(
                 val incoming = maxOf(ms(r.createdAt), ms(r.deletedAt ?: row.deletedAt))
                 if (local != null && maxOf(ms(local.created_at), ms(local.deleted_at)) >= incoming) return
                 rQ.upsert(r.id, r.name, r.kind, r.phone, r.commissionPct,
-                    r.createdAt, r.deletedAt ?: row.deletedAt)
+                    r.createdAt, r.deletedAt ?: row.deletedAt, r.updatedAt)
+            }
+            E_COMMISSION_RATE -> {
+                val d = json.decodeFromJsonElement(CommissionRateDoc.serializer(), doc)
+                val local = cQ.commissionRowFor(d.referrerId, d.testId).executeAsOneOrNull()
+                // Genuine last-writer-wins on updated_at. A local row with no stamp
+                // predates the column and loses, which is the safe direction: the
+                // server copy is the one every other seat already agrees on.
+                if (local == null || ms(local.updated_at) < ms(d.updatedAt)) {
+                    cQ.upsertCommission(d.referrerId, d.testId, d.commissionPct, d.updatedAt)
+                }
+            }
+            E_PAYOUT -> {
+                val d = json.decodeFromJsonElement(PayoutDoc.serializer(), doc)
+                val local = cQ.payoutById(d.id).executeAsOneOrNull()
+                val incoming = maxOf(ms(d.updatedAt), ms(d.createdAt))
+                if (local == null ||
+                    maxOf(ms(local.updated_at), ms(local.created_at)) < incoming
+                ) {
+                    cQ.upsertPayout(d.id, d.referrerId, d.periodFrom, d.periodTo, d.gross, d.payable,
+                        d.paidAmount, d.paidAt, d.method, d.notes, d.createdAt, d.updatedAt)
+                }
+            }
+            E_SETTING -> {
+                val d = json.decodeFromJsonElement(SettingDoc.serializer(), doc)
+                cQ.putSetting(d.key, d.value, d.updatedAt)
             }
             E_STAFF -> {
                 val st = json.decodeFromJsonElement(Staff.serializer(), doc)
@@ -280,7 +349,8 @@ class LabSyncEngine(
                 val incoming = maxOf(ms(st.updatedAt), ms(st.deletedAt ?: row.deletedAt))
                 if (local != null && maxOf(ms(local.updated_at), ms(local.deleted_at)) >= incoming) return
                 stQ.upsert(st.id, st.name, st.role, st.pinHash, if (st.active) 1L else 0L,
-                    st.createdAt, st.updatedAt, st.deletedAt ?: row.deletedAt)
+                    st.createdAt, st.updatedAt, st.deletedAt ?: row.deletedAt,
+                    st.username, st.signaturePng, st.qualifications, st.registrationNo)
             }
             // Catalog rows carry no stamps — server seq order IS the LWW order.
             E_TEST -> {
@@ -309,7 +379,8 @@ class LabSyncEngine(
                         o.collectedAt, o.approvedAt, o.reportedAt)
                     oQ.deleteTestsForOrder(o.id)
                     for (t in d.tests) {
-                        oQ.insertOrderTest(t.id, o.id, t.testId, t.testName, t.price, t.status)
+                        oQ.insertOrderTest(t.id, o.id, t.testId, t.testName, t.price, t.status,
+                            t.commissionPct)
                         // Pre-create the empty entry grid from the local catalog
                         // (INSERT OR IGNORE — never clobbers entered values).
                         val params = tQ.testById(t.testId).executeAsOneOrNull()?.toTestModel()?.parameters
@@ -505,6 +576,12 @@ class LabSyncEngine(
         const val E_PANEL = "panel"
         const val E_ORDER = "order"
         const val E_RESULT_BUNDLE = "result_bundle"
+        // Round 1. Commission config and settlements are lab-wide facts, so they
+        // must converge across seats like referrers do — otherwise the owner's
+        // laptop and the front desk quietly disagree about what a doctor is owed.
+        const val E_COMMISSION_RATE = "commission_rate"
+        const val E_PAYOUT = "referrer_payout"
+        const val E_SETTING = "lab_setting"
 
         const val PUSH_BATCH = 400   // server cap 500
         const val PULL_PAGE = 500

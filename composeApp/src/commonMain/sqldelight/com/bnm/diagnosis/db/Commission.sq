@@ -1,0 +1,119 @@
+-- Round-1 feedback · referrer commission.
+--
+-- THREE LEVELS, resolved by ONE brain (LabRepository.resolveCommissionPct):
+--     lab-wide base %   →  per-referrer %  →  per-(referrer, test) override
+-- Later levels win. This mirrors the pricing rule the repo already follows for
+-- referrer_rates, and follows the same invariant that makes it safe:
+--
+--   NO ROW = INHERIT. A copy of the inherited value is NEVER stored, so raising
+--   the lab-wide base flows through to every doctor who has no explicit rate.
+--   Storing a snapshot here would silently freeze every rate list the first time
+--   someone opened the editor.
+--
+-- Snapshotting happens exactly once, and NOT here: the RESOLVED percentage is
+-- frozen onto lab_order_tests.commission_pct at registration, next to the price
+-- that is already frozen there. That is what stops "the doctor renegotiated in
+-- March" from rewriting January's payout statement.
+
+CREATE TABLE referrer_commission_rates (
+    referrer_id TEXT NOT NULL,
+    test_id TEXT NOT NULL,
+    commission_pct REAL NOT NULL,
+    updated_at TEXT,
+    PRIMARY KEY (referrer_id, test_id)
+);
+
+upsertCommission:
+INSERT OR REPLACE INTO referrer_commission_rates(referrer_id, test_id, commission_pct, updated_at)
+VALUES (?, ?, ?, ?);
+
+commissionsFor:
+SELECT * FROM referrer_commission_rates WHERE referrer_id = ?;
+
+commissionFor:
+SELECT commission_pct FROM referrer_commission_rates WHERE referrer_id = ? AND test_id = ?;
+
+-- Full row, for the sync pull's last-writer-wins comparison (the scalar above
+-- cannot tell you WHEN the local value was written).
+commissionRowFor:
+SELECT * FROM referrer_commission_rates WHERE referrer_id = ? AND test_id = ?;
+
+deleteCommission:
+DELETE FROM referrer_commission_rates WHERE referrer_id = ? AND test_id = ?;
+
+deleteAllCommissionsFor:
+DELETE FROM referrer_commission_rates WHERE referrer_id = ?;
+
+countCommissionsFor:
+SELECT count(*) FROM referrer_commission_rates WHERE referrer_id = ?;
+
+commissionsChangedSince:
+SELECT * FROM referrer_commission_rates WHERE updated_at IS NOT NULL AND updated_at > :since;
+
+-- ── Referrer payouts: what has actually been SETTLED ────────────────────────
+-- Commission earned is derived from orders; commission PAID is a fact that must
+-- be recorded. Without this table "payable" can only ever mean "gross", and the
+-- lab has no way to answer "what do I still owe Dr Rao?".
+--
+-- A payout row freezes the period totals at settlement time. It deliberately
+-- does NOT link to individual orders: a lab settles a month, not a line item,
+-- and back-dated result entry would otherwise mutate a closed payout.
+CREATE TABLE referrer_payouts (
+    id TEXT NOT NULL PRIMARY KEY,
+    referrer_id TEXT NOT NULL,
+    period_from TEXT NOT NULL,     -- inclusive ISO date
+    period_to TEXT NOT NULL,       -- inclusive ISO date
+    gross REAL NOT NULL,           -- billed value of the orders in the period
+    payable REAL NOT NULL,         -- commission owed, from the SNAPSHOT percentages
+    paid_amount REAL NOT NULL DEFAULT 0,
+    paid_at TEXT,
+    method TEXT,                   -- cash | upi | bank | adjustment
+    notes TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT
+);
+
+CREATE INDEX referrer_payouts_ref ON referrer_payouts(referrer_id, period_to);
+
+upsertPayout:
+INSERT OR REPLACE INTO referrer_payouts(id, referrer_id, period_from, period_to, gross, payable,
+    paid_amount, paid_at, method, notes, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+payoutsFor:
+SELECT * FROM referrer_payouts WHERE referrer_id = ? ORDER BY period_to DESC;
+
+payoutById:
+SELECT * FROM referrer_payouts WHERE id = ?;
+
+-- Settled total for a period, so a statement can show payable-minus-paid.
+paidInPeriod:
+SELECT coalesce(sum(paid_amount), 0.0) FROM referrer_payouts
+WHERE referrer_id = ? AND period_from >= ? AND period_to <= ?;
+
+allPayoutsInRange:
+SELECT * FROM referrer_payouts WHERE period_to >= ? AND period_from <= ? ORDER BY period_to DESC;
+
+payoutsChangedSince:
+SELECT * FROM referrer_payouts WHERE coalesce(updated_at, created_at) > :since;
+
+-- ── Lab-wide settings (the commission BASE lives here) ──────────────────────
+-- A tiny key/value singleton rather than a one-row table: the lab will want more
+-- knobs (default TAT, report footer) and this avoids a migration per knob.
+CREATE TABLE lab_settings (
+    key TEXT NOT NULL PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT
+);
+
+putSetting:
+INSERT OR REPLACE INTO lab_settings(key, value, updated_at) VALUES (?, ?, ?);
+
+getSetting:
+SELECT value FROM lab_settings WHERE key = ?;
+
+allSettings:
+SELECT * FROM lab_settings;
+
+settingsChangedSince:
+SELECT * FROM lab_settings WHERE updated_at IS NOT NULL AND updated_at > :since;

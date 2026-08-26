@@ -100,6 +100,8 @@ import com.bnm.diagnosis.staff.LocalStaffSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.bnm.diagnosis.report.ReportAssembler
+import com.bnm.diagnosis.staff.LocalStaffRepository
 
 /** Statuses in which result entry is still open (mirrors the repo's guard). */
 private val ENTRY_OPEN = setOf(LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED)
@@ -113,7 +115,7 @@ private const val W_PARAM = 2.4f
 private const val W_RANGE = 1.5f
 private val COL_RESULT = 148.dp
 private val COL_UNIT = 78.dp
-private val COL_FLAG = 108.dp
+private val COL_FLAG = 124.dp   // widened in round 1: "⚠ CH↑" + CRITICAL measured ~107dp and Text overflow is Clip, so it would have truncated silently
 
 /**
  * One order's workbench: a compact patient header + entry progress, then a
@@ -142,6 +144,10 @@ fun OrderDetailScreen(
     onOpenInvoice: (String) -> Unit,
 ) {
     val repo = LocalLabRepository.current
+    val staffRepo = LocalStaffRepository.current
+    // One per screen: assembling a report mints the QR token on first print, so it
+    // must be a stable instance rather than rebuilt per recomposition.
+    val assembler = remember(repo, staffRepo) { ReportAssembler(repo, staffRepo) }
     val scope = rememberCoroutineScope()
     val prefs = remember { LimsPrefs() }
     // P4: attribution + RBAC ride the SIGNED-IN staff member. LimsPrefs stays the
@@ -153,7 +159,7 @@ fun OrderDetailScreen(
     val actor = me?.name?.takeIf { it.isNotBlank() } ?: prefs.deviceName
     // Approval is the pathologist's signature — technicians verify, they don't
     // approve. A null session falls back to the old free-text dialog.
-    val canApprove = me?.canApprove ?: true
+    val canApprove = (me?.canApprove == true)  // null session ⇒ DENIED (matches Staff?.allows)
 
     var order by remember { mutableStateOf<LabOrder?>(null) }
     var patient by remember { mutableStateOf<Patient?>(null) }
@@ -214,18 +220,15 @@ fun OrderDetailScreen(
 
     /** Assemble the styled-A4 document from the frozen results + this device's
      *  letterhead prefs (lab name ALWAYS the license-bound one). */
-    fun buildDoc(): ReportDoc? {
-        val ord = order ?: return null
-        val pat = patient ?: return null
-        val rp = ReportPrefs()
-        return buildReportDoc(
-            labName = labName, order = ord, patient = pat, tests = tests,
-            results = results.values.toList(), referrerName = referrer?.name,
-            mode = rp.mode(), headerMm = rp.headerMm.toFloat(), footerMm = rp.footerMm.toFloat(),
-            accentRgb = rp.accentRgb, letterheadLines = rp.letterheadLines(),
-            paramName = nameOf,
-        )
-    }
+    /**
+     * Delegates to [ReportAssembler], which owns the impure half of building a
+     * report: stamping the reporting time on a first print, minting/reusing the
+     * QR share token, and attaching the approver's signature. `buildReportDoc`
+     * itself stays a pure function of the domain objects.
+     *
+     * Suspending because assembling now reads the staff row and may mint a token.
+     */
+    suspend fun buildDoc(): ReportDoc? = assembler.assemble(order?.id ?: return null, labName)
 
     /** Styled A4 PDF path: write, then open in the viewer or send to the OS
      *  print pipeline. Success (not cancelled/failed) marks approved → reported. */
@@ -730,7 +733,11 @@ private fun OrderHeader(order: LabOrder, patient: Patient, referrer: Referrer?) 
                     style = MaterialTheme.typography.labelMedium,
                 )
                 Text(
+                    // Reported is the clinically meaningful stamp — it is what the
+                    // patient and the referring doctor quote back. Shown next to
+                    // Registered whenever the report has actually gone out.
                     "· Registered ${shortTimeLabel(order.createdAt)}" +
+                        (order.reportedAt?.let { " · Reported ${shortTimeLabel(it)}" } ?: "") +
                         (referrer?.let { " · Ref: ${it.name}" } ?: ""),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSecondaryContainer,

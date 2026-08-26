@@ -8,12 +8,15 @@ import com.bnm.diagnosis.db.Emr_inbox
 import com.bnm.diagnosis.db.Lab_order_tests
 import com.bnm.diagnosis.db.Lab_orders
 import com.bnm.diagnosis.db.Lab_panels
+import com.bnm.diagnosis.db.Lab_reports
 import com.bnm.diagnosis.db.Lab_results
 import com.bnm.diagnosis.db.Lab_tests
 import com.bnm.diagnosis.db.OpenOrders
 import com.bnm.diagnosis.db.Patients
+import com.bnm.diagnosis.db.Referrer_payouts
 import com.bnm.diagnosis.db.Referrers
 import com.bnm.diagnosis.db.WorklistByStatus
+import com.bnm.diagnosis.report.ReportShare
 import kotlin.math.floor
 import kotlin.math.round
 import kotlin.math.roundToLong
@@ -64,6 +67,9 @@ class LabRepository(
     private val accQ get() = db.accessionSeriesQueries
     private val emrQ get() = db.emrInboxQueries
     private val rrQ get() = db.referrerRatesQueries
+    private val cQ get() = db.commissionQueries        // commission overrides + payouts + settings
+    private val setQ get() = db.commissionQueries      // lab_settings lives in Commission.sq
+    private val repQ get() = db.labReportsQueries      // report share tokens (printed QR)
 
     private val paramsSerializer = ListSerializer(TestParameter.serializer())
     private val idsSerializer = ListSerializer(String.serializer())
@@ -115,8 +121,10 @@ class LabRepository(
 
     suspend fun upsertReferrer(r: Referrer): Referrer = withContext(Dispatchers.Default) {
         val saved = r.copy(createdAt = r.createdAt.ifBlank { nowIso() })
+        // updated_at on EVERY write — the sync sweep matches on it, so without a
+        // fresh stamp an edited referrer never reached the lab's other seats.
         rQ.upsert(saved.id, saved.name, saved.kind, saved.phone, saved.commissionPct,
-            saved.createdAt, saved.deletedAt)
+            saved.createdAt, saved.deletedAt, nowIso())
         saved
     }
 
@@ -148,7 +156,7 @@ class LabRepository(
 
     /** Set one negotiated price. A negative price is meaningless — clamp at 0. */
     suspend fun setRate(referrerId: String, testId: String, price: Double) = withContext(Dispatchers.Default) {
-        rrQ.upsertRate(referrerId, testId, price.coerceAtLeast(0.0))
+        rrQ.upsertRate(referrerId, testId, price.coerceAtLeast(0.0), nowIso())
     }
 
     /** Drop one override — the test falls back to the catalog price. */
@@ -190,6 +198,73 @@ class LabRepository(
         tQ.listAllTests().executeAsList().associate { it.id to resolvePrice(it.price, rates[it.id]) }
     }
 
+    // ── Commission rates (round-1 items 7 + 8) ───────────────────────────────
+    //
+    // ONE COMMISSION BRAIN, the exact mirror of the pricing one above:
+    // [resolveCommissionPct] decides every percentage — lab base → referrer →
+    // (referrer, test) — and NOTHING here stores a copy of an inherited value.
+    // Everything in this block is about what a FUTURE order will freeze; the
+    // percentage on an order already registered is history and never re-read.
+
+    /** The lab-wide base %, inherited by every referrer without their own rate.
+     *  Absent/garbled setting = 0, i.e. "no commission" rather than a crash. */
+    suspend fun labBaseCommissionPct(): Double = withContext(Dispatchers.Default) {
+        setQ.getSetting(SETTING_BASE_COMMISSION).executeAsOneOrNull()?.toDoubleOrNull() ?: 0.0
+    }
+
+    suspend fun setLabBaseCommissionPct(pct: Double) = withContext(Dispatchers.Default) {
+        setQ.putSetting(SETTING_BASE_COMMISSION, pct.coerceIn(0.0, 100.0).toString(), nowIso())
+    }
+
+    /** Override one (referrer, test) percentage. 0 IS a meaningful override here
+     *  — the row's existence is the override, so "this test pays nothing" is
+     *  expressible even when the lab base is non-zero. */
+    suspend fun setCommissionRate(referrerId: String, testId: String, pct: Double) =
+        withContext(Dispatchers.Default) {
+            cQ.upsertCommission(referrerId, testId, pct.coerceIn(0.0, 100.0), nowIso())
+        }
+
+    /** Drop one override — the test falls back to the inherited percentage. */
+    suspend fun clearCommissionRate(referrerId: String, testId: String) = withContext(Dispatchers.Default) {
+        cQ.deleteCommission(referrerId, testId)
+    }
+
+    suspend fun clearAllCommissionRates(referrerId: String) = withContext(Dispatchers.Default) {
+        cQ.deleteAllCommissionsFor(referrerId)
+    }
+
+    /** How many per-test overrides a referrer carries — drives the list badge. */
+    suspend fun commissionRateCount(referrerId: String): Long = withContext(Dispatchers.Default) {
+        cQ.countCommissionsFor(referrerId).executeAsOne()
+    }
+
+    /** All three levels for one referrer in a single read — what the editor
+     *  needs to show an inherited value as inherited rather than as a value. */
+    suspend fun commissionSheet(referrerId: String): CommissionRateSheet = withContext(Dispatchers.Default) {
+        CommissionRateSheet(
+            referrerId = referrerId,
+            labBasePct = setQ.getSetting(SETTING_BASE_COMMISSION).executeAsOneOrNull()?.toDoubleOrNull() ?: 0.0,
+            referrerPct = referrerPctOrInherit(rQ.byId(referrerId).executeAsOneOrNull()?.commission_pct),
+            overrides = cQ.commissionsFor(referrerId).executeAsList()
+                .associate { it.test_id to it.commission_pct },
+        )
+    }
+
+    /**
+     * What THIS test would pay THIS referrer if an order were registered now —
+     * the commission twin of [effectivePrice]. A walk-in (null referrer) pays no
+     * commission at all, which is why registration skips the resolve entirely.
+     */
+    suspend fun effectiveCommissionPct(testId: String, referrerId: String?): Double =
+        withContext(Dispatchers.Default) {
+            if (referrerId.isNullOrBlank()) return@withContext 0.0
+            resolveCommissionPct(
+                labBasePct = setQ.getSetting(SETTING_BASE_COMMISSION).executeAsOneOrNull()?.toDoubleOrNull() ?: 0.0,
+                referrerPct = referrerPctOrInherit(rQ.byId(referrerId).executeAsOneOrNull()?.commission_pct),
+                testOverridePct = cQ.commissionFor(referrerId, testId).executeAsOneOrNull(),
+            )
+        }
+
     // ── P4 · Commission report ───────────────────────────────────────────────
 
     /**
@@ -215,7 +290,10 @@ class LabRepository(
                     phone = r?.phone,
                     ordersCount = row.orders_count,
                     gross = row.gross,
+                    // Live rate is shown for CONTEXT only ("what this doctor earns
+                    // today"); `payable` comes from the per-line frozen percentages.
                     commissionPct = r?.commission_pct ?: 0.0,
+                    payableSnapshot = row.payable,
                 )
             }.sortedByDescending { it.payable }
         }
@@ -229,9 +307,126 @@ class LabRepository(
                     orderId = it.order_id, accessionNo = it.accession_no,
                     patientName = it.patient_name, createdAt = it.created_at,
                     status = it.status, amount = it.amount,
+                    reportedAt = it.reported_at,
                 )
             }
         }
+
+    /**
+     * PER-TEST breakdown of one referrer's commission in the range — which tests
+     * the doctor actually earns on. Sorted biggest payable first by the query.
+     */
+    suspend fun commissionByTest(referrerId: String, fromDate: String, toDate: String): List<CommissionTestRow> =
+        withContext(Dispatchers.Default) {
+            val (from, toExclusive) = instantBounds(fromDate, toDate)
+            oQ.commissionByTestForReferrer(referrerId, from, toExclusive).executeAsList().map {
+                CommissionTestRow(
+                    testId = it.test_id, testName = it.test_name,
+                    timesOrdered = it.times_ordered, gross = it.gross, payable = it.payable,
+                )
+            }
+        }
+
+    /**
+     * One referrer's FULL statement: period totals, per-test breakdown, the
+     * orders behind it, and every settlement recorded for the period.
+     *
+     * Totals are summed from the per-test rows, i.e. from the percentages frozen
+     * on each order line — deliberately NOT gross × the referrer's current rate.
+     */
+    suspend fun referrerStatement(referrerId: String, fromDate: String, toDate: String): ReferrerStatement =
+        withContext(Dispatchers.Default) {
+            val referrer = rQ.byId(referrerId).executeAsOneOrNull()
+            val tests = commissionByTest(referrerId, fromDate, toDate)
+            ReferrerStatement(
+                referrerId = referrerId,
+                referrerName = referrer?.name ?: "(deleted referrer)",
+                fromDate = fromDate, toDate = toDate,
+                gross = tests.sumOf { it.gross },
+                payable = tests.sumOf { it.payable },
+                paid = cQ.paidInPeriod(referrerId, fromDate, toDate).executeAsOne(),
+                tests = tests,
+                orders = referrerOrders(referrerId, fromDate, toDate),
+                payouts = cQ.payoutsFor(referrerId).executeAsList().map { it.toModel() },
+                headlinePct = referrerPctOrInherit(referrer?.commission_pct),
+                labBasePct = setQ.getSetting(SETTING_BASE_COMMISSION).executeAsOneOrNull()?.toDoubleOrNull() ?: 0.0,
+            )
+        }
+
+    /** Settled-per-referrer for the range, in ONE query — the statement list
+     *  needs an outstanding column without a lookup per row. */
+    suspend fun commissionPaidByReferrer(fromDate: String, toDate: String): Map<String, Double> =
+        withContext(Dispatchers.Default) {
+            payoutsWithin(fromDate, toDate)
+                .groupBy { it.referrer_id }
+                .mapValues { (_, rows) -> rows.sumOf { it.paid_amount } }
+        }
+
+    /** Every settlement a referrer has ever received, newest period first. */
+    suspend fun payoutsFor(referrerId: String): List<ReferrerPayout> = withContext(Dispatchers.Default) {
+        cQ.payoutsFor(referrerId).executeAsList().map { it.toModel() }
+    }
+
+    /**
+     * Record a settlement. The period totals are frozen onto the row as they
+     * stood when the lab paid, so back-dated result entry can never restate a
+     * closed payout. Paying in instalments simply writes several rows — the
+     * period's paid figure is their sum, never an overwrite.
+     */
+    suspend fun recordPayout(
+        referrerId: String,
+        fromDate: String,
+        toDate: String,
+        gross: Double,
+        payable: Double,
+        paidAmount: Double,
+        method: String? = null,
+        notes: String? = null,
+    ): Result<ReferrerPayout> = withContext(Dispatchers.Default) {
+        runCatching {
+            require(paidAmount > 0.0) { "A settlement needs an amount" }
+            rQ.byId(referrerId).executeAsOneOrNull() ?: error("Referrer not found: $referrerId")
+            val now = nowIso()
+            val payout = ReferrerPayout(
+                id = Uuid.random().toString(), referrerId = referrerId,
+                periodFrom = fromDate.take(10), periodTo = toDate.take(10),
+                gross = gross, payable = payable, paidAmount = paidAmount,
+                paidAt = now, method = method?.trim()?.ifBlank { null },
+                notes = notes?.trim()?.ifBlank { null }, createdAt = now, updatedAt = now,
+            )
+            cQ.upsertPayout(payout.id, payout.referrerId, payout.periodFrom, payout.periodTo,
+                payout.gross, payout.payable, payout.paidAmount, payout.paidAt, payout.method,
+                payout.notes, payout.createdAt, payout.updatedAt)
+            payout
+        }
+    }
+
+    /**
+     * Lab-wide rollup for the dashboard tile (feedback item 7 asks for
+     * commission ON the dashboard). Same snapshot arithmetic as the statement.
+     */
+    suspend fun commissionRollup(fromDate: String, toDate: String): CommissionRollup =
+        withContext(Dispatchers.Default) {
+            val (from, toExclusive) = instantBounds(fromDate, toDate)
+            val t = oQ.commissionTotals(from, toExclusive).executeAsOneOrNull()
+            CommissionRollup(
+                gross = t?.gross ?: 0.0,
+                payable = t?.payable ?: 0.0,
+                ordersCount = t?.orders_count ?: 0L,
+                paid = payoutsWithin(fromDate, toDate).sumOf { it.paid_amount },
+            )
+        }
+
+    /**
+     * Payouts whose WHOLE period sits inside the range — the same containment
+     * rule `paidInPeriod` uses, so a per-referrer figure and the lab-wide total
+     * can never disagree. The query itself matches on overlap (its two bounds
+     * read `period_to >= rangeStart` and `period_from <= rangeEnd`), so a
+     * February payout would otherwise leak into a January statement.
+     */
+    private fun payoutsWithin(fromDate: String, toDate: String) =
+        cQ.allPayoutsInRange(fromDate, toDate).executeAsList()
+            .filter { it.period_from >= fromDate && it.period_to <= toDate }
 
     // ── Test catalog ─────────────────────────────────────────────────────────
 
@@ -316,6 +511,16 @@ class LabRepository(
             // read the same number no matter how the catalog moves afterwards.
             val rates = if (referrerId.isNullOrBlank()) emptyMap()
             else rrQ.ratesFor(referrerId).executeAsList().associate { it.test_id to it.price }
+            // Commission resolves through the SAME three-level rule and is frozen
+            // onto each line next to the price. Reading it live at statement time
+            // was the bug: a renegotiated rate rewrote history.
+            val labBasePct = setQ.getSetting(SETTING_BASE_COMMISSION).executeAsOneOrNull()
+                ?.toDoubleOrNull() ?: 0.0
+            val referrerPct = if (referrerId.isNullOrBlank()) null
+            else referrerPctOrInherit(rQ.byId(referrerId).executeAsOneOrNull()?.commission_pct)
+            val commissionOverrides = if (referrerId.isNullOrBlank()) emptyMap()
+            else cQ.commissionsFor(referrerId).executeAsList()
+                .associate { it.test_id to it.commission_pct }
             db.transactionWithResult {
                 // Atomic allocate: seed the seat row if new, bump, then read.
                 accQ.init(seat, prefs.accessionPrefix)
@@ -328,7 +533,10 @@ class LabRepository(
                     LabStatus.REGISTERED, priority, notes, now, now)
                 for (t in tests) {
                     val price = resolvePrice(t.price, rates[t.id])
-                    oQ.insertOrderTest(Uuid.random().toString(), orderId, t.id, t.name, price, "pending")
+                    val commissionPct = if (referrerId.isNullOrBlank()) 0.0
+                    else resolveCommissionPct(labBasePct, referrerPct, commissionOverrides[t.id])
+                    oQ.insertOrderTest(Uuid.random().toString(), orderId, t.id, t.name, price,
+                        "pending", commissionPct)
                     for (param in t.parameters) {
                         resQ.insertEmpty(Uuid.random().toString(), orderId, t.id, param.key, param.unit)
                     }
@@ -537,6 +745,56 @@ class LabRepository(
         }
     }
 
+    // ── Report share links (the printed QR) ──────────────────────────────────
+
+    /**
+     * The share token for [orderId], minting one on FIRST call and returning the
+     * SAME one forever after.
+     *
+     * Reuse is the whole point. A reprint that minted a second token would
+     * silently kill every copy already handed to a patient — the old QR would
+     * resolve to a report the server no longer knows about. `reportForOrder`
+     * therefore always wins, and only a genuinely absent (or corrupt) row mints.
+     *
+     * Zero network: the token is local randomness ([ReportShare.newToken]) and
+     * the row starts life `pending`, i.e. queued for upload. Printing never
+     * waits on that.
+     */
+    suspend fun reportShareToken(orderId: String, accessionNo: String): String =
+        withContext(Dispatchers.Default) {
+            val existing = repQ.reportForOrder(orderId).executeAsOneOrNull()
+            if (existing != null && ReportShare.isWellFormed(existing.token)) return@withContext existing.token
+            val now = nowIso()
+            val token = ReportShare.newToken()
+            repQ.upsertReport(orderId, token, accessionNo, "pending", null, null, null, now, now)
+            token
+        }
+
+    /** The row as stored, or null when this order has never been shared. */
+    suspend fun reportShare(orderId: String): LabReportShare? = withContext(Dispatchers.Default) {
+        repQ.reportForOrder(orderId).executeAsOneOrNull()?.toModel()
+    }
+
+    /** Drain queue for [com.bnm.diagnosis.report.ReportUploader]: minted, not yet on the server. */
+    suspend fun pendingReportUploads(): List<LabReportShare> = withContext(Dispatchers.Default) {
+        repQ.pendingUploads().executeAsList().map { it.toModel() }
+    }
+
+    /** The server has the PDF: the printed QR now resolves. */
+    suspend fun markReportUploaded(orderId: String, sha256: String?) = withContext(Dispatchers.Default) {
+        val now = nowIso()
+        repQ.markUploaded(now, sha256, now, orderId)
+    }
+
+    /**
+     * Kill the link (wrong patient, corrected report). Local state only — the
+     * caller is responsible for telling `admin-lab` as well, and marking it here
+     * first means a revoke is never lost to a dropped connection.
+     */
+    suspend fun revokeReportShare(orderId: String) = withContext(Dispatchers.Default) {
+        repQ.revokeReport(nowIso(), orderId)
+    }
+
     // ── EMR inbox (P3 bridge; rows are written by LabSyncEngine) ─────────────
 
     /** Unregistered clinic orders — drives the LabHome badge. */
@@ -562,7 +820,11 @@ class LabRepository(
     private fun Patients.toModel() = Patient(id, name, sex, dob, age_years, phone, address,
         created_at, updated_at, deleted_at)
 
-    private fun Referrers.toModel() = Referrer(id, name, kind, phone, commission_pct, created_at, deleted_at)
+    private fun Referrers.toModel() =
+        Referrer(id, name, kind, phone, commission_pct, created_at, deleted_at, updated_at)
+
+    private fun Referrer_payouts.toModel() = ReferrerPayout(id, referrer_id, period_from, period_to,
+        gross, payable, paid_amount, paid_at, method, notes, created_at, updated_at)
 
     private fun Lab_tests.toModel() = LabTest(
         id = id, code = code, name = name, category = category, price = price,
@@ -580,10 +842,19 @@ class LabRepository(
     private fun Lab_orders.toModel() = LabOrder(id, accession_no, patient_id, referrer_id, invoice_id,
         status, priority, notes, created_at, updated_at, collected_at, approved_at, reported_at)
 
-    private fun Lab_order_tests.toModel() = LabOrderTest(id, order_id, test_id, test_name, price, status)
+    // commission_pct rides along: it is the FROZEN percentage for this line, and
+    // dropping it here would make callers reach for the referrer's live rate.
+    private fun Lab_order_tests.toModel() =
+        LabOrderTest(id, order_id, test_id, test_name, price, status, commission_pct)
 
     private fun Lab_results.toModel() = LabResult(id, order_id, test_id, parameter_key, value_, unit,
         flag, ref_display, notes, entered_by, entered_at, verified_by, verified_at, approved_by, approved_at)
+
+    private fun Lab_reports.toModel() = LabReportShare(
+        orderId = order_id, token = token, accessionNo = accession_no, state = state,
+        publishedAt = published_at, expiresAt = expires_at, sha256 = sha256,
+        createdAt = created_at, updatedAt = updated_at,
+    )
 
     private fun Emr_inbox.toModel() = EmrInboxItem(id, visit_id, test_name, instructions, status,
         lab_status, accession_no, matched_order_id, done == 1L, created_at,
@@ -617,6 +888,42 @@ class LabRepository(
          *  through here (directly or via [effectivePrice]/[priceList]). */
         fun resolvePrice(catalogPrice: Double, rateOverride: Double?): Double =
             rateOverride ?: catalogPrice
+
+        /**
+         * THE commission rule, in one place — the exact mirror of [resolvePrice].
+         *
+         *     lab-wide base %  →  this referrer's %  →  this (referrer, test) %
+         *
+         * Later levels win; a null at any level INHERITS from the one above.
+         * Nothing ever stores a copy of an inherited value, so raising the
+         * lab-wide base still flows through to every doctor without an explicit
+         * rate — the same invariant that keeps `referrer_rates` from freezing
+         * when the catalog is repriced.
+         *
+         * The result of this is SNAPSHOT onto lab_order_tests.commission_pct at
+         * registration. After that the statement reads the frozen number, so
+         * renegotiating a rate never restates a past month.
+         */
+        fun resolveCommissionPct(
+            labBasePct: Double,
+            referrerPct: Double?,
+            testOverridePct: Double?,
+        ): Double = (testOverridePct ?: referrerPct ?: labBasePct).coerceIn(0.0, 100.0)
+
+        /**
+         * `referrers.commission_pct` is NOT NULL DEFAULT 0, so the column cannot
+         * tell "no rate agreed" from "agreed 0%". Non-positive is read as UNSET
+         * so the lab-wide base still reaches every doctor nobody has priced
+         * individually — otherwise the base would be dead on arrival, since
+         * every existing referrer row carries the 0 default.
+         *
+         * A genuinely zero-commission ARRANGEMENT is expressed per test, where a
+         * row's existence (not its value) is the override.
+         */
+        fun referrerPctOrInherit(pct: Double?): Double? = pct?.takeIf { it > 0.0 }
+
+        /** Key for the lab-wide base commission % in `lab_settings`. */
+        const val SETTING_BASE_COMMISSION = "commission.base_pct"
 
         /**
          * A LOCAL inclusive date range (ISO `YYYY-MM-DD`) → the half-open UTC
@@ -712,8 +1019,32 @@ class LabRepository(
             return ageYears?.toDouble()
         }
 
-        /** Most specific matching range wins (sex-split beats generic, age-banded
-         *  beats open); no match → null (value stays unflagged). */
+        /** How wide an age band is, in years. Unbounded ends count as open, so an
+         *  un-banded range sorts last. */
+        private fun bandWidth(r: RefRange): Double {
+            if (r.ageMinY == null && r.ageMaxY == null) return Double.MAX_VALUE
+            val lo = r.ageMinY ?: 0.0
+            val hi = r.ageMaxY ?: 200.0
+            return (hi - lo).coerceAtLeast(0.0)
+        }
+
+        /**
+         * Most specific matching range wins; no match → null (value stays unflagged).
+         *
+         * Specificity, most significant first:
+         *   1. an AGE-BANDED range beats an open one,
+         *   2. then sex-specific beats sex-neutral,
+         *   3. then the NARROWER band wins.
+         *
+         * Age outranks sex deliberately. The previous scoring was
+         * `(sex?2:0) + (ageBanded?1:0)`, which let a sex-split ADULT range (2)
+         * beat a sex-neutral PAEDIATRIC band (1) — so a 5-year-old boy was
+         * judged against adult haemoglobin limits and under-flagged. Paediatric
+         * banding is the whole point of the feature, so it must dominate.
+         *
+         * Rule 3 also makes overlapping bands deterministic; the old
+         * `maxByOrNull` silently resolved ties by list order.
+         */
         fun pickRange(ranges: List<RefRange>, sex: String?, ageYears: Double?): RefRange? {
             val candidates = ranges.filter { r ->
                 val sexOk = r.sex == null || (sex != null && r.sex.equals(sex, ignoreCase = true))
@@ -724,9 +1055,37 @@ class LabRepository(
                         (r.ageMaxY == null || ageYears <= r.ageMaxY)
                 sexOk && ageOk
             }
-            return candidates.maxByOrNull { r ->
-                (if (r.sex != null) 2 else 0) + (if (r.ageMinY != null || r.ageMaxY != null) 1 else 0)
-            }
+            // Ascending rank: 0 is the better bucket in each comparator.
+            return candidates.minWithOrNull(
+                compareBy<RefRange> { if (it.ageMinY != null || it.ageMaxY != null) 0 else 1 }
+                    .thenBy { if (it.sex != null) 0 else 1 }
+                    .thenBy { bandWidth(it) }
+            )
+        }
+
+        /**
+         * Direction a stored flag code implies: +1 above range, -1 below, 0 neither.
+         *
+         * DERIVED from the frozen code on the result row — never recomputed against
+         * today's catalog, because `lab_results.flag` and `ref_display` are frozen at
+         * entry on purpose (a reissued report must not change its own history).
+         */
+        fun flagDirection(flag: String?): Int = when (flag?.uppercase()) {
+            "H", "CH" -> 1
+            "L", "CL" -> -1
+            else -> 0
+        }
+
+        /** True for the two critical codes. Criticals must be phoned out, so every
+         *  renderer marks them differently from a plain high/low. */
+        fun isCriticalFlag(flag: String?): Boolean =
+            flag?.uppercase() == "CL" || flag?.uppercase() == "CH"
+
+        /** Arrow for a flag, or "" — Unicode; ESC/POS uses its own ASCII form. */
+        fun flagArrow(flag: String?): String = when (flagDirection(flag)) {
+            1 -> "\u2191"   // ↑
+            -1 -> "\u2193"  // ↓
+            else -> ""
         }
 
         /** N/L/H/CL/CH for numerics (criticals win), N/A for qualitative,
@@ -792,6 +1151,30 @@ class LabRepository(
             return if (r == floor(r)) r.toLong().toString() else r.toString()
         }
     }
+}
+
+/**
+ * A report's share link as stored in `lab_reports` (one row per order).
+ *
+ * Lives here rather than in LabModels.kt because it is a repository-private
+ * projection: nothing outside the report path has any business with a token.
+ *
+ * [state]: `pending` minted but not yet uploaded · `uploaded` the QR resolves
+ * · `revoked` the link was killed.
+ */
+data class LabReportShare(
+    val orderId: String,
+    val token: String,
+    val accessionNo: String,
+    val state: String,
+    val publishedAt: String? = null,
+    val expiresAt: String? = null,
+    val sha256: String? = null,
+    val createdAt: String = "",
+    val updatedAt: String? = null,
+) {
+    val isUploaded: Boolean get() = state == "uploaded"
+    val isRevoked: Boolean get() = state == "revoked"
 }
 
 private fun nowIso(): String = kotlin.time.Clock.System.now().toString()

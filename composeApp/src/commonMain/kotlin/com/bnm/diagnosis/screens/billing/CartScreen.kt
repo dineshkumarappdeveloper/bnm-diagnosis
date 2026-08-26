@@ -74,6 +74,7 @@ fun CartContent(
     var saving by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var saved by remember { mutableStateOf<Invoice?>(null) }
+    var savedAdvance by remember { mutableStateOf<Double?>(null) }
     var showPayment by remember { mutableStateOf(false) }
     var linkInvoice by remember { mutableStateOf<Invoice?>(null) }
     val lines = cart.lines()
@@ -82,15 +83,26 @@ fun CartContent(
 
     // Save the active sale as a Guest bill with the chosen payment. Payment-link
     // saves route to the link dialog instead of the plain result popup.
-    fun save(payment: PaymentChoice?, forLink: Boolean = false) {
+    // [advance] = money taken now that does NOT settle the bill.
+    fun save(payment: PaymentChoice?, forLink: Boolean = false, advance: PartPayment? = null) {
         if (saving) return
         saving = true; error = null
         scope.launch {
             repo.createFromCart(businessId, settings, cart, customerName = "Guest", customerPhone = null, customerGstin = null, placeOfSupply = null, payment = payment)
                 .onSuccess { inv ->
+                    // An advance is a TENDER against the bill, never a field inside
+                    // it: sync replaces the invoice doc with the server's row, but
+                    // the outbox entry survives and comes back as paid_amount. It
+                    // queues behind the create it depends on.
+                    advance?.let { a ->
+                        repo.recordPaymentLocal(
+                            businessId, inv.id, a.amount, a.method, a.reference,
+                            note = "Advance at billing",
+                        )
+                    }
                     outbox.kick()
                     cart.completeActive(); saving = false
-                    if (forLink) linkInvoice = inv else saved = inv
+                    if (forLink) linkInvoice = inv else { savedAdvance = advance?.amount; saved = inv }
                 }.onFailure { saving = false; error = it.message ?: "Failed to save" }
         }
     }
@@ -182,6 +194,12 @@ fun CartContent(
                 showPayment = false
                 save(PaymentChoice(method = "payment_link", markPaid = false), forLink = true)
             },
+            // Part payment: the bill saves UNPAID and the amount follows as its own
+            // tender, so the server's rollup derives 'partial' and a balance stands.
+            onPartPayment = { p ->
+                showPayment = false
+                save(PaymentChoice(method = p.method, markPaid = false), advance = p)
+            },
         )
     }
 
@@ -199,8 +217,9 @@ fun CartContent(
             settings = settings,
             businessName = businessName,
             invoice = inv,
-            onView = { saved = null; onSaved(inv.id) },
-            onDone = { saved = null; onClose() },
+            partPaid = savedAdvance,
+            onView = { saved = null; savedAdvance = null; onSaved(inv.id) },
+            onDone = { saved = null; savedAdvance = null; onClose() },
         )
     }
 }

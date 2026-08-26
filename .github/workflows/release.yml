@@ -1,37 +1,30 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # BNM Diagnosis — Release Pipeline
 #
-# TRIGGER: push any branch named `release/<x.y.z>` (e.g. release/1.0.0), or run
-# manually ("Run workflow") with a version. One push fans out to:
-#   1. bnmadmin-releases  (desktop installers: Windows/macOS/Linux/Pi/jar)
-#   2. Google Play — GATED behind repo variable ENABLE_PLAY=true (the Play app
-#      is still a draft; the API can't create the FIRST release anyway, so
-#      finish the console handoff + one manual rollout, then flip the variable)
-#   3. iOS App Store — COMING SOON (placeholder, skipped)
+# TRIGGER: push a branch named `release/<x.y.z>` (e.g. release/1.0.0), or run
+# manually ("Run workflow") with a version.
 #
-# DESKTOP PUBLISHING — same repo as BNMAdmin (bnmadmin-releases), two releases:
-#   • billing-v<x.y.z>   versioned history (make_latest:false so BNMAdmin's
-#                        /releases/latest/... links NEVER break)
-#   • billing-latest     rolling tag whose assets are replaced each release —
-#                        bnmapp.com links /releases/download/billing-latest/…
-#                        for stable always-current URLs.
+# WHERE THE DOWNLOADS GO: the PUBLIC `bnmadmin-releases` repo — the same shelf
+# BNM Admin already publishes to, so every BNM desktop app is downloadable from
+# one place. BNMDiagnosis assets are namespaced by the `diagnosis-v` TAG PREFIX
+# and by their filenames, so the two apps' releases never collide.
 #
-# VERSIONING: versionName parsed from branch (release/1.2.0 → 1.2.0);
-# versionCode = major*10000 + minor*100 + patch. Desktop gets -PappVersion.
+# ── REQUIRED SETUP (one-time, on THIS repo) ──────────────────────────────────
+# Settings → Secrets and variables → Actions → Secrets:
+#   RELEASE_TOKEN   A PAT with `contents: write` on
+#                   dineshkumarappdeveloper/bnmadmin-releases.
+#                   The same token BNMAdmin already uses — copy its value across;
+#                   secrets are per-repo and are NOT inherited.
 #
-# ── REQUIRED SETUP ───────────────────────────────────────────────────────────
-# Repo SECRETS:
-#   RELEASE_TOKEN            PAT that can create releases on bnmadmin-releases
-#                            (same value as the BNMAdmin repo's RELEASE_TOKEN).
-#   -- only when ENABLE_PLAY=true --
-#   GOOGLE_PLAY_SERVICE_ACCOUNT_JSON  Play API service account (grant it the
-#                                     com.bnm.diagnosis app in Play Console).
-#   ANDROID_KEYSTORE_BASE64           base64 of release.keystore (upload key).
-#   RELEASE_STORE_PASSWORD / RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD
-#                            build.gradle.kts reads these from env when
-#                            keystore.properties is absent (CI path).
-# Repo VARIABLES (optional): ENABLE_PLAY, PLAY_TRACK (default production),
-#   PLAY_STATUS (default completed).
+# Nothing else. There is no Play/App Store leg here: BNM Diagnosis is
+# desktop-first and its mobile targets are secondary, so this pipeline ships
+# installers only.
+#
+# WHY NO SIGNING: the DMG is unsigned (no Apple Developer ID configured), so
+# macOS Gatekeeper will warn on first open — right-click → Open, or
+# `xattr -dr com.apple.quarantine /Applications/BNMDiagnosis.app`. The MSI is
+# likewise unsigned and SmartScreen may warn. Add certificates here when the lab
+# product starts shipping to third parties.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: Release Pipeline
@@ -57,13 +50,12 @@ env:
   JAVA_VERSION: '17'
 
 jobs:
-  # ── Resolve versionName / versionCode / release tag ────────────────────────
+  # ── Resolve version + tag ──────────────────────────────────────────────────
   prepare:
     name: Resolve version
     runs-on: ubuntu-latest
     outputs:
       version_name: ${{ steps.v.outputs.version_name }}
-      version_code: ${{ steps.v.outputs.version_code }}
       tag: ${{ steps.v.outputs.tag }}
     steps:
       - id: v
@@ -72,28 +64,31 @@ jobs:
           INPUT_VERSION: ${{ github.event.inputs.version }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          if [ -n "$INPUT_VERSION" ]; then
+          set -euo pipefail
+          if [ -n "${INPUT_VERSION:-}" ]; then
             RAW="$INPUT_VERSION"
           else
-            RAW="${REF_NAME##*/}"     # release/1.2.0 -> 1.2.0
-            RAW="${RAW#release-}"     # release-1.2.0 -> 1.2.0
+            RAW="${REF_NAME##*/}"          # release/1.2.0 -> 1.2.0
           fi
-          NAME=$(echo "$RAW" | grep -oE '[0-9]+(\.[0-9]+){0,2}' | head -1)
-          NAME=${NAME:-1.0.0}
-          IFS='.' read -r MAJ MIN PAT <<< "$NAME"
-          CODE=$(( ${MAJ:-1} * 10000 + ${MIN:-0} * 100 + ${PAT:-0} ))
-          echo "version_name=$NAME" >> "$GITHUB_OUTPUT"
-          echo "version_code=$CODE" >> "$GITHUB_OUTPUT"
-          # billing- prefix keeps tags disjoint from BNMAdmin's v* in the shared
-          # bnmadmin-releases repo.
-          echo "tag=billing-v$NAME" >> "$GITHUB_OUTPUT"
-          echo "Resolved → versionName=$NAME  versionCode=$CODE  tag=billing-v$NAME"
+          # Strip a stray leading v and validate: jpackage rejects anything that
+          # is not strictly x.y.z, and it fails LATE (after a full build), so
+          # catch it here instead of burning four runners.
+          RAW="${RAW#v}"
+          if ! printf '%s' "$RAW" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Version must be x.y.z (got '$RAW'). Branch should look like release/1.0.0"
+            exit 1
+          fi
+          echo "version_name=$RAW" >> "$GITHUB_OUTPUT"
+          echo "tag=diagnosis-v$RAW" >> "$GITHUB_OUTPUT"
+          echo "Releasing BNM Diagnosis $RAW as tag diagnosis-v$RAW"
 
-  # ── 1. Desktop installers → bnmadmin-releases ──────────────────────────────
+  # ── Desktop installers ─────────────────────────────────────────────────────
   desktop:
     name: Desktop ${{ matrix.name }}
     needs: prepare
     runs-on: ${{ matrix.os }}
+    # ARM64 Linux is best-effort — if the runner class is unavailable it must not
+    # block the Windows/macOS/x64 release.
     continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
@@ -105,21 +100,20 @@ jobs:
             glob: composeApp/build/compose/binaries/main/msi/*.msi
             asset: BNMDiagnosis-windows-x64.msi
           - name: macos-arm64
-            os: macos-14            # Apple Silicon
+            os: macos-14              # Apple Silicon
             task: packageDmg
             glob: composeApp/build/compose/binaries/main/dmg/*.dmg
             asset: BNMDiagnosis-macos-arm64.dmg
+          - name: macos-x64
+            os: macos-13              # Intel — labs run older iMacs/minis
+            task: packageDmg
+            glob: composeApp/build/compose/binaries/main/dmg/*.dmg
+            asset: BNMDiagnosis-macos-x64.dmg
           - name: linux-x64-deb
             os: ubuntu-latest
             task: packageDeb
             glob: composeApp/build/compose/binaries/main/deb/*.deb
             asset: BNMDiagnosis-linux-x64.deb
-          - name: linux-arm64-deb
-            os: ubuntu-24.04-arm
-            task: packageDeb
-            glob: composeApp/build/compose/binaries/main/deb/*.deb
-            asset: BNMDiagnosis-linux-arm64.deb
-            experimental: true
           - name: portable-jar
             os: ubuntu-latest
             task: packageUberJarForCurrentOS
@@ -140,13 +134,15 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.version_name }}
         run: |
+          set -euo pipefail
           chmod +x ./gradlew || true
-          echo "Desktop app version: $VERSION"
+          echo "BNM Diagnosis desktop version: $VERSION"
           ./gradlew :composeApp:${{ matrix.task }} --no-daemon --stacktrace -PappVersion="$VERSION"
 
       - name: Rename to stable asset name
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p dist
           file=$(ls ${{ matrix.glob }} | head -n1)
           echo "Packaged: $file"
@@ -157,11 +153,12 @@ jobs:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
           if-no-files-found: error
-          # Intra-run hand-off to the publish job only; the real installers live
-          # on the bnmadmin-releases Releases. Default 90-day retention piles up
-          # and exhausts the shared Actions artifact-storage quota.
+          # Intra-run hand-off to publish-desktop only — the real artifacts live on
+          # the releases repo. The 90-day default would pile up installers and eat
+          # the Actions storage quota.
           retention-days: 1
 
+  # ── Publish to the shared public downloads repo ────────────────────────────
   publish-desktop:
     name: Publish desktop installers
     needs: [prepare, desktop]
@@ -175,90 +172,34 @@ jobs:
       - name: List assets
         run: ls -lh dist
 
-      # Versioned release — history. NEVER marked latest: the shared repo's
-      # /releases/latest belongs to BNMAdmin's site links.
-      - name: Publish versioned release (billing-v*)
+      - name: Publish to bnmadmin-releases
         uses: softprops/action-gh-release@v2
         with:
           repository: dineshkumarappdeveloper/bnmadmin-releases
           token: ${{ secrets.RELEASE_TOKEN }}
           tag_name: ${{ needs.prepare.outputs.tag }}
-          name: BNM Diagnosis ${{ needs.prepare.outputs.tag }}
-          make_latest: 'false'
+          name: BNM Diagnosis ${{ needs.prepare.outputs.version_name }}
           body: |
-            BNM Diagnosis desktop installers — ${{ needs.prepare.outputs.tag }}
-            • Windows (.msi) · macOS (Apple Silicon .dmg) · Linux (.deb) · Raspberry Pi (arm64 .deb) · portable .jar
+            **BNM Diagnosis** — offline-first diagnostic laboratory (LIMS) — ${{ needs.prepare.outputs.tag }}
+
+            | Platform | Download |
+            |---|---|
+            | Windows 10/11 (x64) | `BNMDiagnosis-windows-x64.msi` |
+            | macOS (Apple Silicon) | `BNMDiagnosis-macos-arm64.dmg` |
+            | macOS (Intel) | `BNMDiagnosis-macos-x64.dmg` |
+            | Linux (x64, Debian/Ubuntu) | `BNMDiagnosis-linux-x64.deb` |
+            | Any OS with a JRE | `BNMDiagnosis-portable.jar` |
+
+            These builds are **unsigned**. On macOS, first launch needs
+            right-click → Open (or `xattr -dr com.apple.quarantine /Applications/BNMDiagnosis.app`).
+            On Windows, SmartScreen may ask you to confirm via "More info → Run anyway".
+
+            The app is offline-first: it runs with no network at all. A licence key
+            is required once, at activation.
           files: dist/*
           fail_on_unmatched_files: true
 
-      # Rolling release — stable download URLs for bnmapp.com:
-      #   /releases/download/billing-latest/BNMDiagnosis-<platform>.<ext>
-      # Same-named assets are replaced on each publish.
-      - name: Update rolling billing-latest release
-        uses: softprops/action-gh-release@v2
-        with:
-          repository: dineshkumarappdeveloper/bnmadmin-releases
-          token: ${{ secrets.RELEASE_TOKEN }}
-          tag_name: billing-latest
-          name: BNM Diagnosis (latest)
-          make_latest: 'false'
-          body: |
-            Always-current BNM Diagnosis desktop installers (updated by every release).
-            Versioned history lives in the billing-v* releases.
-          files: dist/*
-          fail_on_unmatched_files: true
-
-  # ── 2. Android → Google Play (gated until the Play draft is finished) ──────
-  android-play:
-    name: Android → Google Play
-    needs: prepare
-    if: ${{ vars.ENABLE_PLAY == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-
-      - uses: gradle/actions/setup-gradle@v4
-
-      - name: Restore upload keystore
-        run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > release.keystore
-
-      - name: Build signed AAB
-        shell: bash
-        env:
-          RELEASE_STORE_FILE: release.keystore
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: |
-          chmod +x ./gradlew || true
-          ./gradlew :composeApp:bundleRelease --no-daemon --stacktrace \
-            -PplayVersionCode=${{ needs.prepare.outputs.version_code }} \
-            -PplayVersionName=${{ needs.prepare.outputs.version_name }}
-
-      - name: Upload to Google Play
-        uses: r0adkll/upload-google-play@v1
-        with:
-          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
-          packageName: com.bnm.diagnosis
-          releaseFiles: composeApp/build/outputs/bundle/release/*.aab
-          track: ${{ vars.PLAY_TRACK || 'production' }}
-          status: ${{ vars.PLAY_STATUS || 'completed' }}
-
-  # ── 3. iOS → App Store (COMING SOON) ───────────────────────────────────────
-  ios-appstore:
-    name: iOS → App Store (coming soon)
-    needs: prepare
-    if: ${{ false }}
-    runs-on: macos-14
-    steps:
-      - run: echo "iOS App Store publishing is coming soon."
-
-  notify:
+  summary:
     name: Summary
     needs: [prepare, publish-desktop]
     if: always()
@@ -266,11 +207,9 @@ jobs:
     steps:
       - run: |
           {
-            echo "## BNM Diagnosis release ${{ needs.prepare.outputs.tag }} (versionCode ${{ needs.prepare.outputs.version_code }})"
+            echo "## BNM Diagnosis ${{ needs.prepare.outputs.tag }}"
             echo ""
-            echo "| Target | Result |"
-            echo "|--------|--------|"
+            echo "| Leg | Result |"
+            echo "|---|---|"
             echo "| bnmadmin-releases (Desktop) | ${{ needs.publish-desktop.result }} |"
-            echo "| Google Play (Android) | ${{ vars.ENABLE_PLAY == 'true' && 'triggered' || 'gated (ENABLE_PLAY unset)' }} |"
-            echo "| App Store (iOS) | coming soon |"
           } >> "$GITHUB_STEP_SUMMARY"

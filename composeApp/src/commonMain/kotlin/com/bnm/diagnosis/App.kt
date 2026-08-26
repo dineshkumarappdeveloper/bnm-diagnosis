@@ -51,6 +51,8 @@ import com.bnm.diagnosis.lab.LabRepository
 import com.bnm.diagnosis.lab.LocalLabRepository
 import com.bnm.diagnosis.lab.SeedCatalog
 import com.bnm.diagnosis.license.LicenseManager
+import com.bnm.diagnosis.navigation.GuardedRoute
+import com.bnm.diagnosis.navigation.RouteGuardEffect
 import com.bnm.diagnosis.navigation.Screen
 import com.bnm.diagnosis.screens.billing.BillingSettingsScreen
 import com.bnm.diagnosis.screens.billing.CartScreen
@@ -81,6 +83,8 @@ import com.bnm.diagnosis.ui.theme.ThemeManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import com.bnm.diagnosis.license.subscriptionStatus
+import com.bnm.diagnosis.report.ReportAssembler
+import com.bnm.diagnosis.report.ReportUploader
 
 @Composable
 fun App() {
@@ -126,7 +130,17 @@ fun App() {
 
     // ── P3: additive lab sync (push/pull lab_entities + EMR inbox). The app is
     // the system of record — every phase is best-effort and never blocks UI. ──
-    val labSync = remember { LabSyncEngine(database, ApiClient.json, labApi, licenseManager) }
+    // Report publishing rides the normal sync sweep: printing works offline, and
+    // the PDF reaches the server (making the printed QR resolvable) whenever
+    // connectivity next returns. Standalone licences never get here — both the
+    // engine and ReportUploader return early for them.
+    val reportUploader = remember(labRepo, staffRepo, labApi) {
+        ReportUploader(labRepo, labApi, ReportAssembler(labRepo, staffRepo))
+    }
+    val labSync = remember {
+        LabSyncEngine(database, ApiClient.json, labApi, licenseManager,
+            drainReports = { reportUploader.drain() })
+    }
 
     // Heartbeat on app start (when online) + on every reconnect: refresh the
     // license JWT; 403 device_revoked/license_inactive → persist the blocked
@@ -247,6 +261,11 @@ fun App() {
                     }
                 }
 
+                // Backstop for the money/staff gates: pops any destination the
+                // signed-in person may not be on — including a back stack restored
+                // across a "switch user", which GuardedRoute alone cannot catch.
+                RouteGuardEffect(navController, signedInStaff)
+
                 NavHost(navController = navController, startDestination = startDestination) {
 
                     // ── Seat sign-in gate (P4) ──
@@ -266,7 +285,10 @@ fun App() {
 
                     // ── Staff & roles (owner only; guarded again inside) ──
                     composable(Screen.Staff.route) {
-                        StaffScreen(onBack = { navController.popBackStack() })
+                        GuardedRoute(Screen.Staff.route, signedInStaff,
+                            onBack = { navController.popBackStack() }) {
+                            StaffScreen(onBack = { navController.popBackStack() })
+                        }
                     }
 
                     composable(Screen.Activation.route) {
@@ -453,7 +475,10 @@ fun App() {
                     }
 
                     composable(Screen.Referrers.route) {
-                        ReferrersScreen(onBack = { navController.popBackStack() })
+                        GuardedRoute(Screen.Referrers.route, signedInStaff,
+                            onBack = { navController.popBackStack() }) {
+                            ReferrersScreen(onBack = { navController.popBackStack() })
+                        }
                     }
 
                     composable(Screen.Catalog.route) {

@@ -101,7 +101,13 @@ class StaffRepositoryTest {
         assertTrue(owner.canApprove); assertTrue(path.canApprove)
         assertFalse(tech.canApprove); assertFalse(recep.canApprove)
 
-        assertTrue(tech.canVerify); assertFalse(recep.canVerify)
+        // canVerify was deleted in round 1 — it was declared but never called,
+        // so it was a permission that lied. The money gate replaces it as the
+        // role distinction that actually does something: the lab owner's ask was
+        // that an employee cannot see commission.
+        assertTrue(owner.canSeeMoney)
+        assertFalse(path.canSeeMoney); assertFalse(tech.canSeeMoney); assertFalse(recep.canSeeMoney)
+        assertTrue(owner.canEditCatalog); assertFalse(recep.canEditCatalog)
 
         assertTrue(owner.canManageStaff)
         assertFalse(path.canManageStaff); assertFalse(tech.canManageStaff)

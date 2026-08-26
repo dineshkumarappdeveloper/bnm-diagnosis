@@ -29,7 +29,12 @@ CREATE TABLE lab_order_tests (
     test_id TEXT NOT NULL,
     test_name TEXT NOT NULL,             -- snapshot at order time
     price REAL NOT NULL DEFAULT 0,       -- snapshot at order time
-    status TEXT NOT NULL DEFAULT 'pending'   -- pending | in_progress | entered
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending | in_progress | entered
+    -- Commission % RESOLVED at registration and frozen here, beside the price
+    -- that is already frozen. Round-1 fix: the percentage used to be read live
+    -- off the referrers row when a statement was generated, so renegotiating a
+    -- doctor's rate silently rewrote every past month's payout.
+    commission_pct REAL NOT NULL DEFAULT 0
 );
 
 CREATE INDEX lab_order_tests_order ON lab_order_tests(order_id);
@@ -123,10 +128,16 @@ DELETE FROM lab_order_tests WHERE order_id = ?;
 -- Cancelled orders are excluded; orders with no referrer never appear.
 -- Bounds are ISO instants, :from inclusive / :toExclusive exclusive (the
 -- caller converts the operator's LOCAL date range to UTC instants).
+-- `payable` is summed PER LINE from the commission_pct frozen on that line, not
+-- from the referrer's current rate. Round-1 fix: the caller used to multiply
+-- gross by the LIVE referrers.commission_pct, so renegotiating a doctor's rate
+-- silently restated every past month. Per-line summing is also what makes a
+-- per-test override meaningful — two tests on one order can pay differently.
 commissionByReferrer:
 SELECT o.referrer_id AS referrer_id,
        count(DISTINCT o.id) AS orders_count,
-       coalesce(sum(t.price), 0.0) AS gross
+       coalesce(sum(t.price), 0.0) AS gross,
+       coalesce(sum(t.price * t.commission_pct / 100.0), 0.0) AS payable
 FROM lab_orders o
 LEFT JOIN lab_order_tests t ON t.order_id = o.id
 WHERE o.referrer_id IS NOT NULL
@@ -134,9 +145,36 @@ WHERE o.referrer_id IS NOT NULL
   AND o.created_at >= :from AND o.created_at < :toExclusive
 GROUP BY o.referrer_id;
 
+-- Per-TEST breakdown for one referrer's statement (feedback item 7: "well
+-- detail"). Same snapshot discipline, grouped by test instead of by referrer.
+commissionByTestForReferrer:
+SELECT t.test_id AS test_id,
+       t.test_name AS test_name,
+       count(*) AS times_ordered,
+       coalesce(sum(t.price), 0.0) AS gross,
+       coalesce(sum(t.price * t.commission_pct / 100.0), 0.0) AS payable
+FROM lab_orders o
+JOIN lab_order_tests t ON t.order_id = o.id
+WHERE o.referrer_id = :referrerId
+  AND o.status != 'cancelled'
+  AND o.created_at >= :from AND o.created_at < :toExclusive
+GROUP BY t.test_id, t.test_name
+ORDER BY payable DESC;
+
+-- Lab-wide month-to-date rollup for the dashboard tile.
+commissionTotals:
+SELECT coalesce(sum(t.price), 0.0) AS gross,
+       coalesce(sum(t.price * t.commission_pct / 100.0), 0.0) AS payable,
+       count(DISTINCT o.id) AS orders_count
+FROM lab_orders o
+JOIN lab_order_tests t ON t.order_id = o.id
+WHERE o.referrer_id IS NOT NULL
+  AND o.status != 'cancelled'
+  AND o.created_at >= :from AND o.created_at < :toExclusive;
+
 -- Drill-down: one referrer's orders inside the same range, newest first.
 referrerOrdersInRange:
-SELECT o.id AS order_id, o.accession_no, o.created_at, o.status,
+SELECT o.id AS order_id, o.accession_no, o.created_at, o.reported_at, o.status,
        p.name AS patient_name,
        coalesce(sum(t.price), 0.0) AS amount
 FROM lab_orders o
@@ -151,8 +189,8 @@ ORDER BY o.created_at DESC;
 -- ── Order tests ──
 
 insertOrderTest:
-INSERT INTO lab_order_tests(id, order_id, test_id, test_name, price, status)
-VALUES (?, ?, ?, ?, ?, ?);
+INSERT INTO lab_order_tests(id, order_id, test_id, test_name, price, status, commission_pct)
+VALUES (?, ?, ?, ?, ?, ?, ?);
 
 testsForOrder:
 SELECT * FROM lab_order_tests WHERE order_id = ? ORDER BY rowid;

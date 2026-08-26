@@ -1,0 +1,59 @@
+-- Round-1 feedback · QR code on the printed report → patient downloads the PDF.
+--
+-- WHY A LOCAL TABLE AT ALL: the printed QR must be correct with ZERO network
+-- (CLAUDE.md: SQLDelight is the system of record, every workflow works offline
+-- indefinitely). So the share TOKEN is minted locally at approval time and
+-- stored here; the upload is queued and drains whenever connectivity returns.
+-- The URL printed on paper is therefore stable and known before any server has
+-- heard of the report.
+--
+-- WHY A RANDOM TOKEN AND NOT THE ACCESSION: a lab report is PHI, and accession
+-- numbers are per-seat sequential (ACC-S1-00042) — trivially enumerable. The
+-- token is 160 bits of randomness, the same reasoning the Studio invoice
+-- share-link uses. It is the ONLY secret protecting the document, so it is never
+-- derived from patient data and never reused across reports.
+--
+-- STANDALONE LICENCES NEVER GET A ROW. admin-lab refuses every cloud call from
+-- edition='standalone' (409 standalone_edition), so a QR would print a link that
+-- can never resolve. Those labs print no QR at all — a dead QR on a medical
+-- report is worse than none.
+
+CREATE TABLE lab_reports (
+    order_id TEXT NOT NULL PRIMARY KEY,
+    token TEXT NOT NULL,                       -- 160-bit hex, the capability
+    accession_no TEXT NOT NULL,
+    -- Lifecycle: 'pending' minted but not uploaded · 'uploaded' resolvable
+    -- · 'revoked' link killed (wrong patient, corrected report)
+    state TEXT NOT NULL DEFAULT 'pending',
+    published_at TEXT,                         -- when the server confirmed the upload
+    expires_at TEXT,                           -- null = no expiry
+    sha256 TEXT,                               -- of the uploaded bytes, so a reprint can skip re-upload
+    created_at TEXT NOT NULL,
+    updated_at TEXT
+);
+
+CREATE UNIQUE INDEX lab_reports_token ON lab_reports(token);
+
+upsertReport:
+INSERT OR REPLACE INTO lab_reports(order_id, token, accession_no, state, published_at, expires_at,
+    sha256, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+reportForOrder:
+SELECT * FROM lab_reports WHERE order_id = ?;
+
+reportByToken:
+SELECT * FROM lab_reports WHERE token = ?;
+
+markUploaded:
+UPDATE lab_reports SET state = 'uploaded', published_at = ?, sha256 = ?, updated_at = ? WHERE order_id = ?;
+
+revokeReport:
+UPDATE lab_reports SET state = 'revoked', updated_at = ? WHERE order_id = ?;
+
+-- Drain queue: everything minted but not yet on the server.
+pendingUploads:
+SELECT * FROM lab_reports WHERE state = 'pending' ORDER BY created_at;
+
+reportsChangedSince:
+SELECT * FROM lab_reports WHERE coalesce(updated_at, created_at) > :since;

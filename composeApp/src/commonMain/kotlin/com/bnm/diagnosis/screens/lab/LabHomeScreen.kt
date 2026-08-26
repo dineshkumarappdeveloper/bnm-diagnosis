@@ -34,6 +34,7 @@ import androidx.compose.material.icons.outlined.Biotech
 import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.PendingActions
+import androidx.compose.material.icons.outlined.Payments
 import androidx.compose.material.icons.outlined.People
 import androidx.compose.material.icons.outlined.PersonAddAlt
 import androidx.compose.material.icons.outlined.Settings
@@ -75,13 +76,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.bnm.diagnosis.chat.LocalBillingRepository
+import com.bnm.diagnosis.lab.CommissionRollup
 import com.bnm.diagnosis.lab.CriticalResult
 import com.bnm.diagnosis.lab.LabStatus
 import com.bnm.diagnosis.lab.LocalLabRepository
 import com.bnm.diagnosis.lab.WorklistEntry
+import com.bnm.diagnosis.staff.LabPermission
 import com.bnm.diagnosis.staff.Staff
+import com.bnm.diagnosis.staff.allows
 import com.bnm.diagnosis.sync.LabSyncEngine
 import com.bnm.diagnosis.ui.theme.AppTheme
+import com.bnm.diagnosis.util.formatDecimal1
+import com.bnm.diagnosis.util.formatDecimal2
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.datetime.TimeZone
@@ -197,6 +203,23 @@ fun LabHomeScreen(
 
     // ONE reactive per-status rollup feeds every tab badge + the attention bar.
     val statusCounts by remember(repo) { repo.statusCountsFlow() }.collectAsState(emptyMap())
+
+    // ── Commission, month to date (feedback item 7: it belongs on the dashboard) ──
+    // Gated by the SHARED rule, not a local one: LabPermission.MONEY is the same
+    // check RouteGuard puts in front of the Referrers route this tile links to,
+    // so the tile can never offer a door the person cannot walk through.
+    val showMoney = signedInStaff.allows(LabPermission.MONEY)
+    // Deliberately NOT remembered: recomputing is trivial and it means the range
+    // rolls over on its own in a session left open across month end.
+    val monthFrom = firstOfMonth(todayLocal()).toString()
+    val monthTo = todayLocal().toString()
+    var commission by remember { mutableStateOf<CommissionRollup?>(null) }
+    // Re-read whenever the pipeline moves — registering an order changes both the
+    // status counts and what the lab owes.
+    LaunchedEffect(repo, showMoney, monthFrom, monthTo, statusCounts) {
+        commission = if (!showMoney) null
+        else runCatching { repo.commissionRollup(monthFrom, monthTo) }.getOrNull()
+    }
 
     // Bills-shortcut live caption ("N today"); null/0 falls back to the static label.
     var billsToday by remember { mutableStateOf<Long?>(null) }
@@ -314,6 +337,7 @@ fun LabHomeScreen(
                         Column(Modifier.weight(0.35f).fillMaxHeight().verticalScroll(rememberScrollState()),
                             verticalArrangement = Arrangement.spacedBy(16.dp)) {
                             CriticalsCard(criticals, onOpenOrder)
+                            if (showMoney) CommissionCard(commission, onReferrers)
                             if (syncState != null && !syncState.disabled) {
                                 EmrCard(emrPending, onEmrInbox)
                             }
@@ -388,6 +412,9 @@ fun LabHomeScreen(
 
                 // ── Critical results today ──
                 CriticalsCard(criticals, onOpenOrder)
+
+                // ── Commission, month to date ──
+                if (showMoney) CommissionCard(commission, onReferrers)
 
                 // ── Navigation cards ──
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -590,6 +617,10 @@ private fun WorklistPanel(
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             } else {
+                // Reported time (feedback item 3) earns a column only where it is
+                // meaningful — every row on the Reported tab has one, and no row
+                // on any earlier tab does.
+                val showReported = HOME_TABS[tabIndex].statuses?.contains(LabStatus.REPORTED) == true
                 // Column header
                 Row(
                     Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant)
@@ -601,6 +632,7 @@ private fun WorklistPanel(
                     TableHeadCell("PROGRESS", Modifier.width(96.dp))
                     TableHeadCell("STATUS", Modifier.width(120.dp))
                     TableHeadCell("REGISTERED", Modifier.width(92.dp))
+                    if (showReported) TableHeadCell("REPORTED", Modifier.width(92.dp))
                     Spacer(Modifier.width(64.dp))
                 }
                 LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
@@ -629,6 +661,14 @@ private fun WorklistPanel(
                             Box(Modifier.width(120.dp)) { LabStatusChip(e.order.status, e.order.priority) }
                             Text(shortTimeLabel(e.order.createdAt), style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(92.dp))
+                            if (showReported) Text(
+                                // "—" rather than blank: an approved order that
+                                // was never marked reported is worth noticing.
+                                e.order.reportedAt?.let { shortTimeLabel(it) } ?: "—",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.width(92.dp),
+                            )
                             TextButton(onClick = { onOpenOrder(e.order.id) }) { Text("Open") }
                         }
                     }
@@ -701,6 +741,79 @@ private fun CriticalsCard(criticals: List<CriticalResult>, onOpenOrder: (String)
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Referrer commission, month to date (feedback item 7 asked for commission on
+ * the dashboard). Every figure is summed from the frozen order lines — the same
+ * arithmetic as the statement, through the same repository rollup, so the tile
+ * and the Referrers screen can never quote different numbers.
+ *
+ * "Outstanding" is what makes this actionable rather than decorative: payable
+ * minus what has actually been settled inside the month.
+ */
+@Composable
+private fun CommissionCard(rollup: CommissionRollup?, onReferrers: () -> Unit) {
+    val c = AppTheme.colors
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onReferrers),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Box(Modifier.size(30.dp).background(c.infoSoft, RoundedCornerShape(9.dp)),
+                    contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.Payments, contentDescription = null,
+                        tint = c.info, modifier = Modifier.size(17.dp))
+                }
+                Text("Referral commission", style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Text("This month", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (rollup == null) {
+                Text("Loading…", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else if (rollup.ordersCount == 0L) {
+                Text("No referred orders yet this month", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Column {
+                        Text("Referred revenue", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("₹ ${formatDecimal2(rollup.gross)}", style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "${rollup.ordersCount} order${if (rollup.ordersCount == 1L) "" else "s"} · " +
+                                "${formatDecimal1(rollup.effectivePct)}% avg",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text("Commission payable", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("₹ ${formatDecimal2(rollup.payable)}", style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold)
+                        Text(
+                            if (rollup.paid > 0.005)
+                                "paid ₹ ${formatDecimal2(rollup.paid)} · due ₹ ${formatDecimal2(rollup.outstanding)}"
+                            else "nothing settled yet",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+            TextButton(onClick = onReferrers, contentPadding = PaddingValues(horizontal = 4.dp)) {
+                Text("Statements & payouts")
             }
         }
     }
@@ -924,6 +1037,12 @@ private fun CompactOrderRow(e: WorklistEntry, onOpen: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text("${e.doneCount}/${e.testCount} test${if (e.testCount == 1L) "" else "s"} done · ${shortTimeLabel(e.order.createdAt)}",
                     style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            // Reported time (feedback item 3). Self-gating: only a reported order
+            // carries the stamp, so no tab plumbing is needed down here.
+            e.order.reportedAt?.let {
+                Text("Reported ${shortTimeLabel(it)}", style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }

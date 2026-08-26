@@ -49,5 +49,21 @@ SELECT count(*) FROM billing_outbox WHERE idempotency_key = ?;
 maxSeqLocal:
 SELECT coalesce(max(seq_local), 0) FROM billing_outbox;
 
+-- Part payments taken on this device that the server hasn't accepted yet. Every
+-- balance on screen subtracts these, so an advance shows the instant it is taken
+-- (offline, days before it syncs). Once a row drains it disappears from here and
+-- the same money arrives inside the server invoice's paid_amount — so the two
+-- sources never overlap and the amount is never counted twice.
+pendingPayments:
+SELECT aggregate_id, payload FROM billing_outbox
+WHERE op = 'record_payment' AND status IN ('pending','failed','sending');
+
+-- The still-queued create for a bill, if any. A payment taken before its invoice
+-- has reached the server must wait behind that create (depends_on) — there is no
+-- invoice to attach a tender to yet. Absent = the bill is already server-side.
+pendingCreateKeyFor:
+SELECT idempotency_key FROM billing_outbox
+WHERE op = 'create_invoice' AND aggregate_id = ? LIMIT 1;
+
 pendingCount:
 SELECT count(*) FROM billing_outbox WHERE status IN ('pending','failed','sending');

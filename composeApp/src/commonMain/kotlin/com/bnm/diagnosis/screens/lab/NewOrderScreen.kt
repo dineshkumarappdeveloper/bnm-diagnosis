@@ -81,6 +81,10 @@ import com.bnm.diagnosis.util.formatDecimal2
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 import kotlinx.coroutines.launch
+import com.bnm.diagnosis.staff.LocalStaffSession
+import com.bnm.diagnosis.staff.LabPermission
+import com.bnm.diagnosis.staff.allows
+import com.bnm.diagnosis.screens.billing.PartPayment
 
 /**
  * Registration desk: pick/create the patient → pick tests & panels → referrer +
@@ -248,7 +252,18 @@ fun NewOrderScreen(
 
     /** Create the GST bill for the registered order and link it. [choice] null =
      *  bill saved unpaid (sheet dismissed / "save without payment"). */
-    fun createBill(order: LabOrder, choice: PaymentChoice?, forLink: Boolean = false) {
+    /**
+     * [advance] = a PART payment taken at registration ("pay ₹300 now, the rest
+     * when you collect"). The bill still saves UNPAID and the advance follows as
+     * its own queued tender, so the server's rollup derives `partial` — nothing
+     * local ever claims a payment state that sync would then contradict.
+     */
+    fun createBill(
+        order: LabOrder,
+        choice: PaymentChoice?,
+        forLink: Boolean = false,
+        advance: PartPayment? = null,
+    ) {
         val p = patient ?: return
         if (billingInFlight) return
         billingInFlight = true
@@ -266,6 +281,18 @@ fun NewOrderScreen(
                 payment = choice,
             ).onSuccess { inv ->
                 runCatching { labRepo.linkInvoice(order.id, inv.id) }
+                // Queue the advance BEFORE kicking the outbox so both the bill and
+                // its tender drain in one pass; depends_on keeps them ordered if the
+                // bill has not reached the server yet.
+                advance?.let { a ->
+                    runCatching {
+                        billing.recordPaymentLocal(
+                            businessId = businessId, invoiceId = inv.id,
+                            amount = a.amount, method = a.method, reference = a.reference,
+                            note = "Advance at registration",
+                        )
+                    }
+                }
                 outbox.kick()
                 if (forLink) linkInvoice = inv else savedInvoice = inv
             }.onFailure {
@@ -378,6 +405,10 @@ fun NewOrderScreen(
     if (showAddReferrer) {
         ReferrerFormDialog(
             initial = null,
+            // Registration is open to every role, so the quick-add must not leak
+            // the commission field that the Referrers hub keeps behind the money
+            // gate. A new referrer added here simply inherits the lab-wide base %.
+            canSeeCommission = LocalStaffSession.current.current.value.allows(LabPermission.MONEY),
             onDismiss = { showAddReferrer = false },
             onSaved = { r ->
                 showAddReferrer = false
@@ -400,6 +431,10 @@ fun NewOrderScreen(
                 // order keeps a linked GST bill when a series is bound.
                 onDismiss = { createBill(order, null) },
                 onConfirm = { choice -> createBill(order, choice) },
+                // Advance at registration — the lab's most common payment shape.
+                onPartPayment = { p ->
+                    createBill(order, PaymentChoice(method = p.method, markPaid = false), advance = p)
+                },
                 onPaymentLink = { createBill(order, PaymentChoice(method = "payment_link", markPaid = false), forLink = true) },
             )
         }

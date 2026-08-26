@@ -3,8 +3,11 @@ package com.bnm.diagnosis.report
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import android.os.Bundle
@@ -37,6 +40,10 @@ fun initReportContext(context: Context) { reportContext = context }
 
 private const val MM = 72f / 25.4f
 private const val MARGIN_MM = 14f
+
+/** Side of the QR SYMBOL in mm; the 4-module quiet zone is reserved around it.
+ *  Mirrors the desktop renderer so both outputs measure the same. */
+private const val QR_MM = 20f
 private const val PAGE_W = 595
 private const val PAGE_H = 842
 
@@ -159,6 +166,21 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
     private val xUnit = xValue + wValue
     private val xRef = xUnit + wUnit
     private val xFlag = xRef + wRef
+
+    /** Column the QR + its caption own, left of "Verified by". */
+    private val qrBlockW = 118f
+
+    /**
+     * Decoded ONCE and shared by the measure pass and the draw pass — both need
+     * the dimensions, and decoding twice would double the peak memory of a
+     * report on a phone for no gain. Null (undecodable or absent) simply means
+     * the sign-off prints as text, exactly as it did before signatures existed.
+     */
+    private val signatureBitmap: Bitmap? by lazy {
+        doc.signature?.imagePng?.takeIf { it.isNotEmpty() }?.let { bytes ->
+            runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull()
+        }
+    }
 
     private var pdf: PdfDocument? = null
     private var page: PdfDocument.Page? = null
@@ -410,18 +432,102 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         y += rowH + 1.5f
     }
 
+    /**
+     * Fill the QR modules as rectangles — resolution-independent and codec-free,
+     * the same approach the desktop renderer takes. [x]/[yTop] are the top-left
+     * of the SYMBOL; the quiet zone is the caller's business.
+     *
+     * Adjacent dark modules in a row collapse into one rectangle: identical ink,
+     * a fraction of the draw calls on a 49x49 code.
+     */
+    private fun drawQrMatrix(matrix: QrMatrix, x: Float, yTop: Float, side: Float) {
+        val c = canvas ?: return   // measure pass draws nothing
+        val n = matrix.size
+        if (n <= 0) return
+        val cell = side / n
+        val p = Paint().apply { color = 0xFF000000.toInt(); style = Paint.Style.FILL }
+        for (my in 0 until n) {
+            var mx = 0
+            while (mx < n) {
+                if (!matrix[mx, my]) { mx++; continue }
+                var run = 1
+                while (mx + run < n && matrix[mx + run, my]) run++
+                c.drawRect(x + mx * cell, yTop + my * cell,
+                    x + (mx + run) * cell, yTop + (my + 1) * cell, p)
+                mx += run
+            }
+        }
+    }
+
+    /** Sign-off + report-download QR — mirror of the desktop renderer, with y
+     *  growing DOWNWARD. See the desktop KDoc for why the layout is shaped this
+     *  way; an unsigned, QR-less report collapses to the original measurements. */
     private fun drawSignatures() {
-        ensure(96f)
-        y += 34f // physical signature gap
-        val lineY = y
+        val sig = doc.signature
+        val sigBmp = signatureBitmap?.takeIf { it.width > 0 && it.height > 0 }
+        val gap = if (sigBmp != null) 48f else 34f
+        val credentialLines = listOfNotNull(
+            sig?.qualifications?.takeIf { it.isNotBlank() },
+            sig?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
+            doc.approvedOn?.takeIf { it.isNotBlank() }?.let { "Approved on $it" },
+        )
+        val signOffH = gap + 25f + credentialLines.size * 10f
+
+        val qr = doc.qr?.takeIf { it.matrix.size > 0 }
+        val qrSide = QR_MM * MM
+        val qrCaption = qr?.let { wrapText(it.caption, 7f, true, qrBlockW) }.orEmpty()
+        val qrNote = qr?.let { wrapText(it.note, 6.2f, false, qrBlockW) }.orEmpty()
+        val quiet = if (qr == null) 0f else qrSide / qr.matrix.size * 4f
+        val qrH = if (qr == null) 0f else qrSide + quiet * 2f + 4f +
+            qrCaption.size * 9f + qrNote.size * 8f
+
+        ensure(maxOf(signOffH, qrH) + 30f)
+
+        val blockTop = y
+        val lineY = blockTop + gap
         val sigW = 150f
-        hline(left, left + sigW, lineY, SIG_LINE, 0.8f)
+
+        if (sigBmp != null) {
+            // Sits ON the rule, like an inked signature would.
+            val maxH = gap - 8f
+            val scale = minOf(maxH / sigBmp.height, sigW / sigBmp.width)
+            val w = sigBmp.width * scale
+            val h = sigBmp.height * scale
+            canvas?.drawBitmap(
+                sigBmp, null,
+                RectF(right - w, lineY - 2f - h, right, lineY - 2f),
+                Paint(Paint.FILTER_BITMAP_FLAG),
+            )
+        }
+
+        val verifiedX = if (qr != null) left + qrBlockW + 14f else left
+        hline(verifiedX, verifiedX + sigW, lineY, SIG_LINE, 0.8f)
         hline(right - sigW, right, lineY, SIG_LINE, 0.8f)
-        text(left, lineY + 12f, "Verified by: ${doc.verifiedBy ?: "-"}", 9f, bold = false, INK)
+        text(verifiedX, lineY + 12f, "Verified by: ${doc.verifiedBy ?: "-"}", 9f, bold = false, INK)
         val approved = doc.approvedBy ?: "Authorised Signatory"
         textRight(right, lineY + 13f, approved, 10.5f, bold = true, INK)
         textRight(right, lineY + 25f, "Approved by (Pathologist)", 8f, bold = false, GRAY)
-        y = lineY + 40f
+        var cy = lineY + 35f
+        for (line in credentialLines) {
+            textRight(right, cy, line, 8f, bold = false, GRAY)
+            cy += 10f
+        }
+
+        var qrBottom = blockTop
+        if (qr != null) {
+            drawQrMatrix(qr.matrix, left + quiet, blockTop + quiet, qrSide)
+            var ty = blockTop + quiet * 2f + qrSide + 4f
+            qrCaption.forEach { text(left, ty, it, 7f, bold = true, INK); ty += 9f }
+            qrNote.forEach { text(left, ty, it, 6.2f, bold = false, GRAY); ty += 8f }
+            qrBottom = ty
+        }
+
+        y = maxOf(lineY + 40f + credentialLines.size * 10f, qrBottom + 6f)
+        // Flag key — mirror of the desktop renderer (note: y grows DOWNWARD here).
+        if (doc.flagLegendLine.isNotEmpty()) {
+            text(left, y, doc.flagLegendLine, 7.5f, bold = false, GRAY)
+            y += 12f
+        }
         textCenter(y, "--- End of report ---", 7.5f, bold = false, GRAY)
         y += 12f
     }

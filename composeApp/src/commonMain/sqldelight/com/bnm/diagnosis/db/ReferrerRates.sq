@@ -12,11 +12,15 @@ CREATE TABLE referrer_rates (
     referrer_id TEXT NOT NULL,
     test_id TEXT NOT NULL,
     price REAL NOT NULL,
+    updated_at TEXT,          -- added round 1 so the sweep can carry rate lists
     PRIMARY KEY (referrer_id, test_id)
 );
 
 upsertRate:
-INSERT OR REPLACE INTO referrer_rates(referrer_id, test_id, price) VALUES (?, ?, ?);
+INSERT OR REPLACE INTO referrer_rates(referrer_id, test_id, price, updated_at) VALUES (?, ?, ?, ?);
+
+ratesChangedSince:
+SELECT * FROM referrer_rates WHERE updated_at IS NOT NULL AND updated_at > :since;
 
 ratesFor:
 SELECT * FROM referrer_rates WHERE referrer_id = ?;

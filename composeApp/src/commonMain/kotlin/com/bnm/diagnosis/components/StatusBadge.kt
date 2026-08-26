@@ -40,7 +40,9 @@ private fun statusColors(status: String): Pair<Color, Color> = when (status.lowe
     "resolved", "completed", "closed", "delivered" -> Color(0xFFE8F5E9) to Color(0xFF2E7D32)
     "cancelled", "canceled", "failed" -> Color(0xFFFFEBEE) to Color(0xFFC62828)
     "confirmed", "paid" -> Color(0xFFE8F5E9) to Color(0xFF2E7D32)
-    "partially_paid" -> Color(0xFFFFF3E0) to Color(0xFFE65100)
+    // The server writes "partial" (invoices_status_check); "partially_paid" was
+    // the only key here, so a part-paid bill fell through to the default.
+    "partial", "partially_paid" -> Color(0xFFFFF3E0) to Color(0xFFE65100)
     "refunded" -> Color(0xFFF3E5F5) to Color(0xFF6A1B9A)
     "credit" -> Color(0xFFE8F5E9) to Color(0xFF2E7D32)
     "debit" -> Color(0xFFFFEBEE) to Color(0xFFC62828)

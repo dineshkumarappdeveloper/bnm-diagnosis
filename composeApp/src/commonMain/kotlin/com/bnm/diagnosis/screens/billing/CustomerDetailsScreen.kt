@@ -61,12 +61,21 @@ fun CustomerDetailsContent(businessId: String, businessName: String, onSaved: (S
     var showPayment by remember { mutableStateOf(false) }
     var linkInvoice by remember { mutableStateOf<Invoice?>(null) }
 
-    fun save(payment: PaymentChoice?, forLink: Boolean = false) {
+    /** [advance] = money taken now that does NOT settle the bill. */
+    fun save(payment: PaymentChoice?, forLink: Boolean = false, advance: PartPayment? = null) {
         if (saving) return
         saving = true; error = null
         scope.launch {
             repo.createFromCart(businessId, settings, cart, customerName = name, customerPhone = phone, customerGstin = gstin, placeOfSupply = pos, payment = payment)
                 .onSuccess { inv ->
+                    // Queued as its own tender (never written into the invoice doc,
+                    // which sync replaces), ordered behind the create it depends on.
+                    advance?.let { a ->
+                        repo.recordPaymentLocal(
+                            businessId, inv.id, a.amount, a.method, a.reference,
+                            note = "Advance at billing",
+                        )
+                    }
                     outbox.kick()
                     cart.completeActive(); saving = false
                     if (forLink) linkInvoice = inv else onSaved(inv.id)
@@ -107,6 +116,12 @@ fun CustomerDetailsContent(businessId: String, businessName: String, onSaved: (S
             onPaymentLink = {
                 showPayment = false
                 save(PaymentChoice(method = "payment_link", markPaid = false), forLink = true)
+            },
+            // Advance at registration: the bill saves unpaid, the amount rides along
+            // as a tender, and the invoice detail opens showing the balance.
+            onPartPayment = { p ->
+                showPayment = false
+                save(PaymentChoice(method = p.method, markPaid = false), advance = p)
             },
         )
     }

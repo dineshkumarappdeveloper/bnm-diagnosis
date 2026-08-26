@@ -19,6 +19,7 @@ import kotlin.uuid.Uuid
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import kotlinx.datetime.DatePeriod
@@ -29,6 +30,7 @@ import kotlinx.datetime.toLocalDateTime
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -60,6 +62,50 @@ class BillingRepository(
         q.selectById(INVOICE_SETTING, businessId).asFlow().mapToOneOrNull(Dispatchers.Default)
             .map { raw -> raw?.let { runCatching { json.decodeFromString<InvoiceSettings>(it) }.getOrNull() } }
             .catch { emit(null) }
+
+    /**
+     * Invoices with the money actually collected against each of them.
+     *
+     * Two sources, deliberately kept apart:
+     *  • `paid_amount` inside the synced server row — the authority, maintained
+     *    by the invoice-payment rollup trigger.
+     *  • tenders still sitting in the outbox — money taken on this device that
+     *    the server hasn't seen yet.
+     * Summing them is safe in both directions: a queued tender leaves the outbox
+     * only when the server has counted it, and the drain writes the server row
+     * back verbatim in the same breath. Nothing is ever written into the local
+     * invoice doc, because sync replaces that doc wholesale.
+     */
+    fun invoiceBalancesFlow(businessId: String): Flow<List<InvoiceBalance>> =
+        combine(
+            q.selectEntity(INVOICE, businessId).asFlow().mapToList(Dispatchers.Default),
+            outboxQ.pendingPayments().asFlow().mapToList(Dispatchers.Default),
+        ) { rows, queued ->
+            val queuedByInvoice = HashMap<String, Double>()
+            for (p in queued) {
+                val amt = runCatching {
+                    json.decodeFromString(InvoicePaymentRequest.serializer(), p.payload).amount
+                }.getOrNull() ?: continue
+                queuedByInvoice[p.aggregate_id] = (queuedByInvoice[p.aggregate_id] ?: 0.0) + amt
+            }
+            rows.mapNotNull { raw -> parseBalance(raw, queuedByInvoice) }
+        }.catch { emit(emptyList()) }
+
+    /** One invoice's balance (bill detail). Same brain as the list. */
+    fun invoiceBalanceFlow(businessId: String, invoiceId: String): Flow<InvoiceBalance?> =
+        invoiceBalancesFlow(businessId).map { list -> list.firstOrNull { it.invoice.id == invoiceId } }
+
+    private fun parseBalance(raw: String, queued: Map<String, Double>): InvoiceBalance? {
+        val o = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return null
+        val inv = runCatching { json.decodeFromJsonElement(Invoice.serializer(), o) }.getOrNull() ?: return null
+        // `paid_amount` is server-side only. Rows written before it existed — and
+        // every bill created locally — have no such field, so infer from the
+        // status: without this a settled bill would read as owing its whole total.
+        val paid = runCatching {
+            o["paid_amount"]?.takeIf { it !is JsonNull }?.jsonPrimitive?.doubleOrNull
+        }.getOrNull() ?: if (inv.status == "paid") inv.total else 0.0
+        return InvoiceBalance(inv, paid, queued[inv.id] ?: 0.0)
+    }
 
     suspend fun invoiceById(id: String): Invoice? = withContext(Dispatchers.Default) {
         q.selectById(INVOICE, id).executeAsOneOrNull()
@@ -217,6 +263,54 @@ class BillingRepository(
     }
 
     /**
+     * Take a payment against an EXISTING bill — the advance at registration and
+     * the balance collected days later are the same operation.
+     *
+     * Queued, never applied locally: invoices are pulled server-authoritative
+     * (see [syncDelta]), so anything written into the local doc is erased by the
+     * next sync. The tender goes out through the outbox and comes back inside
+     * the server's row, where the rollup trigger derives pending → partial →
+     * paid. Until it drains, [invoiceBalancesFlow] shows the money from the
+     * queue, so the operator sees the right balance offline.
+     *
+     * Numbering is untouched — a payment must never bump the series.
+     */
+    @OptIn(ExperimentalUuidApi::class)
+    suspend fun recordPaymentLocal(
+        businessId: String,
+        invoiceId: String,
+        amount: Double,
+        method: String?,
+        reference: String? = null,
+        note: String? = null,
+    ): Result<Unit> = withContext(Dispatchers.Default) {
+        runCatching {
+            val amt = round2(amount)
+            require(amt > 0.0) { "Enter an amount greater than zero" }
+            // ONE client_id per tender, minted here and frozen into the payload:
+            // the server's unique index turns a retry into a no-op. Minting a
+            // fresh id per attempt would take the customer's money twice.
+            val clientId = Uuid.random().toString()
+            val req = InvoicePaymentRequest(
+                clientId = clientId,
+                amount = amt,
+                paymentMethod = method?.trim()?.ifBlank { null },
+                paymentReference = reference?.trim()?.ifBlank { null },
+                note = note?.trim()?.ifBlank { null },
+                paidAt = nowIso(),
+            )
+            db.transaction {
+                val dep = outboxQ.pendingCreateKeyFor(invoiceId).executeAsOneOrNull()
+                val seqLocal = outboxQ.maxSeqLocal().executeAsOne() + 1
+                outboxQ.enqueue(
+                    Uuid.random().toString(), businessId, OP_RECORD_PAYMENT, invoiceId, clientId,
+                    json.encodeToString(InvoicePaymentRequest.serializer(), req), nowIso(), seqLocal, dep,
+                )
+            }
+        }
+    }
+
+    /**
      * Wipe the synced offline cache (`ecom_entity`) + all delta cursors
      * (`sync_state`) so the next sync re-pulls everything fresh. Preserves the
      * login, the device counter series, and any un-synced bills in the outbox.
@@ -310,9 +404,61 @@ class BillingRepository(
         const val COUNTER = "billing_counter"
         const val PRODUCT = "product"
         const val CUSTOMER = "customer"
+        /** Outbox op for one tender against an existing bill (see [recordPaymentLocal]). */
+        const val OP_RECORD_PAYMENT = "record_payment"
         fun cursorKey(entity: String, businessId: String) = "ecom-$entity-seq:$businessId"
     }
 }
+
+/**
+ * One tender against an existing invoice — `admin-billing POST
+ * /invoices/:businessId/:invoiceId/record-payment`. The endpoint APPENDS to the
+ * bill's payment history (it does not overwrite), and dedupes on [clientId], so
+ * an outbox retry can never double-count. Status is derived server-side from the
+ * running total; nothing here says "paid".
+ */
+@kotlinx.serialization.Serializable
+data class InvoicePaymentRequest(
+    @kotlinx.serialization.SerialName("client_id") val clientId: String,
+    @kotlinx.serialization.SerialName("amount") val amount: Double,
+    @kotlinx.serialization.SerialName("payment_method") val paymentMethod: String? = null,
+    @kotlinx.serialization.SerialName("payment_reference") val paymentReference: String? = null,
+    @kotlinx.serialization.SerialName("note") val note: String? = null,
+    @kotlinx.serialization.SerialName("paid_at") val paidAt: String? = null,
+)
+
+/**
+ * A bill plus what has actually been collected on it. [paidAmount] is the
+ * server's running total; [queuedAmount] is money taken on this device that is
+ * still in the outbox. Every balance the operator sees comes from here — one
+ * place decides whether a bill is settled, part paid or untouched.
+ */
+data class InvoiceBalance(
+    val invoice: Invoice,
+    val paidAmount: Double,
+    val queuedAmount: Double,
+) {
+    val collected: Double get() = paidAmount + queuedAmount
+    /** Never negative: an over-tender is change in the drawer, not a credit. */
+    val balance: Double get() = (invoice.total - collected).coerceAtLeast(0.0)
+    val isCancelled: Boolean get() = invoice.status == "cancelled"
+    /** Half a paisa is settled: a summed float total never lands exactly on 0. */
+    val isSettled: Boolean get() = isCancelled || balance <= 0.005
+    val isPartPaid: Boolean get() = !isSettled && collected > 0.005
+    /** True while some of [collected] hasn't reached the server yet. */
+    val hasQueuedPayment: Boolean get() = queuedAmount > 0.005
+
+    /** Operator-facing state. Server writes 'partial' (there is no 'unpaid'). */
+    val label: String get() = when {
+        isCancelled -> "Cancelled"
+        isSettled -> "Paid"
+        isPartPaid -> "Part paid"
+        else -> "Unpaid"
+    }
+}
+
+/** Money is compared and sent in paise-accurate units, never raw float noise. */
+internal fun round2(v: Double): Double = kotlin.math.round(v * 100.0) / 100.0
 
 /** One row of the offline customer-name directory. */
 @kotlinx.serialization.Serializable

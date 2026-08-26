@@ -9,12 +9,16 @@ CREATE TABLE referrers (
     phone TEXT,
     commission_pct REAL NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    deleted_at TEXT
+    deleted_at TEXT,
+    -- Added round 1. Without it `changedSince` matched only created_at, so an
+    -- EDITED referrer (renamed, commission changed) was never re-pushed and the
+    -- lab's other seats kept the stale row forever.
+    updated_at TEXT
 );
 
 upsert:
-INSERT OR REPLACE INTO referrers(id, name, kind, phone, commission_pct, created_at, deleted_at)
-VALUES (?, ?, ?, ?, ?, ?, ?);
+INSERT OR REPLACE INTO referrers(id, name, kind, phone, commission_pct, created_at, deleted_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
 
 byId:
 SELECT * FROM referrers WHERE id = ?;
@@ -25,6 +29,9 @@ SELECT * FROM referrers WHERE deleted_at IS NULL ORDER BY name;
 softDelete:
 UPDATE referrers SET deleted_at = ? WHERE id = ?;
 
--- Sync sweep (P3): referrers only have created_at + deleted_at stamps.
+-- Sync sweep. coalesce so rows written before updated_at existed still sweep on
+-- created_at instead of vanishing from the push set.
 changedSince:
-SELECT * FROM referrers WHERE created_at > :since OR (deleted_at IS NOT NULL AND deleted_at > :since);
+SELECT * FROM referrers
+WHERE coalesce(updated_at, created_at) > :since
+   OR (deleted_at IS NOT NULL AND deleted_at > :since);

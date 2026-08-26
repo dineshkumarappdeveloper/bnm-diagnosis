@@ -11,9 +11,10 @@ import kotlinx.datetime.toLocalDateTime
 /**
  * Render a LABORATORY REPORT as monospace text (same helper style as
  * [renderReceiptText]): lab-name header, patient identity block, per-test
- * sections with aligned `param  value  unit  ref-range  flag` rows (H/L/A
- * marked with `*`, criticals CL/CH with `**`), and the verified/approved
- * sign-off footer. Default width 64 chars ≈ A4 via the system print dialog;
+ * sections with aligned `param  value  unit  ref-range  flag` rows (direction
+ * `^`/`v`, abnormal `*`, criticals `!!` — all ASCII, all explained by the
+ * printed flag key), and the verified/approved sign-off footer.
+ * Default width 64 chars ≈ A4 via the system print dialog;
  * pass the thermal paper width for LAN/BT ESC-POS printers (narrow widths
  * fall back to a stacked two-line row layout).
  *
@@ -69,11 +70,22 @@ fun renderLabReport(
     val flagW = 4; val unitW = 8; val refW = 15; val valueW = 9
     val paramW = w - (flagW + unitW + refW + valueW + 4)
 
-    fun flagCol(r: LabResult): String = when (r.flag) {
-        null -> ""
-        "CL", "CH" -> "${r.flag}**"
-        "N" -> "N"
-        else -> "${r.flag}*" // L / H / A
+    /**
+     * Flag cell, ASCII only and within flagW (4 chars): thermal printers have no glyph
+     * font, so direction is `^`/`v` and critical is `!!` — "N", "H^", "Lv",
+     * "A*", "H^!!", "Lv!!". Criticals drop the redundant "C" to stay inside the
+     * 4-char budget; `!!` is what marks them, and the legend below says so.
+     *
+     * Direction is read off the STORED code (frozen at entry), never recomputed
+     * against today's ranges.
+     */
+    fun flagCol(flag: String?): String {
+        if (flag.isNullOrBlank()) return ""
+        val critical = LabRepository.isCriticalFlag(flag)
+        val arrow = when (LabRepository.flagDirection(flag)) { 1 -> "^"; -1 -> "v"; else -> "" }
+        val code = if (critical) flag.drop(1) else flag
+        val mark = if (critical) "!!" else if (flag == "A") "*" else ""
+        return "$code$arrow$mark"
     }
 
     fun cell(s: String, width: Int) = if (s.length > width) s.take(width) else s.padEnd(width)
@@ -90,7 +102,7 @@ fun renderLabReport(
             val value = r.value?.takeIf { it.isNotBlank() } ?: "-"
             val unit = r.unit.orEmpty()
             val ref = r.refDisplay.orEmpty()
-            val flag = flagCol(r)
+            val flag = flagCol(r.flag)
             if (tabular) {
                 if (name.length <= paramW) {
                     ln(cell(name, paramW) + " " + cell(value, valueW) + " " + cell(unit, unitW) + " " + cell(ref, refW) + " " + flag)
@@ -104,6 +116,20 @@ fun renderLabReport(
                 wrap("    $value ${unit.trim()}$refPart  $flag".trimEnd())
             }
         }
+        rule()
+    }
+
+    // ── Flag key ──
+    // The slip is read by the patient or the referring doctor without the app,
+    // so the marks have to explain themselves. Only the marks actually present
+    // are listed; an all-normal report gets no key at all.
+    val flags = results.mapNotNull { it.flag }.filter { it.isNotBlank() }
+    if (flags.any { it != "N" }) {
+        ln("Flag key:")
+        if (flags.any { LabRepository.flagDirection(it) > 0 }) ln("  ^  above reference range")
+        if (flags.any { LabRepository.flagDirection(it) < 0 }) ln("  v  below reference range")
+        if (flags.any { it == "A" }) ln("  *  abnormal")
+        if (flags.any { LabRepository.isCriticalFlag(it) }) ln("  !! CRITICAL - inform physician")
         rule()
     }
 

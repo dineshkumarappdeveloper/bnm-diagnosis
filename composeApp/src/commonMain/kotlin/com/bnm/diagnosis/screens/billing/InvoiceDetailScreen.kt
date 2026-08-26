@@ -45,10 +45,14 @@ import kotlinx.coroutines.launch
 fun InvoiceDetailScreen(api: BillingApi, businessId: String, invoiceId: String, onBack: () -> Unit) {
     val repo = LocalBillingRepository.current
     val scope = rememberCoroutineScope()
-    val invoices by repo.invoicesFlow(businessId).collectAsState(emptyList())
+    // The balance view, not the raw invoice: a part payment still sitting in the
+    // outbox is money the operator has already taken, and this screen is where
+    // they check it.
+    val bill by repo.invoiceBalanceFlow(businessId, invoiceId).collectAsState(null)
     val settings by repo.invoiceSettingsFlow(businessId).collectAsState(null)
-    val inv = invoices.find { it.id == invoiceId }
+    val inv = bill?.invoice
     var busy by remember { mutableStateOf(false) }
+    var collecting by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -57,7 +61,8 @@ fun InvoiceDetailScreen(api: BillingApi, businessId: String, invoiceId: String, 
             })
         }
     ) { inner ->
-        if (inv == null) {
+        val money = bill
+        if (inv == null || money == null) {
             Text("Invoice not found", modifier = Modifier.padding(inner).padding(16.dp))
             return@Scaffold
         }
@@ -89,7 +94,23 @@ fun InvoiceDetailScreen(api: BillingApi, businessId: String, invoiceId: String, 
                     inv.issuedAt?.let { MetaRow("Date", it) }
                     placeOfSupplyLabel(inv.placeOfSupply ?: settings?.taxId)?.let { MetaRow("Place of supply", it) }
                     MetaRow("Reverse charge", "No")
-                    MetaRow("Status", inv.paymentLabel + if (inv.isPendingSync) " · pending sync" else "")
+                    MetaRow(
+                        "Status",
+                        buildString {
+                            append(money.label)
+                            if (money.hasQueuedPayment) append(" · payment queued")
+                            if (inv.isPendingSync) append(" · pending sync")
+                        },
+                    )
+                    // Money collected, then what is still owed — the two numbers a
+                    // counter is asked for when a patient returns with a part-paid
+                    // bill. Shown for every unsettled bill, not just part-paid ones.
+                    if (!money.isSettled || money.collected > 0.005) {
+                        MetaRow("Paid", "₹ ${formatDecimal2(money.collected)}")
+                    }
+                    if (!money.isSettled) {
+                        MetaRow("Balance due", "₹ ${formatDecimal2(money.balance)}")
+                    }
                     inv.amountTendered?.let { t ->
                         MetaRow("Tendered", "₹ ${formatDecimal2(t)}")
                         MetaRow("Change", "₹ ${formatDecimal2(inv.changeDue ?: 0.0)}")
@@ -137,16 +158,13 @@ fun InvoiceDetailScreen(api: BillingApi, businessId: String, invoiceId: String, 
             }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    if (inv.status != "paid") {
-                        Button(onClick = {
-                            if (!busy) {
-                                busy = true
-                                scope.launch {
-                                    api.markPaid(businessId, invoiceId, "cash", null)
-                                    runCatching { repo.syncInvoices(businessId) }; busy = false
-                                }
-                            }
-                        }, enabled = !busy) { Text("Mark paid") }
+                    if (!money.isSettled) {
+                        // Collecting goes through the outbox, not api.markPaid: the
+                        // balance is usually collected days later, often offline, and
+                        // a full settle is just a payment that happens to clear it.
+                        Button(onClick = { collecting = true }, enabled = !busy) {
+                            Text(if (money.isPartPaid) "Collect balance" else "Collect payment")
+                        }
                     }
                     OutlinedButton(onClick = {
                         if (!busy) {
@@ -159,6 +177,15 @@ fun InvoiceDetailScreen(api: BillingApi, businessId: String, invoiceId: String, 
                     }, enabled = !busy) { Text("Send") }
                 }
             }
+        }
+
+        if (collecting) {
+            CollectPaymentDialog(
+                businessId = businessId,
+                bill = money,
+                onDismiss = { collecting = false },
+                onCollected = { collecting = false },
+            )
         }
     }
 }

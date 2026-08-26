@@ -21,7 +21,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -125,32 +124,49 @@ fun StaffHeaderChip(
     }
 }
 
-/** Result flag chip: N = neutral, L/H/A = amber, CL/CH = red. Null flag → nothing. */
+/**
+ * Chip label for a stored flag: `⚠ ` for criticals, the code, then the
+ * direction arrow — "N", "H↑", "L↓", "A", "⚠ CH↑", "⚠ CL↓".
+ *
+ * Direction comes from the STORED code via [LabRepository.flagArrow]; flags are
+ * frozen onto `lab_results` at entry, so it is never re-judged against today's
+ * ranges. The glyphs (not the colour) carry the meaning — see [FlagChip].
+ */
+private fun flagChipLabel(flag: String): String = buildString {
+    if (LabRepository.isCriticalFlag(flag)) append("⚠ ")
+    append(flag)
+    append(LabRepository.flagArrow(flag)) // ↑ / ↓ / ""
+}
+
+/** Result flag chip: N = neutral, L/H/A = amber, CL/CH = red. Null flag → nothing.
+ *  Also used bare (dashboard critical card), so the chip alone must read as
+ *  critical — hence the ⚠ lives in the label, not in the surrounding cell. */
 @Composable
 fun FlagChip(flag: String?, modifier: Modifier = Modifier) {
     if (flag.isNullOrBlank()) return
     // Semantic theme tokens (NOT literals) so flags stay legible in dark mode.
     val c = AppTheme.colors
-    val (bg, fg) = when (flag) {
-        "L", "H", "A" -> c.warningSoft to c.warning
-        "CL", "CH" -> c.dangerSoft to c.danger
+    val (bg, fg) = when {
+        LabRepository.isCriticalFlag(flag) -> c.dangerSoft to c.danger
+        flag == "L" || flag == "H" || flag == "A" -> c.warningSoft to c.warning
         else -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
     }
     Box(modifier.background(bg, RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 2.dp)) {
-        Text(flag, color = fg, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Text(flagChipLabel(flag), color = fg, fontSize = 11.sp, fontWeight = FontWeight.Bold)
     }
 }
 
 /** Results-grid flag cell: the [FlagChip] plus the word CRITICAL for CL/CH — a
- *  panicking value must never read as "just another two-letter code". */
+ *  panicking value must never read as "just another two-letter code".
+ *  Kept deliberately compact: the caller's Flag column is a fixed 108.dp, and
+ *  the chip now carries "⚠ CH↑" as well. */
 @Composable
 fun FlagCell(flag: String?, modifier: Modifier = Modifier) {
     if (flag.isNullOrBlank()) return
-    val critical = flag == "CL" || flag == "CH"
-    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         FlagChip(flag)
-        if (critical) {
-            Text("CRITICAL", color = Color(0xFFC62828), fontSize = 9.sp, fontWeight = FontWeight.Bold,
+        if (LabRepository.isCriticalFlag(flag)) {
+            Text("CRITICAL", color = AppTheme.colors.danger, fontSize = 9.sp, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Clip)
         }
     }
