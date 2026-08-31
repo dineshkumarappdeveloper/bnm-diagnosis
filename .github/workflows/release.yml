@@ -5,9 +5,16 @@
 # manually ("Run workflow") with a version.
 #
 # WHERE THE DOWNLOADS GO: the PUBLIC `bnmadmin-releases` repo — the same shelf
-# BNM Admin already publishes to, so every BNM desktop app is downloadable from
-# one place. BNMDiagnosis assets are namespaced by the `diagnosis-v` TAG PREFIX
-# and by their filenames, so the two apps' releases never collide.
+# BNM Admin and BNM Billing already publish to, so every BNM desktop app is
+# downloadable from one place. Published as TWO releases:
+#   • diagnosis-v<x.y.z>  versioned history
+#   • diagnosis-latest    rolling tag whose assets are replaced each release —
+#                         bnmapp.com links /releases/download/diagnosis-latest/…
+#                         so the website never needs editing for a new version.
+# NEITHER is ever marked "latest". The repo's /releases/latest belongs to
+# BNMAdmin, whose site links use /releases/latest/download/ — stealing it would
+# 404 every "Download for Windows" button on bnmapp.com. Same discipline as
+# BNM Billing's billing-latest.
 #
 # ── REQUIRED SETUP (one-time, on THIS repo) ──────────────────────────────────
 # Settings → Secrets and variables → Actions → Secrets:
@@ -172,13 +179,17 @@ jobs:
       - name: List assets
         run: ls -lh dist
 
-      - name: Publish to bnmadmin-releases
+      # Versioned release — history. NEVER marked latest: the shared repo's
+      # /releases/latest belongs to BNMAdmin's site links, and stealing it would
+      # 404 every "Download for Windows" button on bnmapp.com.
+      - name: Publish versioned release (diagnosis-v*)
         uses: softprops/action-gh-release@v2
         with:
           repository: dineshkumarappdeveloper/bnmadmin-releases
           token: ${{ secrets.RELEASE_TOKEN }}
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: BNM Diagnosis ${{ needs.prepare.outputs.version_name }}
+          make_latest: 'false'
           body: |
             **BNM Diagnosis** — offline-first diagnostic laboratory (LIMS) — ${{ needs.prepare.outputs.tag }}
 
@@ -196,6 +207,24 @@ jobs:
 
             The app is offline-first: it runs with no network at all. A licence key
             is required once, at activation.
+          files: dist/*
+          fail_on_unmatched_files: true
+
+      # Rolling release — the STABLE URLs bnmapp.com links to:
+      #   /releases/download/diagnosis-latest/BNMDiagnosis-<platform>.<ext>
+      # Same-named assets are replaced on each publish, so the website never
+      # needs editing for a new version. Same pattern as billing-latest.
+      - name: Update rolling diagnosis-latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: dineshkumarappdeveloper/bnmadmin-releases
+          token: ${{ secrets.RELEASE_TOKEN }}
+          tag_name: diagnosis-latest
+          name: BNM Diagnosis (latest)
+          make_latest: 'false'
+          body: |
+            Always-current BNM Diagnosis desktop installers (updated by every release).
+            Versioned history lives in the diagnosis-v* releases.
           files: dist/*
           fail_on_unmatched_files: true
 

@@ -24,5 +24,5 @@ IS a GST invoice whose line items are tests.
   is always exportable regardless of license state.
 - Server side lives in BusinessStudio: `admin-lab` edge fn + `lab_licenses`/
   `lab_devices` tables (both Supabase refs, LOCKSTEP).
-- Git: `dineshkumarappdeveloper/BNMDiagnosis`, branch `main`; commit local,
+- Git: `dineshkumarappdeveloper/bnm-diagnosis`, branch `main`; commit local,
   push only when asked.
