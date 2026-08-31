@@ -186,6 +186,18 @@ jobs:
       - name: List assets
         run: ls -lh dist
 
+      # Checksums so the IN-APP UPDATER can verify what it downloaded before
+      # handing it to the OS. The installers are unsigned, so this file is the
+      # only integrity evidence there is — without it the app would be executing
+      # a binary it cannot check.
+      - name: Publish checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
       # Versioned release — history. NEVER marked latest: the shared repo's
       # /releases/latest belongs to BNMAdmin's site links, and stealing it would
       # 404 every "Download for Windows" button on bnmapp.com.

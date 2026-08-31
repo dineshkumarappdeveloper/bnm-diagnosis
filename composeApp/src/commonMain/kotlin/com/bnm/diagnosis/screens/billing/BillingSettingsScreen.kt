@@ -66,6 +66,7 @@ import com.bnm.diagnosis.print.printToNetworkPrinter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.bnm.diagnosis.update.AppVersionPanel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -75,6 +76,9 @@ fun BillingSettingsScreen(
     businessId: String,
     onBack: () -> Unit,
     onOpenLicense: (() -> Unit)? = null,
+    /** Invoked once an update installer has been launched — the host should quit
+     *  so the installer can replace the running application. */
+    onQuitForUpdate: () -> Unit = {},
     /** P4: opens Staff & roles. Null hides the card entirely. */
     onOpenStaff: (() -> Unit)? = null,
     /** P4: only the OWNER may manage staff — others see the card, disabled. */
@@ -523,6 +527,12 @@ fun BillingSettingsScreen(
                     }
                 }
             }
+
+            // ── App version + in-app update ──
+            // Above Account rather than buried at the very bottom: this is the
+            // panel someone is told to read out when reporting a bug.
+            item { Text("App", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
+            item { AppVersionPanel(onQuitForUpdate = onQuitForUpdate) }
 
             // ── Account / sign out ──
             item { Text("Account", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }

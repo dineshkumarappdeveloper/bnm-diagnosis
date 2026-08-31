@@ -85,6 +85,7 @@ import kotlinx.coroutines.flow.first
 import com.bnm.diagnosis.license.subscriptionStatus
 import com.bnm.diagnosis.report.ReportAssembler
 import com.bnm.diagnosis.report.ReportUploader
+import com.bnm.diagnosis.update.quitForUpdate
 
 @Composable
 fun App() {
@@ -556,6 +557,7 @@ fun App() {
                     composable(Screen.Settings.route) {
                         val businessId = authRepository.getSelectedBusinessId() ?: licState.businessId ?: ""
                         BillingSettingsScreen(
+                            onQuitForUpdate = { quitForUpdate() },
                             api = api,
                             authRepository = authRepository,
                             businessId = businessId,
