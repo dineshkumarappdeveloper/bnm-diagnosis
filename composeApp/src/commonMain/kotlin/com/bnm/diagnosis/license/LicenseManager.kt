@@ -13,6 +13,7 @@ import kotlinx.serialization.json.longOrNull
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlin.random.Random
+import com.bnm.diagnosis.staff.sha256Hex
 
 /** Decoded claims of a `bnm-lab-license` ES256 JWS. */
 data class LicenseClaims(
@@ -73,6 +74,7 @@ class LicenseManager {
         private const val KEY_SEATS = "license_seats"
         private const val KEY_EXPIRES_AT = "license_expires_at"
         private const val KEY_BUSINESS_ID = "license_business_id"
+private const val KEY_LICENSE_FP = "lab_license_fp"
         private const val KEY_DEVICE_ID = "license_device_id"
         private const val KEY_BLOCKED = "license_blocked"
         private const val KEY_LAST_SEEN_NOW = "license_last_seen_now"
@@ -100,6 +102,33 @@ class LicenseManager {
     fun licenseJwt(): String? = settings.getStringOrNull(KEY_JWT)
 
     /** Persist a successful `admin-lab/activate` response. Clears any block. */
+    /**
+     * Fingerprint of the licence this install belongs to — `sha256(KEY)`, the same
+     * identity the server stores. Null on a never-activated device.
+     *
+     * Keyed on the LICENCE, not the business or the lab name: a standalone licence
+     * has no business id, and two labs can share a name. Device-row id is wrong
+     * too — it changes on a seat replacement, which is the same lab.
+     */
+    val licenseFingerprint: String? get() = settings.getStringOrNull(KEY_LICENSE_FP)
+
+    /**
+     * True when [key] belongs to a DIFFERENT licence than the one this install is
+     * already carrying data for — i.e. activating it would put another lab's
+     * records under a new name, and sync them into the new tenant.
+     *
+     * False for a fresh device and for re-activating the same licence (refresh,
+     * seat replacement, re-install against the same lab), so the common cases
+     * never prompt.
+     */
+    fun isDifferentTenant(key: String): Boolean {
+        val current = licenseFingerprint ?: return false
+        return current != fingerprintOf(key)
+    }
+
+    /** sha256 of the normalised key — matches how the server hashes it. */
+    fun fingerprintOf(key: String): String = sha256Hex(key.trim().uppercase())
+
     fun saveActivation(
         licenseJwt: String,
         deviceToken: String,
@@ -109,7 +138,11 @@ class LicenseManager {
         seats: Int,
         expiresAt: String?,
         businessId: String?,
+        /** sha256 of the key just activated — see [licenseFingerprint]. Null keeps
+         *  the previous value, so a heartbeat-style refresh cannot erase it. */
+        licenseFingerprint: String? = null,
     ) {
+        if (licenseFingerprint != null) settings.putString(KEY_LICENSE_FP, licenseFingerprint)
         settings.putString(KEY_JWT, licenseJwt)
         settings.putString(KEY_DEVICE_TOKEN, deviceToken)
         settings.putString(KEY_DEVICE_ROW_ID, deviceRowId)

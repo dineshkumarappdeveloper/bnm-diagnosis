@@ -68,6 +68,8 @@ import com.bnm.diagnosis.resources.Res
 import com.bnm.diagnosis.resources.bnm_logo_mark
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.painterResource
+import com.bnm.diagnosis.lab.LocalLabRepository
+import com.bnm.diagnosis.lab.TenantRowCounts
 
 private val Brand = Color(0xFF2D7FF0)
 
@@ -112,17 +114,44 @@ fun ActivationScreen(
     var activated by remember { mutableStateOf<LicenseActivation?>(null) }
     var seatsFull by remember { mutableStateOf<LabActivateResult.SeatsFull?>(null) }
     var replaceCandidate by remember { mutableStateOf<LabSeatDevice?>(null) }
+    // Set when the entered key belongs to a DIFFERENT licence and this device
+    // still holds another lab's records; drives the erase-confirmation dialog.
+    var pendingTenantSwitch by remember { mutableStateOf<Pair<String, TenantRowCounts>?>(null) }
+    val labRepo = LocalLabRepository.current
 
-    fun runActivate(replaceDeviceId: String? = null) {
+    fun runActivate(replaceDeviceId: String? = null, eraseConfirmed: Boolean = false) {
         if (loading) return
         val k = key.trim()
         if (k.length < 8) {
             errorMessage = "Enter your BNM Diagnosis license key"
             return
         }
+        // A DIFFERENT licence on a device that already holds another lab's records
+        // must never proceed silently: the old lab's patients would appear under
+        // the new lab's name and then sync into the new tenant. Ask first — and
+        // ask BEFORE the network call, so no seat is consumed on a cancel.
+        if (!eraseConfirmed && licenseManager.isDifferentTenant(k)) {
+            scope.launch {
+                val counts = runCatching { labRepo.tenantRowCounts() }.getOrNull()
+                if (counts != null && !counts.isEmpty) {
+                    pendingTenantSwitch = k to counts
+                    return@launch
+                }
+                // Nothing stored locally — nothing to erase, just carry on.
+                runActivate(replaceDeviceId, eraseConfirmed = true)
+            }
+            return
+        }
+
         loading = true
         errorMessage = null
         scope.launch {
+            if (eraseConfirmed && licenseManager.isDifferentTenant(k)) {
+                // Wipe BEFORE saving the new activation, so a crash in between
+                // leaves the device unlicensed-but-clean rather than licensed to
+                // the new lab while still holding the old lab's data.
+                runCatching { labRepo.resetForNewTenant() }
+            }
             labApi.activate(
                 key = k,
                 deviceId = licenseManager.deviceId,
@@ -143,6 +172,7 @@ fun ActivationScreen(
                             seats = a.seats,
                             expiresAt = a.expiresAt,
                             businessId = a.businessId,
+                            licenseFingerprint = licenseManager.fingerprintOf(k),
                         )
                         seatsFull = null
                         replaceCandidate = null
@@ -345,6 +375,52 @@ fun ActivationScreen(
                 }) { Text("Replace", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { if (!loading) replaceCandidate = null }) { Text("Cancel") } },
+        )
+    }
+
+    // ── Different licence on a device that already holds a lab's records ──────
+    // Deliberately a hard confirmation, not a silent wipe: for a PERPETUAL licence
+    // the local database is the system of record and there may be no server copy
+    // at all, so erasing it is unrecoverable. The counts are shown so the operator
+    // can see exactly what they are about to destroy.
+    pendingTenantSwitch?.let { (pendingKey, counts) ->
+        AlertDialog(
+            onDismissRequest = { if (!loading) pendingTenantSwitch = null },
+            title = { Text("This device already holds another lab's records") },
+            text = {
+                Column {
+                    Text(
+                        "${licenseManager.state.value.labName ?: "The current lab"} has " +
+                            "${counts.summary} stored on this device.",
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Activating a different licence will PERMANENTLY ERASE all of it — " +
+                            "patients, orders, results, staff, the test catalog, numbering and " +
+                            "any unsent bills. This cannot be undone, and for a perpetual " +
+                            "licence there may be no copy anywhere else.",
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "If these records still matter, cancel and export them first.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !loading,
+                    onClick = {
+                        pendingTenantSwitch = null
+                        key = pendingKey
+                        runActivate(eraseConfirmed = true)
+                    },
+                ) { Text("Erase and activate", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { if (!loading) pendingTenantSwitch = null }) { Text("Cancel") }
+            },
         )
     }
 }

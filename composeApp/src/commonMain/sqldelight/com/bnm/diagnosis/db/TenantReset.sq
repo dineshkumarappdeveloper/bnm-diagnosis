@@ -1,0 +1,88 @@
+-- Wipe every tenant-scoped table, returning this install to "freshly licensed".
+--
+-- WHY THIS EXISTS: activating a DIFFERENT licence used to change only the stored
+-- licence prefs (JWT, token, lab name, business id). The SQLDelight database was
+-- left completely untouched, so the previous lab's patients, orders, results,
+-- staff (pin hashes included) and catalog stayed on screen under the new lab's
+-- name — and worse, the next sync PUSHED them into the new lab's tenant, which
+-- is a real cross-tenant PHI leak. Observed in the field, not hypothetically.
+--
+-- EVERY table here is tenant data. There is deliberately no "keep the catalog"
+-- option: a different lab's price list and reference ranges are not a sensible
+-- starting point, and a half-wiped database is harder to reason about than an
+-- empty one.
+--
+-- accession_series MUST be cleared too, or the new lab inherits the old one's
+-- numbering and its first report is ACC-S1-00043 instead of ACC-S1-00001.
+--
+-- sync_state MUST be cleared, or the push watermark stays ahead of the new
+-- (empty) tenant and the first genuine rows are never pushed.
+--
+-- Callers: LabRepository.resetForNewTenant(), which runs all of these inside ONE
+-- transaction. Never call these individually — a partial wipe is worse than none.
+
+wipeResults:
+DELETE FROM lab_results;
+
+wipeOrderTests:
+DELETE FROM lab_order_tests;
+
+wipeOrders:
+DELETE FROM lab_orders;
+
+wipePatients:
+DELETE FROM patients;
+
+wipeTests:
+DELETE FROM lab_tests;
+
+wipePanels:
+DELETE FROM lab_panels;
+
+wipeReferrers:
+DELETE FROM referrers;
+
+wipeReferrerRates:
+DELETE FROM referrer_rates;
+
+wipeCommissionRates:
+DELETE FROM referrer_commission_rates;
+
+wipePayouts:
+DELETE FROM referrer_payouts;
+
+wipeStaff:
+DELETE FROM staff;
+
+wipeEmrInbox:
+DELETE FROM emr_inbox;
+
+wipeLabReports:
+DELETE FROM lab_reports;
+
+wipeLabSettings:
+DELETE FROM lab_settings;
+
+wipeAccessionSeries:
+DELETE FROM accession_series;
+
+-- Billing is tenant data too: invoices, their numbering series and anything the
+-- outbox still owes the OLD tenant's server. Draining a stale outbox against a
+-- new licence would post the previous lab's bills into this business.
+wipeBillingOutbox:
+DELETE FROM billing_outbox;
+
+wipeCounterSeries:
+DELETE FROM counter_series;
+
+wipeEcomEntity:
+DELETE FROM ecom_entity;
+
+-- Sanity probe for tests and for the confirmation dialog's "N records" line.
+countTenantRows:
+SELECT
+  (SELECT count(*) FROM patients)    AS patients,
+  (SELECT count(*) FROM lab_orders)  AS orders,
+  (SELECT count(*) FROM lab_results) AS results,
+  (SELECT count(*) FROM staff)       AS staff,
+  (SELECT count(*) FROM lab_tests)   AS tests;

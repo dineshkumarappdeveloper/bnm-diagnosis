@@ -70,6 +70,7 @@ class LabRepository(
     private val cQ get() = db.commissionQueries        // commission overrides + payouts + settings
     private val setQ get() = db.commissionQueries      // lab_settings lives in Commission.sq
     private val repQ get() = db.labReportsQueries      // report share tokens (printed QR)
+    private val wipeQ get() = db.tenantResetQueries    // tenant switch (see resetForNewTenant)
 
     private val paramsSerializer = ListSerializer(TestParameter.serializer())
     private val idsSerializer = ListSerializer(String.serializer())
@@ -115,6 +116,61 @@ class LabRepository(
 
     suspend fun softDeletePatient(id: String) = withContext(Dispatchers.Default) {
         pQ.softDelete(nowIso(), nowIso(), id)
+    }
+
+    /**
+     * Return this install to "freshly licensed": every tenant-scoped table emptied.
+     *
+     * Called when a DIFFERENT licence is activated on a device that already holds
+     * another lab's data. Without it the previous lab's patients, orders, results
+     * and staff stayed on screen under the new lab's name, and the next sync
+     * pushed them into the new lab's tenant — a real cross-tenant PHI leak, seen
+     * in the field.
+     *
+     * ONE transaction: a partial wipe (say, patients gone but their orders left)
+     * is harder to recover from than either extreme.
+     *
+     * This is destructive and irreversible. For a PERPETUAL licence the local
+     * database is the system of record — there may be no server copy at all — so
+     * the CALLER must have explicit operator confirmation before calling this.
+     * Nothing here asks.
+     */
+    suspend fun resetForNewTenant() = withContext(Dispatchers.Default) {
+        db.transaction {
+            // Children before parents: no FKs are declared, but this order keeps
+            // the intent readable and survives someone adding constraints later.
+            wipeQ.wipeResults()
+            wipeQ.wipeOrderTests()
+            wipeQ.wipeOrders()
+            wipeQ.wipePatients()
+            wipeQ.wipeTests()
+            wipeQ.wipePanels()
+            wipeQ.wipeReferrers()
+            wipeQ.wipeReferrerRates()
+            wipeQ.wipeCommissionRates()
+            wipeQ.wipePayouts()
+            wipeQ.wipeStaff()
+            wipeQ.wipeEmrInbox()
+            wipeQ.wipeLabReports()
+            wipeQ.wipeLabSettings()
+            // Numbering: without this the new lab's first accession continues the
+            // old lab's sequence.
+            wipeQ.wipeAccessionSeries()
+            // Billing: a stale outbox would post the OLD lab's bills into the new
+            // business the moment connectivity returns.
+            wipeQ.wipeBillingOutbox()
+            wipeQ.wipeCounterSeries()
+            wipeQ.wipeEcomEntity()
+            // Watermarks last: leaving them ahead of an now-empty tenant would
+            // mean the first genuine rows are never pushed.
+            db.syncStateQueries.clearAllState()
+        }
+    }
+
+    /** Row counts a confirmation dialog can show before erasing anything. */
+    suspend fun tenantRowCounts(): TenantRowCounts = withContext(Dispatchers.Default) {
+        val r = wipeQ.countTenantRows().executeAsOne()
+        TenantRowCounts(r.patients, r.orders, r.results, r.staff, r.tests)
     }
 
     // ── Referrers ────────────────────────────────────────────────────────────

@@ -381,3 +381,21 @@ object LabStatus {
     /** Pipeline order; cancelled sits outside the line. */
     val FLOW = listOf(REGISTERED, COLLECTED, IN_PROGRESS, ENTERED, VERIFIED, APPROVED, REPORTED, DELIVERED)
 }
+
+/** What a tenant-switch confirmation shows before erasing anything. */
+data class TenantRowCounts(
+    val patients: Long,
+    val orders: Long,
+    val results: Long,
+    val staff: Long,
+    val tests: Long,
+) {
+    val isEmpty: Boolean get() = patients + orders + results + tests == 0L
+    /** "2 patients · 9 orders · 146 results" — only the non-zero parts. */
+    val summary: String
+        get() = listOf(
+            patients to "patient", orders to "order", results to "result", tests to "test",
+        ).filter { it.first > 0 }
+            .joinToString(" · ") { (n, noun) -> "$n $noun${if (n == 1L) "" else "s"}" }
+            .ifBlank { "no records" }
+}
