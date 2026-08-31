@@ -48,7 +48,24 @@ data class LabTest(
     val active: Boolean = true,
     val sortOrder: Int = 0,
     val parameters: List<TestParameter> = emptyList(),
-)
+    // ── L3 platform-catalog import. All null for locally-authored tests; the
+    // origin marker below is what keeps re-imports UPDATING instead of
+    // duplicating, and what the import sweep may overwrite. These fields ride
+    // the catalog sync doc too (defaults keep old docs parsing), so a lab's
+    // other seats converge on the same imported copy. ──
+    val platformProductId: String? = null, // products.id this test came from
+    val fulfillment: String? = null,       // 'in_house' | 'outsourced' (null = in-house)
+    val outsourcePartner: String? = null,  // partner lab name (outsourced only)
+    val outsourceCost: Double? = null,     // partner's charge; margin reporting = L4
+    val tatHours: Double? = null,          // promised turnaround from lab_config
+    val platformJson: String? = null,      // the product's lab_config verbatim (lossless)
+) {
+    /** True when results come from a partner lab, not this lab's bench. */
+    val isOutsourced: Boolean get() = fulfillment == "outsourced"
+
+    /** True when this test is the imported copy of a platform product. */
+    val isPlatformImported: Boolean get() = !platformProductId.isNullOrBlank()
+}
 
 @Serializable
 data class LabPanel(
@@ -253,6 +270,9 @@ data class LabOrderTest(
     val price: Double = 0.0,          // snapshot at order time
     val status: String = "pending",   // pending | in_progress | entered
     val commissionPct: Double = 0.0,  // snapshot at order time — never recomputed
+    /** L3: when the sample left for the partner lab (outsourced tests only).
+     *  A stamp beside the pipeline, not a status — result entry stays open. */
+    val sentToPartnerAt: String? = null,
 )
 
 @Serializable

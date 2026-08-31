@@ -14,7 +14,14 @@ CREATE TABLE lab_tests (
     method TEXT,
     active INTEGER NOT NULL DEFAULT 1,
     sort_order INTEGER NOT NULL DEFAULT 0,
-    parameters_json TEXT NOT NULL
+    parameters_json TEXT NOT NULL,
+    -- ── L3 platform catalog import (all NULL for locally-authored tests) ──
+    platform_product_id TEXT,            -- products.id this test was imported from
+    fulfillment TEXT,                    -- 'in_house' | 'outsourced' (NULL = in-house)
+    outsource_partner TEXT,              -- partner lab name (outsourced only)
+    outsource_cost REAL,                 -- what the partner charges (margin = L4)
+    tat_hours REAL,                      -- promised turnaround, from lab_config
+    platform_json TEXT                   -- the product's lab_config verbatim (lossless)
 );
 
 CREATE TABLE lab_panels (
@@ -29,14 +36,22 @@ CREATE TABLE lab_panels (
 -- ── Tests ──
 
 upsertTest:
-INSERT OR REPLACE INTO lab_tests(id, code, name, category, price, sample_type, method, active, sort_order, parameters_json)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+INSERT OR REPLACE INTO lab_tests(id, code, name, category, price, sample_type, method, active, sort_order, parameters_json, platform_product_id, fulfillment, outsource_partner, outsource_cost, tat_hours, platform_json)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 testById:
 SELECT * FROM lab_tests WHERE id = ?;
 
 testByCode:
 SELECT * FROM lab_tests WHERE code = ?;
+
+-- L3: the imported copy of one platform product (origin marker lookup).
+testByPlatformProduct:
+SELECT * FROM lab_tests WHERE platform_product_id = ?;
+
+-- L3: every imported test — the deactivate-on-disappearance sweep reads this.
+listPlatformTests:
+SELECT * FROM lab_tests WHERE platform_product_id IS NOT NULL;
 
 listTests:
 SELECT * FROM lab_tests WHERE active = 1 ORDER BY sort_order, name;

@@ -34,7 +34,11 @@ CREATE TABLE lab_order_tests (
     -- that is already frozen. Round-1 fix: the percentage used to be read live
     -- off the referrers row when a statement was generated, so renegotiating a
     -- doctor's rate silently rewrote every past month's payout.
-    commission_pct REAL NOT NULL DEFAULT 0
+    commission_pct REAL NOT NULL DEFAULT 0,
+    -- L3 outsourced workflow: when the sample left for the partner lab. A
+    -- lightweight stamp beside the pipeline, NOT a new LabStatus stage — the
+    -- order keeps walking registered → … → approved exactly as before.
+    sent_to_partner_at TEXT
 );
 
 CREATE INDEX lab_order_tests_order ON lab_order_tests(order_id);
@@ -189,11 +193,20 @@ ORDER BY o.created_at DESC;
 -- ── Order tests ──
 
 insertOrderTest:
-INSERT INTO lab_order_tests(id, order_id, test_id, test_name, price, status, commission_pct)
-VALUES (?, ?, ?, ?, ?, ?, ?);
+INSERT INTO lab_order_tests(id, order_id, test_id, test_name, price, status, commission_pct, sent_to_partner_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
 
 testsForOrder:
 SELECT * FROM lab_order_tests WHERE order_id = ? ORDER BY rowid;
 
 setOrderTestStatus:
 UPDATE lab_order_tests SET status = ? WHERE order_id = ? AND test_id = ?;
+
+-- L3: stamp the "Sent to partner" step on one outsourced line.
+markSentToPartner:
+UPDATE lab_order_tests SET sent_to_partner_at = ? WHERE order_id = ? AND test_id = ?;
+
+-- L3: bump the order's LWW stamp without walking status (the sent-to-partner
+-- stamp must reach the lab's other seats through the ordinary push sweep).
+touchOrder:
+UPDATE lab_orders SET updated_at = ? WHERE id = ?;

@@ -488,7 +488,8 @@ class LabRepository(
 
     suspend fun upsertTest(t: LabTest) = withContext(Dispatchers.Default) {
         tQ.upsertTest(t.id, t.code, t.name, t.category, t.price, t.sampleType, t.method,
-            if (t.active) 1L else 0L, t.sortOrder.toLong(), json.encodeToString(paramsSerializer, t.parameters))
+            if (t.active) 1L else 0L, t.sortOrder.toLong(), json.encodeToString(paramsSerializer, t.parameters),
+            t.platformProductId, t.fulfillment, t.outsourcePartner, t.outsourceCost, t.tatHours, t.platformJson)
     }
 
     suspend fun testById(id: String): LabTest? = withContext(Dispatchers.Default) {
@@ -592,7 +593,7 @@ class LabRepository(
                     val commissionPct = if (referrerId.isNullOrBlank()) 0.0
                     else resolveCommissionPct(labBasePct, referrerPct, commissionOverrides[t.id])
                     oQ.insertOrderTest(Uuid.random().toString(), orderId, t.id, t.name, price,
-                        "pending", commissionPct)
+                        "pending", commissionPct, null)
                     for (param in t.parameters) {
                         resQ.insertEmpty(Uuid.random().toString(), orderId, t.id, param.key, param.unit)
                     }
@@ -621,6 +622,28 @@ class LabRepository(
     suspend fun orderTests(orderId: String): List<LabOrderTest> = withContext(Dispatchers.Default) {
         oQ.testsForOrder(orderId).executeAsList().map { it.toModel() }
     }
+
+    /**
+     * L3: stamp "Sent to partner" on one OUTSOURCED order line. A lightweight
+     * step beside the pipeline (the order's status machine is untouched);
+     * result entry — transcribing the partner's report — stays open exactly as
+     * before. Also bumps the order's `updated_at` so the stamp reaches the
+     * lab's other seats through the ordinary push sweep. Idempotent-ish: the
+     * first stamp wins; re-marking is a no-op.
+     */
+    suspend fun markSentToPartner(orderId: String, testId: String): Result<Unit> =
+        withContext(Dispatchers.Default) {
+            runCatching {
+                val line = oQ.testsForOrder(orderId).executeAsList()
+                    .firstOrNull { it.test_id == testId } ?: error("Test not on this order")
+                if (line.sent_to_partner_at != null) return@runCatching
+                val now = nowIso()
+                db.transaction {
+                    oQ.markSentToPartner(now, orderId, testId)
+                    oQ.touchOrder(now, orderId)
+                }
+            }
+        }
 
     /** One pipeline stage's worklist, patient identity joined in. */
     suspend fun worklist(status: String): List<WorklistEntry> = withContext(Dispatchers.Default) {
@@ -887,6 +910,9 @@ class LabRepository(
         sampleType = sample_type, method = method, active = active == 1L,
         sortOrder = sort_order.toInt(),
         parameters = runCatching { json.decodeFromString(paramsSerializer, parameters_json) }.getOrDefault(emptyList()),
+        platformProductId = platform_product_id, fulfillment = fulfillment,
+        outsourcePartner = outsource_partner, outsourceCost = outsource_cost,
+        tatHours = tat_hours, platformJson = platform_json,
     )
 
     private fun Lab_panels.toModel() = LabPanel(
@@ -901,7 +927,8 @@ class LabRepository(
     // commission_pct rides along: it is the FROZEN percentage for this line, and
     // dropping it here would make callers reach for the referrer's live rate.
     private fun Lab_order_tests.toModel() =
-        LabOrderTest(id, order_id, test_id, test_name, price, status, commission_pct)
+        LabOrderTest(id, order_id, test_id, test_name, price, status, commission_pct,
+            sent_to_partner_at)
 
     private fun Lab_results.toModel() = LabResult(id, order_id, test_id, parameter_key, value_, unit,
         flag, ref_display, notes, entered_by, entered_at, verified_by, verified_at, approved_by, approved_at)

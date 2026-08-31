@@ -64,7 +64,9 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
         "CREATE TABLE IF NOT EXISTS lab_tests (id TEXT NOT NULL PRIMARY KEY, code TEXT NOT NULL UNIQUE, " +
         "name TEXT NOT NULL, category TEXT, price REAL NOT NULL DEFAULT 0, " +
         "sample_type TEXT NOT NULL DEFAULT 'blood', method TEXT, active INTEGER NOT NULL DEFAULT 1, " +
-        "sort_order INTEGER NOT NULL DEFAULT 0, parameters_json TEXT NOT NULL)", 0)
+        "sort_order INTEGER NOT NULL DEFAULT 0, parameters_json TEXT NOT NULL, " +
+        "platform_product_id TEXT, fulfillment TEXT, outsource_partner TEXT, " +
+        "outsource_cost REAL, tat_hours REAL, platform_json TEXT)", 0)
     driver.execute(null,
         "CREATE TABLE IF NOT EXISTS lab_panels (id TEXT NOT NULL PRIMARY KEY, code TEXT NOT NULL UNIQUE, " +
         "name TEXT NOT NULL, price REAL NOT NULL DEFAULT 0, test_ids_json TEXT NOT NULL, " +
@@ -76,6 +78,15 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
         "collected_at TEXT, approved_at TEXT, reported_at TEXT)", 0)
     driver.execute(null, "CREATE INDEX IF NOT EXISTS lab_orders_status ON lab_orders(status, created_at)", 0)
     driver.execute(null, "CREATE INDEX IF NOT EXISTS lab_orders_patient ON lab_orders(patient_id, created_at)", 0)
+    // L3 platform-catalog columns. Existing installs already have lab_tests, so
+    // the CREATE above is a no-op there — add one by one, in the SAME order as
+    // the .sq CREATE (SELECT * maps positionally).
+    driver.addColumn("lab_tests", "platform_product_id", "TEXT")
+    driver.addColumn("lab_tests", "fulfillment", "TEXT")
+    driver.addColumn("lab_tests", "outsource_partner", "TEXT")
+    driver.addColumn("lab_tests", "outsource_cost", "REAL")
+    driver.addColumn("lab_tests", "tat_hours", "REAL")
+    driver.addColumn("lab_tests", "platform_json", "TEXT")
     driver.execute(null,
         "CREATE TABLE IF NOT EXISTS lab_order_tests (id TEXT NOT NULL PRIMARY KEY, order_id TEXT NOT NULL, " +
         "test_id TEXT NOT NULL, test_name TEXT NOT NULL, price REAL NOT NULL DEFAULT 0, " +
@@ -135,6 +146,11 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
 
     // ── Round 1: commission % frozen onto the order line at registration ──
     driver.addColumn("lab_order_tests", "commission_pct", "REAL NOT NULL DEFAULT 0")
+
+    // ── L3: the "Sent to partner" stamp on outsourced order lines. MUST come
+    // after commission_pct — the .sq CREATE lists it last and SELECT * maps
+    // positionally, so the add order is the column order. ──
+    driver.addColumn("lab_order_tests", "sent_to_partner_at", "TEXT")
 
     // ── Round 1: per-(referrer, test) commission overrides ──
     driver.execute(null,
