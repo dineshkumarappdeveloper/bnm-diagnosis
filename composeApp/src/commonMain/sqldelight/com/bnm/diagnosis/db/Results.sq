@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS lab_results (
     approved_at TEXT
 );
 
-CREATE UNIQUE INDEX lab_results_key ON lab_results(order_id, test_id, parameter_key);
+CREATE UNIQUE INDEX IF NOT EXISTS lab_results_key ON lab_results(order_id, test_id, parameter_key);
 CREATE INDEX IF NOT EXISTS lab_results_order ON lab_results(order_id);
 
 -- Pre-create the empty grid row at order time (idempotent).

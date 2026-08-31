@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS lab_reports (
     updated_at TEXT
 );
 
-CREATE UNIQUE INDEX lab_reports_token ON lab_reports(token);
+CREATE UNIQUE INDEX IF NOT EXISTS lab_reports_token ON lab_reports(token);
 
 upsertReport:
 INSERT OR REPLACE INTO lab_reports(order_id, token, accession_no, state, published_at, expires_at,
