@@ -43,8 +43,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
+import com.bnm.diagnosis.api.LocalLabApi
 import com.bnm.diagnosis.billing.GstLine
 import com.bnm.diagnosis.billing.GstTaxEngine
+import com.bnm.diagnosis.billing.ensureLabBillingSeries
 import com.bnm.diagnosis.chat.LocalBillingRepository
 import com.bnm.diagnosis.chat.LocalOutboxSender
 import com.bnm.diagnosis.util.formatDecimal2
@@ -69,6 +71,7 @@ private class LineState(qty: String = "1", rate: String = "", gst: String = "18"
 @Composable
 fun CreateInvoiceScreen(businessId: String, onBack: () -> Unit, onCreated: (String) -> Unit) {
     val repo = LocalBillingRepository.current
+    val labApi = LocalLabApi.current
     val outbox = LocalOutboxSender.current
     val scope = rememberCoroutineScope()
     val settings by repo.invoiceSettingsFlow(businessId).collectAsState(null)
@@ -172,6 +175,13 @@ fun CreateInvoiceScreen(businessId: String, onBack: () -> Unit, onCreated: (Stri
                         if (!valid) { error = "Add at least one item with a rate"; return@Button }
                         saving = true; error = null
                         scope.launch {
+                            // Lab devices never pair a counter — bind this device's
+                            // numbering series on first use (no-op once bound).
+                            if (!ensureLabBillingSeries(labApi, repo, businessId)) {
+                                error = "Billing isn't set up on this device yet — connect to the internet once so it can register its invoice series, then retry."
+                                saving = false
+                                return@launch
+                            }
                             repo.createInvoiceLocal(
                                 businessId = businessId,
                                 supplierStateCode = supplierState,

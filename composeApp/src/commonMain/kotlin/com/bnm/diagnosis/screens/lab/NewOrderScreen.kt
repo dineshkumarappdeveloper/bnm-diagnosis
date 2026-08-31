@@ -60,7 +60,9 @@ import com.bnm.diagnosis.api.models.Invoice
 import com.bnm.diagnosis.billing.BillingPrefs
 import com.bnm.diagnosis.billing.GstLine
 import com.bnm.diagnosis.billing.GstTaxEngine
+import com.bnm.diagnosis.api.LocalLabApi
 import com.bnm.diagnosis.billing.PaymentChoice
+import com.bnm.diagnosis.billing.ensureLabBillingSeries
 import com.bnm.diagnosis.chat.LocalBillingRepository
 import com.bnm.diagnosis.chat.LocalOutboxSender
 import com.bnm.diagnosis.connectivity.LocalConnectivity
@@ -113,6 +115,7 @@ fun NewOrderScreen(
 ) {
     val labRepo = LocalLabRepository.current
     val billing = LocalBillingRepository.current
+    val labApi = LocalLabApi.current
     val outbox = LocalOutboxSender.current
     val settings by billing.invoiceSettingsFlow(businessId).collectAsState(null)
     val isOnline by LocalConnectivity.current.isOnline.collectAsState(true)
@@ -268,6 +271,13 @@ fun NewOrderScreen(
         if (billingInFlight) return
         billingInFlight = true
         scope.launch {
+            // Lab devices skip BNMBilling's counter pairing — bind this device's
+            // numbering series on first use (no-op once bound).
+            if (!ensureLabBillingSeries(labApi, billing, businessId)) {
+                billError = "Billing isn't set up on this device yet — connect to the internet once so it can register its invoice series, then retry."
+                billingInFlight = false
+                return@launch
+            }
             billing.createInvoiceLocal(
                 businessId = businessId,
                 supplierStateCode = settings?.taxId?.trim()?.take(2),

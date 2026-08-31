@@ -31,8 +31,10 @@ import com.bnm.diagnosis.api.ApiClient
 import com.bnm.diagnosis.api.BillingApi
 import com.bnm.diagnosis.api.LabApi
 import com.bnm.diagnosis.api.LabHeartbeatResult
+import com.bnm.diagnosis.api.LocalLabApi
 import com.bnm.diagnosis.billing.CartStore
 import com.bnm.diagnosis.billing.LocalCart
+import com.bnm.diagnosis.billing.ensureLabBillingSeries
 import com.bnm.diagnosis.auth.AuthRepository
 import com.bnm.diagnosis.auth.FirebaseAuthManager
 import com.bnm.diagnosis.auth.SessionManager
@@ -93,10 +95,14 @@ fun App() {
     val sessionManager = remember { SessionManager() }
     val authRepository = remember { AuthRepository(firebaseAuthManager, sessionManager) }
     val httpClient = remember { ApiClient.create() }
+    // License first: billing calls authenticate with the lab-device session
+    // token (admin-billing accepts lab_device sessions) — the legacy counter
+    // token only exists on a seat paired via the old BNMBilling flow.
+    val licenseManager = remember { LicenseManager() }
     val api = remember {
         BillingApi(
             httpClient,
-            tokenProvider = { authRepository.getAuthToken() },
+            tokenProvider = { licenseManager.deviceToken() ?: authRepository.getAuthToken() },
             onUnauthorized = { authRepository.signOut() },
         )
     }
@@ -125,8 +131,8 @@ fun App() {
     val outboxSender = remember { BillingOutboxSender(database, api) }
     val billingSync = remember { BillingSyncManager(outboxSender, connectivity) }
 
-    // ── License (P2): activation + device management via admin-lab ──
-    val licenseManager = remember { LicenseManager() }
+    // ── License (P2): activation + device management via admin-lab
+    // (licenseManager itself is created above, before BillingApi) ──
     val labApi = remember { LabApi(httpClient, deviceTokenProvider = { licenseManager.deviceToken() }) }
 
     // ── P3: additive lab sync (push/pull lab_entities + EMR inbox). The app is
@@ -172,6 +178,12 @@ fun App() {
         var wasOnline = false
         connectivity.isOnline.collect { online ->
             if (online && (first || !wasOnline) && licenseManager.deviceToken() != null) {
+                // Bind this device's invoice numbering series before the sweep
+                // (no-op once bound) so billing works even if the operator's
+                // first bill happens offline later.
+                licenseManager.state.value.businessId?.takeIf { it.isNotBlank() }?.let { biz ->
+                    runCatching { ensureLabBillingSeries(labApi, repo, biz) }
+                }
                 labSync.syncNow()
             }
             first = false
@@ -217,6 +229,7 @@ fun App() {
             LocalOutboxSender provides outboxSender,
             LocalCart provides cart,
             LocalConnectivity provides connectivity,
+            LocalLabApi provides labApi,
         ) {
             val licState by licenseManager.state.collectAsState()
 
@@ -465,6 +478,7 @@ fun App() {
                         val labName = licState.labName ?: authRepository.getSelectedBusinessName() ?: "BNM Diagnosis"
                         OrderDetailScreen(
                             orderId = orderId,
+                            businessId = authRepository.getSelectedBusinessId() ?: licState.businessId ?: "",
                             labName = labName,
                             onBack = { navController.popBackStack() },
                             onOpenInvoice = { id -> navController.navigate(Screen.InvoiceDetail.createRoute(id)) },

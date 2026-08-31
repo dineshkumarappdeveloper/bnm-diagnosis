@@ -73,7 +73,12 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.bnm.diagnosis.api.LocalLabApi
 import com.bnm.diagnosis.billing.BillingPrefs
+import com.bnm.diagnosis.billing.GstLine
+import com.bnm.diagnosis.billing.ensureLabBillingSeries
+import com.bnm.diagnosis.chat.LocalBillingRepository
+import com.bnm.diagnosis.chat.LocalOutboxSender
 import com.bnm.diagnosis.components.StatusBadge
 import com.bnm.diagnosis.lab.LabOrder
 import com.bnm.diagnosis.lab.LabOrderTest
@@ -139,12 +144,17 @@ private val COL_FLAG = 124.dp   // widened in round 1: "⚠ CH↑" + CRITICAL me
 @Composable
 fun OrderDetailScreen(
     orderId: String,
+    businessId: String,
     labName: String,
     onBack: () -> Unit,
     onOpenInvoice: (String) -> Unit,
 ) {
     val repo = LocalLabRepository.current
     val staffRepo = LocalStaffRepository.current
+    val billing = LocalBillingRepository.current
+    val labApi = LocalLabApi.current
+    val outbox = LocalOutboxSender.current
+    val billSettings by billing.invoiceSettingsFlow(businessId).collectAsState(null)
     // One per screen: assembling a report mints the QR token on first print, so it
     // must be a stable instance rather than rebuilt per recomposition.
     val assembler = remember(repo, staffRepo) { ReportAssembler(repo, staffRepo) }
@@ -174,6 +184,44 @@ fun OrderDetailScreen(
     var showCancel by remember { mutableStateOf(false) }
     var showPrintChooser by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
+    var billBusy by remember { mutableStateOf(false) }
+
+    /** Retro-bill an order registered without one (e.g. billing wasn't set up
+     *  yet at registration): same snapshot lines as at registration — names and
+     *  prices frozen on the order's tests; diagnostic services are NIL-GST. */
+    fun createBillNow() {
+        val o = order ?: return
+        val p = patient ?: return
+        if (billBusy || o.invoiceId != null || tests.isEmpty()) return
+        billBusy = true
+        scope.launch {
+            if (!ensureLabBillingSeries(labApi, billing, businessId)) {
+                message = "Billing isn't set up on this device yet — connect to the internet once, then retry."
+                billBusy = false
+                return@launch
+            }
+            billing.createInvoiceLocal(
+                businessId = businessId,
+                supplierStateCode = billSettings?.taxId?.trim()?.take(2),
+                placeOfSupply = null,
+                customerName = p.name,
+                customerPhone = p.phone?.trim()?.ifBlank { null },
+                customerGstin = null,
+                lines = tests.map { GstLine(description = it.testName, hsn = null, quantity = 1.0, rate = it.price, gstRate = 0.0) },
+                dueDays = billSettings?.dueDays ?: 7,
+                notes = "Lab order ${o.accessionNo}",
+            ).onSuccess { inv ->
+                runCatching { repo.linkInvoice(o.id, inv.id) }
+                outbox.kick()
+                message = inv.invoiceNumber?.let { n -> "Bill $n created" } ?: "Bill created"
+                billBusy = false
+                reloadTick++
+            }.onFailure {
+                message = it.message ?: "Bill could not be created"
+                billBusy = false
+            }
+        }
+    }
 
     // What is IN the boxes right now (may be ahead of the committed result).
     // Single source of truth for the inputs: lets us find the next EMPTY field
@@ -306,6 +354,9 @@ fun OrderDetailScreen(
                 },
                 actions = {
                     o?.invoiceId?.let { inv -> TextButton(onClick = { onOpenInvoice(inv) }) { Text("Bill") } }
+                    if (o != null && o.invoiceId == null && o.status != LabStatus.CANCELLED && tests.isNotEmpty()) {
+                        TextButton(enabled = !billBusy, onClick = { createBillNow() }) { Text("Create bill") }
+                    }
                     if (o != null && o.status != LabStatus.DELIVERED && o.status != LabStatus.CANCELLED) {
                         IconButton(onClick = { menuOpen = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {

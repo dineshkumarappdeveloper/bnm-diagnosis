@@ -162,6 +162,21 @@ data class PlatformLabTest(
 )
 
 /**
+ * This device's invoice numbering series, minted by `admin-lab/billing-series`
+ * (one series per seat — L1/L2/L3 — so parallel-offline devices never collide
+ * on invoice numbers). Registered locally via BillingRepository so bills work
+ * exactly as on a paired BNMBilling counter.
+ */
+@Serializable
+data class LabBillingSeries(
+    val seriesCode: String,
+    val prefix: String = "LAB",
+    val numberFormat: String = "{prefix}-{series}-{seq}",
+    val highWater: Long = 0,
+    val businessId: String? = null,
+)
+
+/**
  * Client for the `admin-lab` edge fn — license activation + device management.
  * Auth is the license `device_token` (NOT the BusinessStudio session token);
  * `activate` is the only unauthenticated call.
@@ -369,6 +384,26 @@ class LabApi(
             json.parseToJsonElement(text).jsonObject["tests"]?.let {
                 json.decodeFromJsonElement(ListSerializer(PlatformLabTest.serializer()), it)
             } ?: emptyList()
+        }
+    }
+
+    /**
+     * `POST admin-lab/billing-series` {fy} — find-or-create this device's
+     * invoice numbering series on the platform (per-seat L1/L2/L3, prefix LAB)
+     * and return its anchor. Replaces BNMBilling's counter-pairing flow for lab
+     * devices. Standalone licences 409 → [LabSyncDisabledException].
+     */
+    suspend fun billingSeries(fy: String): Result<LabBillingSeries> = withContext(Dispatchers.Default) {
+        runCatching {
+            val auth = deviceAuth()
+            val resp = httpClient.post(edgeUrl("/billing-series")) {
+                header(auth.first, auth.second)
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject { put("fy", fy) })
+            }
+            val text = resp.bodyAsText()
+            if (!resp.status.isSuccess()) syncFail(resp.status, text)
+            json.decodeFromString(LabBillingSeries.serializer(), text)
         }
     }
 
