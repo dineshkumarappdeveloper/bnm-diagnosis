@@ -163,7 +163,9 @@ class PlatformCatalogImporter(private val db: AppDatabase, private val json: Jso
                         ageMinY = b.ageMin, ageMaxY = b.ageMax,
                         low = b.low, high = b.high,
                         criticalLow = b.criticalLow, criticalHigh = b.criticalHigh,
-                        text = b.notes,
+                        // NB: local `text` is the QUALITATIVE expected value —
+                        // setting it flips the band to qualitative flagging.
+                        // Platform `notes` stays in platform_json only.
                     )
                 },
             )
