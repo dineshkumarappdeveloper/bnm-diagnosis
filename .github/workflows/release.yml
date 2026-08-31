@@ -105,6 +105,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # NO macos-13 (Intel) leg — matching BNM Billing. It was tried and
+        # removed: macos-13 is being retired and its runners do not schedule.
+        # Runs 1 and 3 both had EVERY other target green with macos-x64 still
+        # QUEUED, which blocked publish-desktop entirely. `experimental: true`
+        # does NOT rescue this — continue-on-error covers a job that FAILS, not
+        # one that never STARTS, and GitHub only reaps a queued job after ~24h.
+        # Intel Macs are served by the portable .jar.
         include:
           - name: windows-x64
             os: windows-latest
@@ -116,18 +123,6 @@ jobs:
             task: packageDmg
             glob: composeApp/build/compose/binaries/main/dmg/*.dmg
             asset: BNMDiagnosis-macos-arm64.dmg
-          - name: macos-x64
-            os: macos-13              # Intel — labs run older iMacs/minis
-            task: packageDmg
-            glob: composeApp/build/compose/binaries/main/dmg/*.dmg
-            asset: BNMDiagnosis-macos-x64.dmg
-            # Best-effort. macos-13 is being retired by GitHub and its runners
-            # queue for a long time or never schedule — run 1 of this pipeline
-            # was cancelled with this leg still QUEUED after every other target
-            # had built, which stalled publishing for all of them. Intel users
-            # still have the portable .jar, so a scarce runner must never hold
-            # the whole release hostage.
-            experimental: true
           - name: linux-x64-deb
             os: ubuntu-latest
             task: packageDeb
@@ -209,7 +204,7 @@ jobs:
             |---|---|
             | Windows 10/11 (x64) | `BNMDiagnosis-windows-x64.msi` |
             | macOS (Apple Silicon) | `BNMDiagnosis-macos-arm64.dmg` |
-            | macOS (Intel) | `BNMDiagnosis-macos-x64.dmg` |
+            | macOS (Intel) | use the portable `.jar` below |
             | Linux (x64, Debian/Ubuntu) | `BNMDiagnosis-linux-x64.deb` |
             | Any OS with a JRE | `BNMDiagnosis-portable.jar` |
 
