@@ -144,6 +144,24 @@ data class LabEmrOrder(
 )
 
 /**
+ * One lab-test SERVICE product from `GET admin-lab/platform-tests` (L3):
+ * the LINKED business's products where item_type='service' and lab_config is
+ * set. [labConfig] arrives as the raw jsonb object — the importer both decodes
+ * the fields it maps AND stores the object verbatim (lossless) on the local
+ * test row, so nothing the platform authored is ever dropped.
+ */
+@Serializable
+data class PlatformLabTest(
+    val id: String,
+    val name: String = "Lab test",
+    @SerialName("selling_price") val sellingPrice: Double? = null,
+    val currency: String? = null,
+    @SerialName("lab_config") val labConfig: JsonObject? = null,
+    @SerialName("updated_at") val updatedAt: String? = null,
+    val seq: Long = 0,
+)
+
+/**
  * Client for the `admin-lab` edge fn — license activation + device management.
  * Auth is the license `device_token` (NOT the BusinessStudio session token);
  * `activate` is the only unauthenticated call.
@@ -332,6 +350,27 @@ class LabApi(
                 } ?: emptyList()
             }
         }
+
+    /**
+     * `GET admin-lab/platform-tests` (L3) — the linked business's lab-test
+     * products, WHOLE list every time (the catalog is small; the sync engine
+     * fingerprints it and applies only on change — the same whole-fingerprint
+     * idiom the local test/panel push uses). Standalone licences 409 → the
+     * shared [LabSyncDisabledException] path.
+     */
+    suspend fun platformTests(): Result<List<PlatformLabTest>> = withContext(Dispatchers.Default) {
+        runCatching {
+            val auth = deviceAuth()
+            val resp = httpClient.get(edgeUrl("/platform-tests")) {
+                header(auth.first, auth.second)
+            }
+            val text = resp.bodyAsText()
+            if (!resp.status.isSuccess()) syncFail(resp.status, text)
+            json.parseToJsonElement(text).jsonObject["tests"]?.let {
+                json.decodeFromJsonElement(ListSerializer(PlatformLabTest.serializer()), it)
+            } ?: emptyList()
+        }
+    }
 
     /** `GET admin-lab/emr-orders?sinceSeq=N` — clinic orders routed to this lab. */
     suspend fun emrOrders(sinceSeq: Long): Result<List<LabEmrOrder>> = withContext(Dispatchers.Default) {

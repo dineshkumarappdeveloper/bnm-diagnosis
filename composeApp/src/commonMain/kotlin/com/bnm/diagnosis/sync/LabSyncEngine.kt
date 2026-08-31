@@ -126,6 +126,9 @@ class LabSyncEngine(
                 withContext(Dispatchers.Default) {
                     pushAll()
                     pullAll()
+                    // AFTER pullAll: seat-synced E_TEST copies land first, then the
+                    // platform (the authoring truth for imported tests) wins the sweep.
+                    pullPlatformCatalog()
                     syncEmr()
                     // Last, and swallowing its own failures: publishing a report is
                     // additive. A failed upload must not mark the whole sweep failed
@@ -216,7 +219,7 @@ class LabSyncEngine(
                 val order = row.toOrder()
                 val tests = oQ.testsForOrder(order.id).executeAsList().map {
                     LabOrderTest(it.id, it.order_id, it.test_id, it.test_name, it.price, it.status,
-                        it.commission_pct)
+                        it.commission_pct, it.sent_to_partner_at)
                 }
                 PushCandidate(order.id,
                     json.encodeToJsonElement(LabOrderDoc.serializer(), LabOrderDoc(order, tests)),
@@ -357,7 +360,9 @@ class LabSyncEngine(
                 val t = json.decodeFromJsonElement(LabTest.serializer(), doc)
                 tQ.upsertTest(t.id, t.code, t.name, t.category, t.price, t.sampleType, t.method,
                     if (t.active) 1L else 0L, t.sortOrder.toLong(),
-                    json.encodeToString(paramsSerializer, t.parameters))
+                    json.encodeToString(paramsSerializer, t.parameters),
+                    t.platformProductId, t.fulfillment, t.outsourcePartner, t.outsourceCost,
+                    t.tatHours, t.platformJson)
             }
             E_PANEL -> {
                 val p = json.decodeFromJsonElement(LabPanel.serializer(), doc)
@@ -380,7 +385,7 @@ class LabSyncEngine(
                     oQ.deleteTestsForOrder(o.id)
                     for (t in d.tests) {
                         oQ.insertOrderTest(t.id, o.id, t.testId, t.testName, t.price, t.status,
-                            t.commissionPct)
+                            t.commissionPct, t.sentToPartnerAt)
                         // Pre-create the empty entry grid from the local catalog
                         // (INSERT OR IGNORE — never clobbers entered values).
                         val params = tQ.testById(t.testId).executeAsOneOrNull()?.toTestModel()?.parameters
@@ -412,6 +417,30 @@ class LabSyncEngine(
                 }
             }
         }
+    }
+
+    // ── L3 PLATFORM CATALOG ──────────────────────────────────────────────────
+
+    private val platformImporter by lazy { PlatformCatalogImporter(db, json) }
+
+    /**
+     * Pull the linked business's lab-test products (SERVICE + lab_config) and
+     * fold them into the local catalog. WHOLE list every sweep, applied only
+     * when its fingerprint moved — the platform twin of [pushCatalog]'s
+     * whole-fingerprint idiom. Import changes the local catalog, so the NEXT
+     * sweep's [pushCatalog] naturally carries the imported tests to the lab's
+     * other seats via `lab_entities`.
+     */
+    private suspend fun pullPlatformCatalog() {
+        val pulled = api.platformTests().getOrThrow()
+        // Salted with the tenant: SyncPrefs survives a licence switch (the DB
+        // wipe can't reach them), and two businesses with identical payloads
+        // must still import — same-content-different-tenant is not "unchanged".
+        val fp = PlatformCatalogImporter.fingerprint(json, pulled) xor
+            (license.state.value.businessId?.hashCode()?.toLong() ?: 0L)
+        if (fp == prefs.platformCatalogFingerprint) return
+        platformImporter.apply(pulled)
+        prefs.platformCatalogFingerprint = fp
     }
 
     // ── EMR INBOX ────────────────────────────────────────────────────────────
@@ -534,6 +563,9 @@ class LabSyncEngine(
         sortOrder = sort_order.toInt(),
         parameters = runCatching { json.decodeFromString(paramsSerializer, parameters_json) }
             .getOrDefault(emptyList()),
+        platformProductId = platform_product_id, fulfillment = fulfillment,
+        outsourcePartner = outsource_partner, outsourceCost = outsource_cost,
+        tatHours = tat_hours, platformJson = platform_json,
     )
 
     private fun com.bnm.diagnosis.db.Staff.toStaff() = Staff(
