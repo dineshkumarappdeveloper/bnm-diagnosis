@@ -809,7 +809,12 @@ private fun TestPicker(
                 val selected = t.id in selectedTestIds
                 PickRow(
                     title = t.name,
-                    subtitle = listOfNotNull(t.code, t.category, t.sampleType).joinToString(" · "),
+                    // L3: an outsourced test says so at pick time — the desk should
+                    // know a sample is leaving the building before it books it.
+                    subtitle = (listOfNotNull(t.code, t.category, t.sampleType) +
+                        listOfNotNull(if (t.isOutsourced)
+                            "Outsourced · ${t.outsourcePartner?.takeIf { it.isNotBlank() } ?: "partner lab"}"
+                        else null)).joinToString(" · "),
                     price = LabRepository.resolvePrice(t.price, rates[t.id]),
                     catalogPrice = t.price,
                     rated = t.id in rates,

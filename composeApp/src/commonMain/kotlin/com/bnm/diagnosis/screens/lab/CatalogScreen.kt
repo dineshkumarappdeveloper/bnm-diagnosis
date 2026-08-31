@@ -135,7 +135,11 @@ fun CatalogScreen(onBack: () -> Unit) {
                                     Text(t.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
                                     Text(
                                         listOfNotNull(t.code, t.category, t.sampleType).joinToString(" · ") +
-                                            " · ${t.parameters.size} param${if (t.parameters.size == 1) "" else "s"}",
+                                            " · ${t.parameters.size} param${if (t.parameters.size == 1) "" else "s"}" +
+                                            // L3: imported/outsourced provenance at a glance. Edits to an
+                                            // imported test are overwritten on the next platform change.
+                                            (if (t.isOutsourced) " · Outsourced · ${t.outsourcePartner?.takeIf { it.isNotBlank() } ?: "partner lab"}" else "") +
+                                            (if (t.isPlatformImported) " · From BNM catalog" else ""),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )

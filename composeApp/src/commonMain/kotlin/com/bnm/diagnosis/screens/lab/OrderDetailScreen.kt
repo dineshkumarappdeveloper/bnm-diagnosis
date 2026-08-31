@@ -419,6 +419,22 @@ fun OrderDetailScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         OrderHeader(o, pat, referrer)
+                        // L3: outsourced lines get an indicator + a lightweight
+                        // "Sent to partner" stamp BEFORE result entry. The order's
+                        // status machine is untouched — entering the partner's
+                        // reported values works exactly like bench results.
+                        OutsourcedStrip(
+                            tests = tests,
+                            catalog = catalog,
+                            canMark = o.status in ENTRY_OPEN && !busy,
+                            onMarkSent = { testId ->
+                                scope.launch {
+                                    repo.markSentToPartner(o.id, testId)
+                                        .onSuccess { reloadTick++ }
+                                        .onFailure { message = it.message }
+                                }
+                            },
+                        )
                         if (totalCount > 0) EntryProgress(enteredCount, totalCount)
                         if (showLockNote) {
                             Text(
@@ -743,6 +759,67 @@ private fun OrderHeader(order: LabOrder, patient: Patient, referrer: Referrer?) 
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
+            }
+        }
+    }
+}
+
+/**
+ * L3: one line per OUTSOURCED test on the order — "Outsourced · <partner>" plus
+ * the lightweight "Sent to partner" step: a button until stamped, then the
+ * stamp itself. Renders nothing when no line is outsourced (the overwhelmingly
+ * common case pays zero pixels). Outsourced-ness is read from the live catalog
+ * row (imported tests carry fulfillment/partner from the platform's lab_config).
+ */
+@Composable
+private fun OutsourcedStrip(
+    tests: List<LabOrderTest>,
+    catalog: Map<String, LabTest>,
+    canMark: Boolean,
+    onMarkSent: (testId: String) -> Unit,
+) {
+    val outsourced = tests.mapNotNull { line ->
+        val test = catalog[line.testId] ?: return@mapNotNull null
+        if (test.isOutsourced) line to test else null
+    }
+    if (outsourced.isEmpty()) return
+    Surface(
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            for ((line, test) in outsourced) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "${line.testName} — Outsourced · ${test.outsourcePartner?.takeIf { it.isNotBlank() } ?: "partner lab"}",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    val sentAt = line.sentToPartnerAt
+                    if (sentAt != null) {
+                        Text(
+                            "Sent to partner ${shortTimeLabel(sentAt)}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        )
+                    } else if (canMark) {
+                        TextButton(onClick = { onMarkSent(line.testId) }) { Text("Mark sent to partner") }
+                    } else {
+                        Text(
+                            "Not sent to partner",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        )
+                    }
+                }
             }
         }
     }
