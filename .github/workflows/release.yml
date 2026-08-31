@@ -48,7 +48,12 @@ on:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  # TRUE, unlike the sibling pipelines: a re-push of the same release branch is
+  # always a deliberate retry of a run that went wrong. Leaving it false queued
+  # the retry behind a cancelled run whose macOS jobs had not been reaped, so
+  # neither ever ran. Publishing is idempotent (the rolling tag replaces assets),
+  # so superseding is safe here.
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -116,6 +121,13 @@ jobs:
             task: packageDmg
             glob: composeApp/build/compose/binaries/main/dmg/*.dmg
             asset: BNMDiagnosis-macos-x64.dmg
+            # Best-effort. macos-13 is being retired by GitHub and its runners
+            # queue for a long time or never schedule — run 1 of this pipeline
+            # was cancelled with this leg still QUEUED after every other target
+            # had built, which stalled publishing for all of them. Intel users
+            # still have the portable .jar, so a scarce runner must never hold
+            # the whole release hostage.
+            experimental: true
           - name: linux-x64-deb
             os: ubuntu-latest
             task: packageDeb
