@@ -8,12 +8,11 @@ actual class DriverFactory actual constructor() {
     actual fun createDriver(): SqlDriver {
         val dbFile = File(appDataDir(), CHAT_DB_NAME)
         // Capture freshness BEFORE constructing the driver (which opens/creates the file).
-        val needsCreate = !dbFile.exists()
         val driver = JdbcSqliteDriver("jdbc:sqlite:${dbFile.absolutePath}")
-        if (needsCreate) {
-            // JDBC driver does not auto-create; build the schema on first run.
-            AppDatabase.Schema.create(driver)
-        }
+        // Self-healing schema: every CREATE is IF NOT EXISTS — create on EVERY
+        // open adds tables an older on-disk db lacks, keeping data (columns are
+        // healed separately by AppDatabaseFactory's addColumn migrations).
+        AppDatabase.Schema.create(driver)
         // NOTE: when schema version > 1 ships, add PRAGMA user_version tracking +
         // AppDatabase.Schema.migrate(...) here.
         return driver

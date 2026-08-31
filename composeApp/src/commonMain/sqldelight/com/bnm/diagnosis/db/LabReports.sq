@@ -18,7 +18,7 @@
 -- can never resolve. Those labs print no QR at all — a dead QR on a medical
 -- report is worse than none.
 
-CREATE TABLE lab_reports (
+CREATE TABLE IF NOT EXISTS lab_reports (
     order_id TEXT NOT NULL PRIMARY KEY,
     token TEXT NOT NULL,                       -- 160-bit hex, the capability
     accession_no TEXT NOT NULL,

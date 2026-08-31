@@ -5,7 +5,9 @@ import app.cash.sqldelight.driver.native.NativeSqliteDriver
 
 actual class DriverFactory actual constructor() {
     actual fun createDriver(): SqlDriver {
-        // NativeSqliteDriver creates/migrates the schema for us.
-        return NativeSqliteDriver(AppDatabase.Schema, CHAT_DB_NAME)
+        val driver = NativeSqliteDriver(AppDatabase.Schema, CHAT_DB_NAME)
+        // Self-healing schema: IF-NOT-EXISTS creates on every open.
+        AppDatabase.Schema.create(driver)
+        return driver
     }
 }

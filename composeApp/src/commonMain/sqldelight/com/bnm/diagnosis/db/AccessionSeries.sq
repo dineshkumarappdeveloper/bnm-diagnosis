@@ -4,7 +4,7 @@
 -- bump then read inside ONE transaction (LabRepository.createLabOrder), so a
 -- crash never reissues an accession number.
 
-CREATE TABLE accession_series (
+CREATE TABLE IF NOT EXISTS accession_series (
     seat TEXT NOT NULL PRIMARY KEY,
     prefix TEXT NOT NULL DEFAULT 'ACC',
     high_water INTEGER NOT NULL DEFAULT 0

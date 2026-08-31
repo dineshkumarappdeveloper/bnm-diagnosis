@@ -13,7 +13,7 @@
 -- self-heal in AppDatabaseFactory produces the same column order as a fresh
 -- CREATE (SQLDelight maps SELECT * positionally).
 
-CREATE TABLE emr_inbox (
+CREATE TABLE IF NOT EXISTS emr_inbox (
     id TEXT NOT NULL PRIMARY KEY,        -- clinical_lab_orders.id
     visit_id TEXT,
     test_name TEXT NOT NULL,
@@ -34,7 +34,7 @@ CREATE TABLE emr_inbox (
     patient_dob TEXT                      -- ISO date
 );
 
-CREATE INDEX emr_inbox_open ON emr_inbox(done, seq);
+CREATE INDEX IF NOT EXISTS emr_inbox_open ON emr_inbox(done, seq);
 
 byId:
 SELECT * FROM emr_inbox WHERE id = ?;

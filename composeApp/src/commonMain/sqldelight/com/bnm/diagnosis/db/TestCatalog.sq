@@ -4,7 +4,7 @@
 -- layer (LabModels/LabRepository) is the only reader/writer of that JSON.
 -- Panels are priced bundles of test ids (test_ids_json = ["..."]).
 
-CREATE TABLE lab_tests (
+CREATE TABLE IF NOT EXISTS lab_tests (
     id TEXT NOT NULL PRIMARY KEY,
     code TEXT NOT NULL UNIQUE,           -- short order code, e.g. 'CBC'
     name TEXT NOT NULL,
@@ -24,7 +24,7 @@ CREATE TABLE lab_tests (
     platform_json TEXT                   -- the product's lab_config verbatim (lossless)
 );
 
-CREATE TABLE lab_panels (
+CREATE TABLE IF NOT EXISTS lab_panels (
     id TEXT NOT NULL PRIMARY KEY,
     code TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,

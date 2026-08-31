@@ -3,7 +3,7 @@
 -- local `high_water` is the last issued sequence. allocate = bump then read,
 -- inside a transaction, so a crash never reissues a number.
 
-CREATE TABLE counter_series (
+CREATE TABLE IF NOT EXISTS counter_series (
     business_id TEXT NOT NULL,
     series TEXT NOT NULL,
     fy TEXT NOT NULL,

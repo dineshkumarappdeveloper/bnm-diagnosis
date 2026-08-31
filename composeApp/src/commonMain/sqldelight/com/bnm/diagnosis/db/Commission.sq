@@ -15,7 +15,7 @@
 -- that is already frozen there. That is what stops "the doctor renegotiated in
 -- March" from rewriting January's payout statement.
 
-CREATE TABLE referrer_commission_rates (
+CREATE TABLE IF NOT EXISTS referrer_commission_rates (
     referrer_id TEXT NOT NULL,
     test_id TEXT NOT NULL,
     commission_pct REAL NOT NULL,
@@ -58,7 +58,7 @@ SELECT * FROM referrer_commission_rates WHERE updated_at IS NOT NULL AND updated
 -- A payout row freezes the period totals at settlement time. It deliberately
 -- does NOT link to individual orders: a lab settles a month, not a line item,
 -- and back-dated result entry would otherwise mutate a closed payout.
-CREATE TABLE referrer_payouts (
+CREATE TABLE IF NOT EXISTS referrer_payouts (
     id TEXT NOT NULL PRIMARY KEY,
     referrer_id TEXT NOT NULL,
     period_from TEXT NOT NULL,     -- inclusive ISO date
@@ -73,7 +73,7 @@ CREATE TABLE referrer_payouts (
     updated_at TEXT
 );
 
-CREATE INDEX referrer_payouts_ref ON referrer_payouts(referrer_id, period_to);
+CREATE INDEX IF NOT EXISTS referrer_payouts_ref ON referrer_payouts(referrer_id, period_to);
 
 upsertPayout:
 INSERT OR REPLACE INTO referrer_payouts(id, referrer_id, period_from, period_to, gross, payable,
@@ -100,7 +100,7 @@ SELECT * FROM referrer_payouts WHERE coalesce(updated_at, created_at) > :since;
 -- ── Lab-wide settings (the commission BASE lives here) ──────────────────────
 -- A tiny key/value singleton rather than a one-row table: the lab will want more
 -- knobs (default TAT, report footer) and this avoids a migration per knob.
-CREATE TABLE lab_settings (
+CREATE TABLE IF NOT EXISTS lab_settings (
     key TEXT NOT NULL PRIMARY KEY,
     value TEXT NOT NULL,
     updated_at TEXT

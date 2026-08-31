@@ -8,7 +8,7 @@
 -- — nothing else may resolve a price. Order lines snapshot the EFFECTIVE price
 -- into lab_order_tests at registration, so history never re-prices.
 
-CREATE TABLE referrer_rates (
+CREATE TABLE IF NOT EXISTS referrer_rates (
     referrer_id TEXT NOT NULL,
     test_id TEXT NOT NULL,
     price REAL NOT NULL,

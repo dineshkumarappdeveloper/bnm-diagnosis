@@ -3,7 +3,7 @@
 -- the fallback when the birth date is unknown (common in India). Soft-delete
 -- only (deleted_at) — results/orders keep pointing at the row forever.
 
-CREATE TABLE patients (
+CREATE TABLE IF NOT EXISTS patients (
     id TEXT NOT NULL PRIMARY KEY,
     name TEXT NOT NULL,
     sex TEXT NOT NULL DEFAULT 'O',      -- 'M' | 'F' | 'O'
@@ -16,8 +16,8 @@ CREATE TABLE patients (
     deleted_at TEXT
 );
 
-CREATE INDEX patients_name ON patients(name);
-CREATE INDEX patients_phone ON patients(phone);
+CREATE INDEX IF NOT EXISTS patients_name ON patients(name);
+CREATE INDEX IF NOT EXISTS patients_phone ON patients(phone);
 
 upsert:
 INSERT OR REPLACE INTO patients(id, name, sex, dob, age_years, phone, address, created_at, updated_at, deleted_at)

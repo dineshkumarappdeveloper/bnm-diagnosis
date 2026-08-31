@@ -2,7 +2,7 @@
 -- per-referrer monthly payout report (core Indian-lab economics). Soft-delete
 -- only — orders keep their referrer link for historical reports.
 
-CREATE TABLE referrers (
+CREATE TABLE IF NOT EXISTS referrers (
     id TEXT NOT NULL PRIMARY KEY,
     name TEXT NOT NULL,
     kind TEXT NOT NULL DEFAULT 'doctor',   -- 'doctor' | 'clinic' | 'walk_in'

@@ -4,7 +4,7 @@
 -- registered → collected → in_progress → entered → verified → approved →
 -- reported → delivered (+ cancelled). Guards live in LabRepository.
 
-CREATE TABLE lab_orders (
+CREATE TABLE IF NOT EXISTS lab_orders (
     id TEXT NOT NULL PRIMARY KEY,
     accession_no TEXT NOT NULL UNIQUE,   -- ACC-S1-00042 (per-seat, never-rewind)
     patient_id TEXT NOT NULL,
@@ -20,10 +20,10 @@ CREATE TABLE lab_orders (
     reported_at TEXT
 );
 
-CREATE INDEX lab_orders_status ON lab_orders(status, created_at);
-CREATE INDEX lab_orders_patient ON lab_orders(patient_id, created_at);
+CREATE INDEX IF NOT EXISTS lab_orders_status ON lab_orders(status, created_at);
+CREATE INDEX IF NOT EXISTS lab_orders_patient ON lab_orders(patient_id, created_at);
 
-CREATE TABLE lab_order_tests (
+CREATE TABLE IF NOT EXISTS lab_order_tests (
     id TEXT NOT NULL PRIMARY KEY,
     order_id TEXT NOT NULL,
     test_id TEXT NOT NULL,
@@ -41,7 +41,7 @@ CREATE TABLE lab_order_tests (
     sent_to_partner_at TEXT
 );
 
-CREATE INDEX lab_order_tests_order ON lab_order_tests(order_id);
+CREATE INDEX IF NOT EXISTS lab_order_tests_order ON lab_order_tests(order_id);
 
 -- ── Orders ──
 

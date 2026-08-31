@@ -3,7 +3,7 @@
 -- The full server JSON is kept in `json`; id/seq/created_at are extracted for
 -- the cursor + ordering. Soft-deleted rows are removed locally during sync.
 
-CREATE TABLE ecom_entity (
+CREATE TABLE IF NOT EXISTS ecom_entity (
     entity TEXT NOT NULL,
     id TEXT NOT NULL,
     business_id TEXT NOT NULL,
@@ -13,7 +13,7 @@ CREATE TABLE ecom_entity (
     PRIMARY KEY (entity, id)
 );
 
-CREATE INDEX ecom_entity_list ON ecom_entity(entity, business_id, created_at);
+CREATE INDEX IF NOT EXISTS ecom_entity_list ON ecom_entity(entity, business_id, created_at);
 
 selectEntity:
 SELECT json FROM ecom_entity

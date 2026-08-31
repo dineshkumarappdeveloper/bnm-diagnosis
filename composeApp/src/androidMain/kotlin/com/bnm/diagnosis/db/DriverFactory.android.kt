@@ -15,7 +15,10 @@ actual class DriverFactory actual constructor() {
     actual fun createDriver(): SqlDriver {
         val ctx = dbContext
             ?: error("DriverFactory: call initDbContext(context) from MainActivity before opening the DB")
-        // AndroidSqliteDriver creates/migrates the schema for us.
-        return AndroidSqliteDriver(AppDatabase.Schema, ctx, CHAT_DB_NAME)
+        val driver = AndroidSqliteDriver(AppDatabase.Schema, ctx, CHAT_DB_NAME)
+        // Self-healing schema: IF-NOT-EXISTS creates on every open (no .sqm
+        // migrations; onCreate only runs for a fresh db).
+        AppDatabase.Schema.create(driver)
+        return driver
     }
 }

@@ -5,7 +5,7 @@
 -- (frozen at entry time against the patient's then-age/sex). The entered/
 -- verified/approved audit trio is a legal requirement (pathologist sign-off).
 
-CREATE TABLE lab_results (
+CREATE TABLE IF NOT EXISTS lab_results (
     id TEXT NOT NULL PRIMARY KEY,
     order_id TEXT NOT NULL,
     test_id TEXT NOT NULL,
@@ -24,7 +24,7 @@ CREATE TABLE lab_results (
 );
 
 CREATE UNIQUE INDEX lab_results_key ON lab_results(order_id, test_id, parameter_key);
-CREATE INDEX lab_results_order ON lab_results(order_id);
+CREATE INDEX IF NOT EXISTS lab_results_order ON lab_results(order_id);
 
 -- Pre-create the empty grid row at order time (idempotent).
 insertEmpty:

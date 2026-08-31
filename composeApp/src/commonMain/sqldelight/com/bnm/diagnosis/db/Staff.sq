@@ -14,7 +14,7 @@
 -- See StaffRepository's KDoc: this is convenience access control on a shared
 -- lab PC, NOT a security boundary.
 
-CREATE TABLE staff (
+CREATE TABLE IF NOT EXISTS staff (
     id TEXT NOT NULL PRIMARY KEY,
     name TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'receptionist',  -- owner|pathologist|technician|receptionist
@@ -35,7 +35,7 @@ CREATE TABLE staff (
     registration_no TEXT     -- state medical-council number, an Indian report requirement
 );
 
-CREATE INDEX staff_active ON staff(active, name);
+CREATE INDEX IF NOT EXISTS staff_active ON staff(active, name);
 
 upsert:
 INSERT OR REPLACE INTO staff(id, name, role, pin_hash, active, created_at, updated_at, deleted_at,
