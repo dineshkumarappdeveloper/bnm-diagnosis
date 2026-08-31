@@ -49,8 +49,14 @@ class PlatformCatalogImporter(private val db: AppDatabase, private val json: Jso
             for (p in pulled) {
                 if (p.id.isBlank()) continue
                 seenIds += p.id
-                val existing = tQ.testByPlatformProduct(p.id).executeAsOneOrNull()
                 val cfg = decodeConfig(p.labConfig)
+                // Adoption: a product PROMOTED from this lab's own catalog names
+                // its origin row — claim that row (keeping its id/code, which
+                // orders and results reference) instead of minting a plat-* twin.
+                val existing = tQ.testByPlatformProduct(p.id).executeAsOneOrNull()
+                    ?: cfg?.sourceLabTestId?.takeIf { it.isNotBlank() }?.let { sid ->
+                        tQ.testById(sid).executeAsOneOrNull()?.takeIf { it.platform_product_id == null }
+                    }
                 val outsourced = cfg?.fulfillment == "outsourced"
                 val mapped = LabTest(
                     // Deterministic id: two seats importing concurrently mint the
@@ -156,6 +162,8 @@ class PlatformCatalogImporter(private val db: AppDatabase, private val json: Jso
                         },
                         ageMinY = b.ageMin, ageMaxY = b.ageMax,
                         low = b.low, high = b.high,
+                        criticalLow = b.criticalLow, criticalHigh = b.criticalHigh,
+                        text = b.notes,
                     )
                 },
             )
@@ -196,6 +204,10 @@ data class PlatformLabConfig(
     /** 'in_house' | 'outsourced' */
     val fulfillment: String? = null,
     val outsource: PlatformOutsource? = null,
+    /** Set when this product was PROMOTED from a lab's own local test (the
+     *  reverse bridge): the local lab_tests.id it came from. Lets the import
+     *  ADOPT the original row instead of minting a plat-* duplicate. */
+    @SerialName("source_lab_test_id") val sourceLabTestId: String? = null,
 )
 
 @Serializable
@@ -209,6 +221,10 @@ data class PlatformRefRange(
     @SerialName("age_min") val ageMin: Double? = null,
     @SerialName("age_max") val ageMax: Double? = null,
     val notes: String? = null,
+    // Extra keys carried by promoted tests (the platform editors don't author
+    // these yet) — round-trips the LIMS's critical bounds through promotion.
+    @SerialName("critical_low") val criticalLow: Double? = null,
+    @SerialName("critical_high") val criticalHigh: Double? = null,
 )
 
 @Serializable
