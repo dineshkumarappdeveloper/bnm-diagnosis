@@ -7,6 +7,15 @@ import java.io.File
 actual class DriverFactory actual constructor() {
     actual fun createDriver(): SqlDriver {
         val dbFile = File(appDataDir(), CHAT_DB_NAME)
+        // One-time migration: this app USED to write into the shared "BNMAdmin"
+        // data dir (clone-chain leftover — BNMAdmin/BNMBilling/BNMDiagnosis all
+        // opened the SAME sqlite file). Copy the legacy file once so existing
+        // lab data (catalog/patients/orders) follows; foreign tables inside the
+        // copy are inert.
+        if (!dbFile.exists()) {
+            val legacy = File(File(dbFile.parentFile.parentFile, "BNMAdmin"), CHAT_DB_NAME)
+            if (legacy.exists()) runCatching { legacy.copyTo(dbFile) }
+        }
         // Capture freshness BEFORE constructing the driver (which opens/creates the file).
         val driver = JdbcSqliteDriver("jdbc:sqlite:${dbFile.absolutePath}")
         // Self-healing schema: every CREATE is IF NOT EXISTS — create on EVERY
@@ -28,5 +37,5 @@ private fun appDataDir(): File {
         os.contains("mac") -> "$home/Library/Application Support"
         else -> System.getenv("XDG_DATA_HOME") ?: "$home/.local/share"
     }
-    return File(base, "BNMAdmin").apply { mkdirs() }
+    return File(base, "BNMDiagnosis").apply { mkdirs() }
 }
