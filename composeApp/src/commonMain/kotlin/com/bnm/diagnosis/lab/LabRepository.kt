@@ -364,6 +364,7 @@ class LabRepository(
                     patientName = it.patient_name, createdAt = it.created_at,
                     status = it.status, amount = it.amount,
                     reportedAt = it.reported_at,
+                    invoiceId = it.invoice_id,
                 )
             }
         }

@@ -178,7 +178,7 @@ WHERE o.referrer_id IS NOT NULL
 
 -- Drill-down: one referrer's orders inside the same range, newest first.
 referrerOrdersInRange:
-SELECT o.id AS order_id, o.accession_no, o.created_at, o.reported_at, o.status,
+SELECT o.id AS order_id, o.accession_no, o.created_at, o.reported_at, o.status, o.invoice_id,
        p.name AS patient_name,
        coalesce(sum(t.price), 0.0) AS amount
 FROM lab_orders o

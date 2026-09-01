@@ -138,6 +138,10 @@ data class ReferrerOrderRow(
     val status: String,
     val amount: Double,
     val reportedAt: String? = null,
+    /** The bill this order was placed on — null when it was never billed.
+     *  Lets the statement show what the PATIENT still owes, which is a
+     *  different axis from the commission the lab owes the doctor. */
+    val invoiceId: String? = null,
 )
 
 // ── Commission (round-1 items 7 + 8) ────────────────────────────────────────

@@ -43,6 +43,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -67,6 +68,8 @@ import com.bnm.diagnosis.lab.ReferrerStatement
 import com.bnm.diagnosis.print.printReceipt
 import com.bnm.diagnosis.util.formatDecimal1
 import com.bnm.diagnosis.util.formatDecimal2
+import com.bnm.diagnosis.chat.LocalBillingRepository
+import com.bnm.diagnosis.chat.InvoiceBalance
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 import kotlinx.coroutines.launch
@@ -98,7 +101,18 @@ import kotlinx.datetime.toLocalDateTime
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ReferrersScreen(onBack: () -> Unit) {
+fun ReferrersScreen(
+    onBack: () -> Unit,
+    /** Needed only to resolve bill balances for the statement's order list;
+     *  blank simply shows no payment chips. */
+    businessId: String = "",
+) {
+    val billingRepo = LocalBillingRepository.current
+    // The statement shows what the lab owes the DOCTOR. This adds the other
+    // axis — what the PATIENT still owes the lab — because a referring doctor's
+    // unpaid orders are exactly the ones a lab chases.
+    val balances by billingRepo.invoiceBalancesFlow(businessId).collectAsState(emptyList())
+    val balanceByInvoice = remember(balances) { balances.associateBy { it.invoice.id } }
     var tab by remember { mutableStateOf(0) }
     var refresh by remember { mutableStateOf(0) }
     var editing by remember { mutableStateOf<Referrer?>(null) }
@@ -133,7 +147,7 @@ fun ReferrersScreen(onBack: () -> Unit) {
                     onChanged = { refresh++ },
                 )
             } else {
-                CommissionTab()
+                CommissionTab(balanceByInvoice)
             }
         }
     }
@@ -650,7 +664,11 @@ private fun CommissionListDialog(referrer: Referrer, onDismiss: () -> Unit, onSa
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun CommissionTab() {
+private fun CommissionTab(
+    /** invoiceId → balance, threaded from the screen so one flow feeds the whole
+     *  surface (statement rows included) rather than each level collecting. */
+    balanceByInvoice: Map<String, InvoiceBalance> = emptyMap(),
+) {
     val repo = LocalLabRepository.current
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
@@ -826,6 +844,7 @@ private fun CommissionTab() {
 
     drill?.let { row ->
         ReferrerStatementDialog(
+            balanceByInvoice = balanceByInvoice,
             referrerId = row.referrerId, fromDate = fromText, toDate = toText,
             onDismiss = { drill = null },
             onSettled = { refresh++ },
@@ -893,6 +912,9 @@ private fun ReferrerStatementDialog(
     toDate: String,
     onDismiss: () -> Unit,
     onSettled: () -> Unit,
+    /** invoiceId → balance, passed down rather than collected again so the
+     *  statement and the rest of the app read one flow. */
+    balanceByInvoice: Map<String, InvoiceBalance> = emptyMap(),
 ) {
     val repo = LocalLabRepository.current
     val clipboard = LocalClipboardManager.current
@@ -983,6 +1005,13 @@ private fun ReferrerStatementDialog(
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             )
                                         }
+                                        // Same chip as the worklist and order
+                                        // detail — one vocabulary everywhere.
+                                        PaymentPendingChip(
+                                            o.invoiceId?.let { balanceByInvoice[it] },
+                                            Modifier.padding(end = 8.dp),
+                                            compact = true,
+                                        )
                                         Text("₹ ${formatDecimal2(o.amount)}",
                                             style = MaterialTheme.typography.bodyMedium,
                                             fontWeight = FontWeight.SemiBold)

@@ -492,7 +492,10 @@ fun App() {
                     composable(Screen.Referrers.route) {
                         GuardedRoute(Screen.Referrers.route, signedInStaff,
                             onBack = { navController.popBackStack() }) {
-                            ReferrersScreen(onBack = { navController.popBackStack() })
+                            ReferrersScreen(
+                                onBack = { navController.popBackStack() },
+                                businessId = licState.businessId.orEmpty(),
+                            )
                         }
                     }
 
