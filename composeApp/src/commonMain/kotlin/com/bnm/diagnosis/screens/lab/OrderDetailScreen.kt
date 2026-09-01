@@ -110,6 +110,7 @@ import com.bnm.diagnosis.report.ReportAssembler
 import com.bnm.diagnosis.staff.LocalStaffRepository
 import com.bnm.diagnosis.util.formatDecimal2
 import com.bnm.diagnosis.screens.billing.CollectPaymentDialog
+import com.bnm.diagnosis.chat.InvoiceBalance
 
 /** Statuses in which result entry is still open (mirrors the repo's guard). */
 private val ENTRY_OPEN = setOf(LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED)
@@ -510,7 +511,7 @@ fun OrderDetailScreen(
                         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        OrderHeader(o, pat, referrer)
+                        OrderHeader(o, pat, referrer, bill)
                         // L3: outsourced lines get an indicator + a lightweight
                         // "Sent to partner" stamp BEFORE result entry. The order's
                         // status machine is untouched — entering the partner's
@@ -907,7 +908,13 @@ private fun stageHint(status: String, entered: Int, total: Int, canApprove: Bool
 
 /** Compact identity strip: who, how old, reachable where, which accession. */
 @Composable
-private fun OrderHeader(order: LabOrder, patient: Patient, referrer: Referrer?) {
+private fun OrderHeader(
+    order: LabOrder,
+    patient: Patient,
+    referrer: Referrer?,
+    /** Null = no bill, or settled — the chip then renders nothing. */
+    bill: InvoiceBalance? = null,
+) {
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
         shape = RoundedCornerShape(12.dp),
@@ -934,6 +941,9 @@ private fun OrderHeader(order: LabOrder, patient: Patient, referrer: Referrer?) 
                     order.accessionNo, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold,
                     style = MaterialTheme.typography.labelMedium,
                 )
+                // Same chip the worklist uses, so "payment pending" looks identical
+                // wherever the operator meets this order.
+                PaymentPendingChip(bill)
                 Text(
                     // Reported is the clinically meaningful stamp — it is what the
                     // patient and the referring doctor quote back. Shown next to

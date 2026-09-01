@@ -33,6 +33,8 @@ import com.russhwolf.settings.Settings
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import com.bnm.diagnosis.ui.theme.AppTheme
+import com.bnm.diagnosis.chat.InvoiceBalance
+import com.bnm.diagnosis.util.formatDecimal2
 
 /** Persisted device-local LIMS UI preferences (same Settings store as
  *  BillingPrefs/DiagnosisPrefs — new keys, no overlap). */
@@ -169,5 +171,42 @@ fun FlagCell(flag: String?, modifier: Modifier = Modifier) {
             Text("CRITICAL", color = AppTheme.colors.danger, fontSize = 9.sp, fontWeight = FontWeight.Bold,
                 maxLines = 1, overflow = TextOverflow.Clip)
         }
+    }
+}
+
+/**
+ * "Payment pending" chip for an order row. Renders NOTHING when the bill is
+ * settled, absent, or cancelled — a badge that shows on every row is wallpaper,
+ * and the operator stops seeing it.
+ *
+ * ONE component for every surface (worklist table, compact row, order detail,
+ * referrer statement) so the wording, colour and rounding cannot drift between
+ * the places a lab looks. It is the same amber/red vocabulary as [FlagChip]:
+ * amber = attention, red = blocking, which is what an unpaid balance is once the
+ * results are approved and the report is waiting to be released.
+ *
+ * [compact] drops the amount, for narrow rows where the accession and patient
+ * name must not be squeezed.
+ */
+@Composable
+fun PaymentPendingChip(
+    balance: InvoiceBalance?,
+    modifier: Modifier = Modifier,
+    compact: Boolean = false,
+) {
+    val due = balance?.takeIf { !it.isSettled }?.balance ?: return
+    if (due <= 0.005) return
+    val c = AppTheme.colors
+    // Part-paid reads amber (money has started arriving); nothing-paid reads red.
+    val partPaid = balance.isPartPaid
+    val (bg, fg) = if (partPaid) c.warningSoft to c.warning else c.dangerSoft to c.danger
+    val label = when {
+        compact && partPaid -> "Part paid"
+        compact -> "Unpaid"
+        partPaid -> "Balance ₹ ${formatDecimal2(due)}"
+        else -> "Unpaid ₹ ${formatDecimal2(due)}"
+    }
+    Box(modifier.background(bg, RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 2.dp)) {
+        Text(label, color = fg, fontSize = 11.sp, fontWeight = FontWeight.Bold)
     }
 }

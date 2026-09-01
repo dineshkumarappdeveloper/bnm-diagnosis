@@ -88,6 +88,7 @@ import com.bnm.diagnosis.sync.LabSyncEngine
 import com.bnm.diagnosis.ui.theme.AppTheme
 import com.bnm.diagnosis.util.formatDecimal1
 import com.bnm.diagnosis.util.formatDecimal2
+import com.bnm.diagnosis.chat.InvoiceBalance
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.datetime.TimeZone
@@ -180,6 +181,11 @@ fun LabHomeScreen(
 ) {
     val repo = LocalLabRepository.current
     val billingRepo = LocalBillingRepository.current
+    // invoiceId → balance, so every order row can show whether money is still
+    // owed. Worklist rows come from SQL while invoices are JSON docs in another
+    // table, so the join happens here rather than in a query.
+    val balances by billingRepo.invoiceBalancesFlow(businessId).collectAsState(emptyList())
+    val balanceByInvoice = remember(balances) { balances.associateBy { it.invoice.id } }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val emrPending by remember(repo) { repo.emrPendingCountFlow() }.collectAsState(0L)
@@ -332,6 +338,7 @@ fun LabHomeScreen(
                                 entries = worklist,
                                 counts = statusCounts,
                                 onOpenOrder = onOpenOrder,
+                                balanceByInvoice = balanceByInvoice,
                             )
                         }
                         Column(Modifier.weight(0.35f).fillMaxHeight().verticalScroll(rememberScrollState()),
@@ -406,7 +413,13 @@ fun LabHomeScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        worklist.forEach { e -> CompactOrderRow(e) { onOpenOrder(e.order.id) } }
+                        worklist.forEach { e ->
+                            CompactOrderRow(
+                                e,
+                                onOpen = { onOpenOrder(e.order.id) },
+                                balance = e.order.invoiceId?.let { balanceByInvoice[it] },
+                            )
+                        }
                     }
                 }
 
@@ -592,6 +605,8 @@ private fun WorklistPanel(
     entries: List<WorklistEntry>,
     counts: Map<String, Long>,
     onOpenOrder: (String) -> Unit,
+    /** invoiceId → balance; empty map simply shows no payment chips. */
+    balanceByInvoice: Map<String, InvoiceBalance> = emptyMap(),
 ) {
     Card(
         modifier = Modifier.fillMaxSize(),
@@ -658,7 +673,16 @@ private fun WorklistPanel(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             TestProgressCell(e.doneCount, e.testCount, Modifier.width(96.dp))
-                            Box(Modifier.width(120.dp)) { LabStatusChip(e.order.status, e.order.priority) }
+                            Box(Modifier.width(120.dp)) {
+                                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    LabStatusChip(e.order.status, e.order.priority)
+                                    // Only renders when money is actually owed.
+                                    PaymentPendingChip(
+                                        e.order.invoiceId?.let { balanceByInvoice[it] },
+                                        compact = true,
+                                    )
+                                }
+                            }
                             Text(shortTimeLabel(e.order.createdAt), style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(92.dp))
                             if (showReported) Text(
@@ -1018,7 +1042,11 @@ private fun ShortcutTile(
 
 /** Compact open-order row for the phone layout. */
 @Composable
-private fun CompactOrderRow(e: WorklistEntry, onOpen: () -> Unit) {
+private fun CompactOrderRow(
+    e: WorklistEntry,
+    onOpen: () -> Unit,
+    balance: InvoiceBalance? = null,
+) {
     Card(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen),
         shape = RoundedCornerShape(12.dp),
@@ -1030,6 +1058,7 @@ private fun CompactOrderRow(e: WorklistEntry, onOpen: () -> Unit) {
                 Text(e.order.accessionNo, style = MaterialTheme.typography.bodyMedium,
                     fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                PaymentPendingChip(balance, Modifier.padding(end = 6.dp), compact = true)
                 LabStatusChip(e.order.status, e.order.priority)
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
