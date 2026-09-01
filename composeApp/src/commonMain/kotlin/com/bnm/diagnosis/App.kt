@@ -88,6 +88,11 @@ import com.bnm.diagnosis.license.subscriptionStatus
 import com.bnm.diagnosis.report.ReportAssembler
 import com.bnm.diagnosis.report.ReportUploader
 import com.bnm.diagnosis.update.quitForUpdate
+import com.bnm.diagnosis.billing.PrintProfiles
+import com.bnm.diagnosis.screens.settings.PrintSettingsScreen
+import com.bnm.diagnosis.billing.PrintKind
+import com.bnm.diagnosis.print.BtPrinter
+import com.bnm.diagnosis.screens.billing.BtPrinterPickerPage
 
 @Composable
 fun App() {
@@ -98,6 +103,10 @@ fun App() {
     // License first: billing calls authenticate with the lab-device session
     // token (admin-billing accepts lab_device sessions) — the legacy counter
     // token only exists on a seat paired via the old BNMBilling flow.
+    // Seed the report print profile from the previously-shared printer
+    // settings, once — an upgrade must not silently unconfigure a lab.
+    remember { PrintProfiles.migrateOnce() }
+
     val licenseManager = remember { LicenseManager() }
     val api = remember {
         BillingApi(
@@ -499,6 +508,46 @@ fun App() {
                         }
                     }
 
+                    composable(Screen.PrintSettings.route) {
+                        PrintSettingsScreen(
+                            onBack = { navController.popBackStack() },
+                            labName = licState.labName
+                                ?: authRepository.getSelectedBusinessName()
+                                ?: "BNM Diagnosis",
+                            // A separate route, not an in-place swap: returning
+                            // recomposes the settings screen, so the newly picked
+                            // printer name is read back from the profile straight
+                            // away instead of only after leaving and re-entering.
+                            onPickBluetooth = { kind ->
+                                navController.navigate(Screen.BtPrinterPicker.createRoute(kind.slug))
+                            },
+                        )
+                    }
+
+                    composable(
+                        Screen.BtPrinterPicker.route,
+                        arguments = listOf(navArgument("kind") { type = NavType.StringType }),
+                    ) { entry ->
+                        // Which profile this pick belongs to. Unknown//missing falls
+                        // back to INVOICE rather than crashing on a hand-typed route.
+                        val kind = PrintKind.entries
+                            .firstOrNull {
+                                it.slug == entry.arguments?.let { a -> NavType.StringType.get(a, "kind") }
+                            }
+                            ?: PrintKind.INVOICE
+                        val profile = PrintProfiles.of(kind)
+                        BtPrinterPickerPage(
+                            btPrinter = BtPrinter.getInstance(),
+                            selectedAddress = profile.btAddress,
+                            onSelect = { dev ->
+                                profile.btAddress = dev.address
+                                profile.btName = dev.displayName
+                                navController.popBackStack()
+                            },
+                            onBack = { navController.popBackStack() },
+                        )
+                    }
+
                     composable(Screen.Catalog.route) {
                         CatalogScreen(onBack = { navController.popBackStack() })
                     }
@@ -580,6 +629,7 @@ fun App() {
                             businessId = businessId,
                             onBack = { navController.popBackStack() },
                             onOpenLicense = { navController.navigate(Screen.LicenseDevices.route) },
+                            onOpenPrintSettings = { navController.navigate(Screen.PrintSettings.route) },
                             onOpenStaff = { navController.navigate(Screen.Staff.route) },
                             staffManageAllowed = signedInStaff?.canManageStaff == true,
                             labSync = labSync,

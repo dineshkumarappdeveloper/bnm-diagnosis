@@ -41,6 +41,7 @@ import com.bnm.diagnosis.print.printToNetworkPrinter
 import com.bnm.diagnosis.print.renderReceiptText
 import com.bnm.diagnosis.print.renderStationToken
 import com.bnm.diagnosis.util.formatDecimal2
+import com.bnm.diagnosis.billing.PrintProfiles
 import androidx.compose.runtime.LaunchedEffect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -132,6 +133,16 @@ fun SaveResultDialog(
                         if (prefs.printerConnection == "network") printToNetworkPrinter(prefs.printerIp, prefs.printerPort, EscPos.encode(text))
                         else BtPrinter.getInstance().printBytes(prefs.printerBtAddress, EscPos.encode(text))
                     val main = send(body)
+                    // Extra copies of the RECEIPT only (a lab often keeps one and
+                    // gives one to the patient). Tokens are never duplicated —
+                    // a second token would send a second dish to the counter.
+                    // Failures on a copy are ignored: the customer already has
+                    // their receipt, and failing the whole print would be worse.
+                    if (main.startsWith("Sent to")) {
+                        repeat((PrintProfiles.invoice.copies - 1).coerceAtLeast(0)) {
+                            runCatching { send(body) }
+                        }
+                    }
                     if (main.startsWith("Sent to")) {
                         // Main receipt is out — tokens follow; a failed token is
                         // reported but NEVER fails the whole print.

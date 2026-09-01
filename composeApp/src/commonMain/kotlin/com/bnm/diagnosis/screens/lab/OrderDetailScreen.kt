@@ -111,6 +111,7 @@ import com.bnm.diagnosis.staff.LocalStaffRepository
 import com.bnm.diagnosis.util.formatDecimal2
 import com.bnm.diagnosis.screens.billing.CollectPaymentDialog
 import com.bnm.diagnosis.chat.InvoiceBalance
+import com.bnm.diagnosis.billing.PrintProfiles
 
 /** Statuses in which result entry is still open (mirrors the repo's guard). */
 private val ENTRY_OPEN = setOf(LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED)
@@ -339,18 +340,32 @@ fun OrderDetailScreen(
 
         val ord = order ?: return false
         val pat = patient ?: return false
-        val bp = BillingPrefs()
+        // The REPORT profile — a lab's report printer is often not its counter
+        // receipt printer. Before profiles existed both read one shared config.
+        val bp = PrintProfiles.report
+        // Honour the profile's own switch, or it is a control that does nothing.
+        if (!bp.enabled) {
+            message = "Report printing is turned off in Settings ▸ Printing."
+            return false
+        }
         val result = withContext(Dispatchers.Default) {
             val body = renderLabReport(
                 labName = labName, order = ord, patient = pat, tests = tests,
                 results = results.values.toList(), referrerName = referrer?.name,
                 widthChars = bp.paperWidth, paramName = nameOf,
             )
-            when (bp.printerConnection) {
-                "network" -> printToNetworkPrinter(bp.printerIp, bp.printerPort, EscPos.encode(body))
-                "bluetooth" -> BtPrinter.getInstance().printBytes(bp.printerBtAddress, EscPos.encode(body))
+            // Extra copies are best-effort: the first one succeeding is what
+            // counts as "reported", so a failed duplicate must not undo that.
+            suspend fun sendReport(): String = when (bp.connection) {
+                "network" -> printToNetworkPrinter(bp.ip, bp.port, EscPos.encode(body))
+                "bluetooth" -> BtPrinter.getInstance().printBytes(bp.btAddress, EscPos.encode(body))
                 else -> "No thermal printer configured"
             }
+            val first = sendReport()
+            if (first.startsWith("Sent to")) {
+                repeat((bp.copies - 1).coerceAtLeast(0)) { runCatching { sendReport() } }
+            }
+            first
         }
         val ok = result.startsWith("Sent to")
         message = if (ok) "Report sent to printer" else result
@@ -722,8 +737,8 @@ fun OrderDetailScreen(
 
     if (showPrintChooser && o != null) {
         val thermalAvailable = remember {
-            val conn = BillingPrefs().printerConnection
-            conn == "network" || conn == "bluetooth"
+            // Report profile, not the counter's.
+            PrintProfiles.report.isDirectlyConnected
         }
         fun run(block: suspend () -> Unit) {
             showPrintChooser = false

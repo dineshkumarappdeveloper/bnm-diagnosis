@@ -47,4 +47,12 @@ sealed class Screen(val route: String) {
     data object Cart : Screen("cart")
     data object CustomerDetails : Screen("customer_details")
     data object Settings : Screen("settings")
+    data object PrintSettings : Screen("print_settings")
+
+    /** Bluetooth printer picker. Carries the PRINT KIND it is choosing for —
+     *  invoice and report can be on different printers, so the picker has to
+     *  know which profile to write. */
+    data object BtPrinterPicker : Screen("bt_printer_picker/{kind}") {
+        fun createRoute(kind: String) = "bt_printer_picker/$kind"
+    }
 }

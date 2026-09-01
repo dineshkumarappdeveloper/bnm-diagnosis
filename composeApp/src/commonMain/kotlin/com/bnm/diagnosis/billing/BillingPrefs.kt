@@ -101,7 +101,10 @@ class BillingPrefs {
         get() = s.getString(K_BARCODE_MODE, "wedge")
         set(v) = s.putString(K_BARCODE_MODE, v)
 
-    private companion object {
+    /** Key names are `internal` rather than private because [PrintProfile] derives
+     *  per-document keys from them — and reuses the bare names for the INVOICE
+     *  profile so existing installs migrate by doing nothing. */
+    internal companion object {
         const val K_PRINTER_ON = "pref_printer_enabled"
         const val K_PAPER = "pref_paper_width"
         const val K_AUTOPRINT = "pref_auto_print"
