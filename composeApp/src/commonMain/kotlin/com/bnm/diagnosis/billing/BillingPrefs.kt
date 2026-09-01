@@ -13,9 +13,20 @@ class BillingPrefs {
         get() = s.getBoolean(K_PRINTER_ON, true)
         set(v) = s.putBoolean(K_PRINTER_ON, v)
 
-    /** Receipt character width: 32 ≈ 58mm roll, 48 ≈ 80mm roll, 64 ≈ A4. */
+    /**
+     * Receipt format — the two designs are different documents:
+     *  • "thermal" — narrow monospace docket for 58/80mm rolls (ESC/POS-able).
+     *  • "a4"      — full-page laid-out tax invoice (system print dialog).
+     * Default migrates the old "A4 = 64-char paper width" choice.
+     */
+    var receiptFormat: String
+        get() = s.getStringOrNull(K_FORMAT) ?: if (s.getInt(K_PAPER, 32) >= 64) "a4" else "thermal"
+        set(v) = s.putString(K_FORMAT, v)
+
+    /** Thermal roll character width: 32 ≈ 58mm, 48 ≈ 80mm. (64 was the retired
+     *  monospace-A4 mode, now expressed as [receiptFormat] = "a4".) */
     var paperWidth: Int
-        get() = s.getInt(K_PAPER, 32)
+        get() = s.getInt(K_PAPER, 32).coerceAtMost(48)
         set(v) = s.putInt(K_PAPER, v)
 
     var autoPrint: Boolean
@@ -106,6 +117,7 @@ class BillingPrefs {
      *  profile so existing installs migrate by doing nothing. */
     internal companion object {
         const val K_PRINTER_ON = "pref_printer_enabled"
+        const val K_FORMAT = "pref_receipt_format"
         const val K_PAPER = "pref_paper_width"
         const val K_AUTOPRINT = "pref_auto_print"
         const val K_CONN = "pref_printer_connection"

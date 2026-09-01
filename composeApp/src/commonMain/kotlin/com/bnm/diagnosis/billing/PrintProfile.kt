@@ -50,6 +50,19 @@ class PrintProfile(private val kind: PrintKind) {
         get() = s.getString(key(BillingPrefs.K_BT_NAME), "")
         set(v) = s.putString(key(BillingPrefs.K_BT_NAME), v)
 
+    /**
+     * INVOICE only — which receipt design this counter issues:
+     *  • "thermal" — narrow monospace docket for 58/80mm rolls.
+     *  • "a4"      — full-page laid-out tax invoice (system print dialog; the
+     *    transport settings below then only matter for collection tokens).
+     * Shares the legacy base key with BillingPrefs.receiptFormat, and migrates
+     * the old "A4 = 64-char width" choice the same way.
+     */
+    var receiptFormat: String
+        get() = s.getStringOrNull(key(BillingPrefs.K_FORMAT))
+            ?: if (s.getInt(key(BillingPrefs.K_PAPER), 32) >= 64) "a4" else "thermal"
+        set(v) = s.putString(key(BillingPrefs.K_FORMAT), v)
+
     /** Character width: 32 ≈ 58mm roll, 48 ≈ 80mm roll, 64 ≈ A4. */
     var paperWidth: Int
         get() = s.getInt(key(BillingPrefs.K_PAPER), if (kind == PrintKind.REPORT) 64 else 32)
@@ -77,6 +90,7 @@ class PrintProfile(private val kind: PrintKind) {
     val summary: String
         get() {
             if (!enabled) return "Printing off"
+            if (kind == PrintKind.INVOICE && receiptFormat == "a4") return "A4 sheet · system dialog"
             val where = when (connection) {
                 "network" -> if (ip.isBlank()) "LAN (no IP set)" else "LAN $ip:$port"
                 "bluetooth" -> btName.ifBlank { btAddress }.ifBlank { "Bluetooth (none selected)" }

@@ -36,6 +36,8 @@ import com.bnm.diagnosis.chat.LocalBillingRepository
 import com.bnm.diagnosis.print.BtPrinter
 import com.bnm.diagnosis.print.EscPos
 import com.bnm.diagnosis.print.bucketLinesByStation
+import com.bnm.diagnosis.print.layoutInvoiceA4
+import com.bnm.diagnosis.print.printA4
 import com.bnm.diagnosis.print.printReceipt
 import com.bnm.diagnosis.print.printToNetworkPrinter
 import com.bnm.diagnosis.print.renderReceiptText
@@ -127,6 +129,17 @@ fun SaveResultDialog(
                 return true
             }
 
+            if (prefs.receiptFormat == "a4") {
+                // A4 sheet billing: the invoice prints as a laid-out full page via
+                // the system dialog. Collection tokens are thermal dockets by
+                // nature — they still go to their stations' own LAN printers; a
+                // station without one is reported rather than silently skipped.
+                for ((st, tokenBody) in tokens) {
+                    if (!printStationDirect(st, tokenBody))
+                        tokenFailures += "Token for ${st.name.ifBlank { st.key }}: set a station printer IP (A4 mode)"
+                }
+                return@withContext printA4(layoutInvoiceA4(settings, businessName, invoice))
+            }
             when (prefs.printerConnection) {
                 "network", "bluetooth" -> {
                     suspend fun send(text: String): String =
@@ -170,7 +183,8 @@ fun SaveResultDialog(
         }
         // Thermal transports report success as "Sent to …"; the system sheet is
         // user-mediated, so reaching it counts as handed off.
-        val ok = result.startsWith("Sent to") || prefs.printerConnection !in setOf("network", "bluetooth")
+        val ok = result.startsWith("Sent to") || prefs.receiptFormat == "a4" ||
+            prefs.printerConnection !in setOf("network", "bluetooth")
         if (ok) {
             prefs.markInvoicePrinted(invoice.id); printed = true
             if (tokenFailures.isNotEmpty()) printMsg = tokenFailures.joinToString("\n")

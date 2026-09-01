@@ -163,6 +163,7 @@ private fun PrinterProfileCard(
     var ip by remember(kind) { mutableStateOf(profile.ip) }
     var port by remember(kind) { mutableStateOf(profile.port.toString()) }
     var paper by remember(kind) { mutableStateOf(profile.paperWidth) }
+    var format by remember(kind) { mutableStateOf(profile.receiptFormat) }
     var autoPrint by remember(kind) { mutableStateOf(profile.autoPrint) }
     var copies by remember(kind) { mutableStateOf(profile.copies) }
 
@@ -276,22 +277,46 @@ private fun PrinterProfileCard(
             HorizontalDivider(color = c.border)
 
             // ── On what paper ──
-            Text("Paper", style = MaterialTheme.typography.labelLarge)
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                ChoiceChip("58 mm", paper == 32) { paper = 32; profile.paperWidth = 32 }
-                ChoiceChip("80 mm", paper == 48) { paper = 48; profile.paperWidth = 48 }
-                ChoiceChip("A4", paper == 64) { paper = 64; profile.paperWidth = 64 }
+            if (kind == PrintKind.INVOICE) {
+                // The two receipt DESIGNS are different documents: a thermal roll
+                // docket vs a full-page laid-out tax invoice.
+                Text("Receipt format", style = MaterialTheme.typography.labelLarge)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    ChoiceChip("Thermal roll", format == "thermal") { format = "thermal"; profile.receiptFormat = "thermal" }
+                    ChoiceChip("A4 sheet", format == "a4") { format = "a4"; profile.receiptFormat = "a4" }
+                }
+                if (format == "a4") {
+                    Text(
+                        "Prints a full-page tax invoice — letterhead, items table, tax breakup and " +
+                            "signatory block — through the system print dialog. The transport above then " +
+                            "only matters for collection tokens (each station's own LAN printer).",
+                        style = MaterialTheme.typography.bodySmall, color = c.textSecondary,
+                    )
+                }
             }
-            // A4 and a direct ESC/POS transport genuinely cannot both be true. Say
-            // so instead of accepting a setting that quietly prints garbage.
-            if (paper == 64 && conn != "system") {
-                Caution(
-                    "A4 only works through the system print dialog. A LAN or Bluetooth thermal printer " +
-                        "takes 58 or 80 mm rolls — pick a roll width, or switch this document to the system dialog.",
-                )
+            if (kind != PrintKind.INVOICE || format == "thermal") {
+                Text("Paper", style = MaterialTheme.typography.labelLarge)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    ChoiceChip("58 mm", paper == 32) { paper = 32; profile.paperWidth = 32 }
+                    ChoiceChip("80 mm", paper == 48) { paper = 48; profile.paperWidth = 48 }
+                    if (kind != PrintKind.INVOICE) {
+                        ChoiceChip("A4", paper == 64) { paper = 64; profile.paperWidth = 64 }
+                    }
+                }
+                // A4 and a direct ESC/POS transport genuinely cannot both be true. Say
+                // so instead of accepting a setting that quietly prints garbage.
+                if (paper == 64 && conn != "system") {
+                    Caution(
+                        "A4 only works through the system print dialog. A LAN or Bluetooth thermal printer " +
+                            "takes 58 or 80 mm rolls — pick a roll width, or switch this document to the system dialog.",
+                    )
+                }
             }
             if (kind == PrintKind.REPORT && paper != 64) {
                 Text(

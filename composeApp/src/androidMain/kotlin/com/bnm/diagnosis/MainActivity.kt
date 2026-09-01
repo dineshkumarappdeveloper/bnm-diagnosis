@@ -15,6 +15,7 @@ class MainActivity : ComponentActivity() {
         com.bnm.diagnosis.db.initDbContext(this)
         com.bnm.diagnosis.connectivity.initConnectivityContext(this)
         com.bnm.diagnosis.print.initPrintContext(this)
+        com.bnm.diagnosis.print.initA4Print(this) // A4 sheet billing needs the Activity
         com.bnm.diagnosis.print.initBtPrinterContext(this)
         com.bnm.diagnosis.report.initReportContext(this) // A4 PDF reports (open/print)
         setContent { App() }
