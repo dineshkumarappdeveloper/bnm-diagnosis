@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -107,6 +108,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.bnm.diagnosis.report.ReportAssembler
 import com.bnm.diagnosis.staff.LocalStaffRepository
+import com.bnm.diagnosis.util.formatDecimal2
+import com.bnm.diagnosis.screens.billing.CollectPaymentDialog
 
 /** Statuses in which result entry is still open (mirrors the repo's guard). */
 private val ENTRY_OPEN = setOf(LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED)
@@ -183,8 +186,19 @@ fun OrderDetailScreen(
     var showApprove by remember { mutableStateOf(false) }
     var showCancel by remember { mutableStateOf(false) }
     var showPrintChooser by remember { mutableStateOf(false) }
+    // Payment gate on RELEASE. A lab hands the report over when the bill is
+    // settled, so an outstanding balance blocks print/share — but never blocks
+    // result entry, verification or approval, which are clinical acts.
+    var showPaymentDue by remember { mutableStateOf(false) }
+    var showCollect by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var billBusy by remember { mutableStateOf(false) }
+    // Null when the order has no bill at all (nothing to owe) — the gate then
+    // stays out of the way rather than blocking a report that was never billed.
+    val bill by billing.invoiceBalanceFlow(businessId, order?.invoiceId.orEmpty())
+        .collectAsState(null)
+    val amountDue: Double = bill?.takeIf { !it.isSettled }?.balance ?: 0.0
+    val paymentBlocksRelease: Boolean = amountDue > 0.005
 
     /** Retro-bill an order registered without one (e.g. billing wasn't set up
      *  yet at registration): same snapshot lines as at registration — names and
@@ -281,6 +295,16 @@ fun OrderDetailScreen(
     /** Styled A4 PDF path: write, then open in the viewer or send to the OS
      *  print pipeline. Success (not cancelled/failed) marks approved → reported. */
     suspend fun pdfReport(print: Boolean): Boolean {
+        // Authoritative gate. The button that opens the chooser already checks
+        // this, but a UI-only guard is not a guard: the flow could re-emit
+        // unsettled between opening the chooser and tapping, and a future caller
+        // might not know to check. Refusing here is what actually holds.
+        if (paymentBlocksRelease) {
+            message = "Balance of ₹ ${formatDecimal2(amountDue)} due — settle the bill to release this report."
+            showPaymentDue = true
+            return false
+        }
+
         val doc = buildDoc() ?: return false
         val status = withContext(Dispatchers.Default) {
             val path = writeLabReportPdf(doc)
@@ -302,6 +326,16 @@ fun OrderDetailScreen(
     /** Legacy monospace slip on the configured LAN/BT thermal printer (the
      *  renderLabReport text path — kept for sample-tube counter slips). */
     suspend fun printThermalSlip(): Boolean {
+        // Authoritative gate. The button that opens the chooser already checks
+        // this, but a UI-only guard is not a guard: the flow could re-emit
+        // unsettled between opening the chooser and tapping, and a future caller
+        // might not know to check. Refusing here is what actually holds.
+        if (paymentBlocksRelease) {
+            message = "Balance of ₹ ${formatDecimal2(amountDue)} due — settle the bill to release this report."
+            showPaymentDue = true
+            return false
+        }
+
         val ord = order ?: return false
         val pat = patient ?: return false
         val bp = BillingPrefs()
@@ -412,7 +446,14 @@ fun OrderDetailScreen(
                             },
                             canApprove = canApprove,
                             onApprove = { session.touch(); showApprove = true },
-                            onPrint = { if (!busy) showPrintChooser = true },
+                            onPrint = {
+                                if (!busy) {
+                                    // Release is the commercial gate: an unpaid
+                                    // balance stops the report leaving the lab.
+                                    if (paymentBlocksRelease) showPaymentDue = true
+                                    else showPrintChooser = true
+                                }
+                            },
                         )
                     }
                 }
@@ -547,6 +588,31 @@ fun OrderDetailScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("The approving pathologist's name prints on every report.", style = MaterialTheme.typography.bodySmall)
+                    // Surface the balance HERE too, so the pathologist signing off
+                    // knows the report will not go out yet — but approval itself is
+                    // never blocked. Sign-off is a clinical act: withholding it on a
+                    // money question would strand an abnormal result unverified and
+                    // delay the critical-value call the lab is obliged to make.
+                    if (paymentBlocksRelease) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            shape = MaterialTheme.shapes.small,
+                        ) {
+                            Column(Modifier.padding(10.dp)) {
+                                Text(
+                                    "Balance due ₹ ${formatDecimal2(amountDue)}",
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                )
+                                Text(
+                                    "You can approve now, but the report cannot be printed " +
+                                        "or shared until the bill is settled.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                )
+                            }
+                        }
+                    }
                     if (signer != null) {
                         Text(signer.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                         Text(
@@ -584,6 +650,75 @@ fun OrderDetailScreen(
     }
 
     // ── Print chooser: styled A4 PDF (open / print) + optional thermal slip ──
+    // ── Payment due: blocks RELEASE, offers to settle right here ──────────────
+    if (showPaymentDue && o != null) {
+        val due = amountDue
+        AlertDialog(
+            onDismissRequest = { showPaymentDue = false },
+            title = { Text("Balance due — report not released") },
+            text = {
+                Column {
+                    Text(
+                        "This order still has an outstanding balance. The report can " +
+                            "be printed or shared once the bill is settled.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    bill?.let { b ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Bill total", style = MaterialTheme.typography.bodySmall)
+                            Text("₹ " + formatDecimal2(b.invoice.total), style = MaterialTheme.typography.bodySmall)
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Collected", style = MaterialTheme.typography.bodySmall)
+                            Text("₹ " + formatDecimal2(b.collected), style = MaterialTheme.typography.bodySmall)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Balance due", fontWeight = FontWeight.Bold)
+                            Text("₹ " + formatDecimal2(due), fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error)
+                        }
+                        if (b.hasQueuedPayment) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "A payment taken on this device hasn't reached the server " +
+                                    "yet — it is already counted above.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = { showPaymentDue = false; showCollect = true }) {
+                    Text("Collect ₹ ${formatDecimal2(due)}")
+                }
+            },
+            dismissButton = { TextButton(onClick = { showPaymentDue = false }) { Text("Not now") } },
+        )
+    }
+
+    // Reuses the billing screen's collector so a balance taken here behaves
+    // exactly like one taken on the bill: queued through the outbox, idempotent,
+    // and correct with no network.
+    if (showCollect) {
+        bill?.let { b ->
+            CollectPaymentDialog(
+                businessId = businessId,
+                bill = b,
+                onDismiss = { showCollect = false },
+                onCollected = {
+                    showCollect = false
+                    // The flow re-emits with the queued tender included, so by the
+                    // time the chooser opens the gate has already re-evaluated.
+                    showPrintChooser = true
+                },
+            )
+        }
+    }
+
     if (showPrintChooser && o != null) {
         val thermalAvailable = remember {
             val conn = BillingPrefs().printerConnection
