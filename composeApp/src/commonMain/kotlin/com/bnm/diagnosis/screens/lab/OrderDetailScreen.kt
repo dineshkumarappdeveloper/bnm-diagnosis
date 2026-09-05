@@ -223,7 +223,7 @@ fun OrderDetailScreen(
                 customerName = p.name,
                 customerPhone = p.phone?.trim()?.ifBlank { null },
                 customerGstin = null,
-                lines = tests.map { GstLine(description = it.testName, hsn = null, quantity = 1.0, rate = it.price, gstRate = 0.0) },
+                lines = tests.map { GstLine(description = it.testName, hsn = null, quantity = 1.0, rate = it.price, gstRate = 0.0, productId = catalog[it.testId]?.platformProductId) },
                 dueDays = billSettings?.dueDays ?: 7,
                 notes = "Lab order ${o.accessionNo}",
             ).onSuccess { inv ->

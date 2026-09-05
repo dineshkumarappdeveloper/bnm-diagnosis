@@ -243,7 +243,13 @@ fun NewOrderScreen(
                 // there) — diagnostic services are NIL-GST in India (gstRate 0).
                 val orderTests = runCatching { labRepo.orderTests(order.id) }.getOrDefault(emptyList())
                 billLines = orderTests.map {
-                    GstLine(description = it.testName, hsn = null, quantity = 1.0, rate = it.price, gstRate = 0.0)
+                    GstLine(
+                        description = it.testName, hsn = null, quantity = 1.0, rate = it.price, gstRate = 0.0,
+                        // Platform product link (adopted tests carry it): the POS
+                        // mirror then projects a linked order line, which is what
+                        // fires the consumables-BOM stock deduction + margin/COGS.
+                        productId = runCatching { labRepo.testById(it.testId)?.platformProductId }.getOrNull(),
+                    )
                 }
                 savedOrder = order   // → PaymentSheet
                 saving = false
