@@ -48,6 +48,9 @@ sealed class Screen(val route: String) {
     data object CustomerDetails : Screen("customer_details")
     data object Settings : Screen("settings")
     data object PrintSettings : Screen("print_settings")
+    /** Analyzer interfacing (I0): configure connected lab machines, claim
+     *  unmatched instrument results, watch the raw traffic log. */
+    data object Instruments : Screen("instruments")
 
     /** Bluetooth printer picker. Carries the PRINT KIND it is choosing for —
      *  invoice and report can be on different printers, so the picker has to

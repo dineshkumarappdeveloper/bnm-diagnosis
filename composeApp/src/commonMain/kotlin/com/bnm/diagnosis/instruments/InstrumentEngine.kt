@@ -1,0 +1,594 @@
+package com.bnm.diagnosis.instruments
+
+import app.cash.sqldelight.coroutines.asFlow
+import app.cash.sqldelight.coroutines.mapToList
+import com.bnm.diagnosis.db.AppDatabase
+import com.bnm.diagnosis.db.Instrument_log
+import com.bnm.diagnosis.db.Instrument_results
+import com.bnm.diagnosis.db.Instruments
+import com.bnm.diagnosis.lab.DiagnosisPrefs
+import com.bnm.diagnosis.lab.LabOrder
+import com.bnm.diagnosis.lab.LabRepository
+import com.bnm.diagnosis.lab.LabStatus
+import com.bnm.diagnosis.lab.LabTest
+import io.ktor.network.selector.SelectorManager
+import io.ktor.network.sockets.aSocket
+import io.ktor.network.sockets.openReadChannel
+import io.ktor.utils.io.readAvailable
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.json.Json
+import kotlin.uuid.ExperimentalUuidApi
+import kotlin.uuid.Uuid
+
+/**
+ * Analyzer interfacing engine (I0/I1) — the always-on listener service.
+ *
+ * One listener per enabled [InstrumentConfig]: a TCP accept loop (ktor-network,
+ * works on every target — also the simulator/test path) or a serial data
+ * listener (desktop only, jSerialComm). Received bytes flow through a
+ * per-connection [FrameAssembler] — a single-consumer channel, so chunks are
+ * processed strictly in arrival order — until a complete protocol frame
+ * appears; the frame is parsed by the instrument's driver and applied to the
+ * matching lab order **through [LabRepository.enterResult]** — the single
+ * result write path — so instrument values get flags/ref-ranges frozen,
+ * per-test + order status walking, and `entered_by = <instrument name>` in
+ * the audit trail exactly like a human entry. Measured histograms land in
+ * `lab_result_graphs`.
+ *
+ * Frames that can't be matched to an order (specimen id not keyed on the
+ * analyzer, unknown accession) are stored in `instrument_results` — the claim
+ * queue — for one-tap assignment from the Instruments screen.
+ *
+ * Fully offline: nothing here touches the network beyond LISTENING on a local
+ * port; licence/sync state is irrelevant (results still reach the platform
+ * later via the normal sync spine). Lifecycle follows BillingOutboxSender:
+ * app-lifetime scope, constructed once in App(), started from a
+ * LaunchedEffect. A tenant switch calls [stopAll] BEFORE the wipe so a frame
+ * arriving mid-switch can't seed the new tenant with the old lab's data.
+ */
+@OptIn(ExperimentalUuidApi::class)
+class InstrumentEngine(
+    private val db: AppDatabase,
+    private val labRepo: LabRepository,
+    private val json: Json,
+    private val prefs: DiagnosisPrefs = DiagnosisPrefs(),
+) {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val q get() = db.instrumentsQueries
+    private val restartMutex = Mutex()
+    private val listeners = mutableMapOf<String, ListenerHandle>()
+
+    private val _status = MutableStateFlow<Map<String, InstrumentStatus>>(emptyMap())
+    val status: StateFlow<Map<String, InstrumentStatus>> = _status
+
+    /** What one apply attempt did — the live path queues on !matched, the
+     *  claim path surfaces it as an error instead (never re-queue, never
+     *  mark applied). */
+    data class ApplyOutcome(val matched: Boolean, val applied: Int, val summary: String)
+
+    private class ListenerHandle(
+        val job: Job?,
+        val serial: SerialHandle?,
+        val assembler: FrameAssembler?,
+    ) {
+        fun close() {
+            runCatching { serial?.close() }
+            assembler?.abandon()
+            job?.cancel()
+        }
+    }
+
+    // ── lifecycle ──
+
+    fun start() {
+        scope.launch { restartAll() }
+    }
+
+    /** Tear down and relaunch every listener from current config. Called on
+     *  start and after any config change from the Instruments screen. */
+    suspend fun restartAll() = restartMutex.withLock {
+        withContext(Dispatchers.Default) {
+            listeners.values.forEach { it.close() }
+            listeners.clear()
+            val configs = runCatching { q.listInstruments().executeAsList().map { it.toModel() } }
+                .getOrDefault(emptyList())
+            val next = mutableMapOf<String, InstrumentStatus>()
+            for (cfg in configs) {
+                next[cfg.id] =
+                    if (!cfg.enabled) InstrumentStatus("off", "Disabled")
+                    else launchListener(cfg)
+            }
+            _status.value = next
+        }
+    }
+
+    /** Stop every listener without touching config. Used by the tenant-switch
+     *  wipe: no analyzer byte may land between "old lab erased" and "new lab
+     *  activated". [restartAll] brings listeners back. */
+    suspend fun stopAll() = restartMutex.withLock {
+        listeners.values.forEach { it.close() }
+        listeners.clear()
+        _status.value = _status.value.mapValues { InstrumentStatus("off", "Stopped") }
+    }
+
+    private fun launchListener(cfg: InstrumentConfig): InstrumentStatus = when (cfg.transport) {
+        InstrumentTransport.TCP -> {
+            val port = cfg.tcpPort
+            if (port == null || port !in 1..65535) {
+                InstrumentStatus("error", "No TCP port set")
+            } else {
+                val job = scope.launch { tcpListenLoop(cfg, port) }
+                listeners[cfg.id] = ListenerHandle(job, serial = null, assembler = null)
+                InstrumentStatus("listening", "TCP port $port")
+            }
+        }
+        InstrumentTransport.SERIAL -> {
+            val portName = cfg.serialPort
+            when {
+                !serialSupported() ->
+                    InstrumentStatus("error", "Serial isn't available on this device — use the lab PC")
+                portName.isNullOrBlank() ->
+                    InstrumentStatus("error", "No serial port chosen")
+                else -> {
+                    val assembler = FrameAssembler(cfg)
+                    // submit() (not launch-per-chunk): jSerialComm delivers
+                    // chunks sequentially on its listener thread, and the
+                    // assembler's single consumer preserves that order —
+                    // separate coroutine launches would not.
+                    val handle = openSerialPort(
+                        portName, cfg.baud,
+                        onData = { bytes -> assembler.submit(bytes) },
+                        onClosed = { reason ->
+                            setStatus(cfg.id, InstrumentStatus("error", reason ?: "Serial port closed"))
+                            scope.launch { logRow(cfg, "error", reason ?: "Serial port closed", null) }
+                        },
+                    )
+                    if (handle == null) {
+                        assembler.abandon()
+                        InstrumentStatus("error", "Couldn't open $portName — in use, or unplugged?")
+                    } else {
+                        listeners[cfg.id] = ListenerHandle(job = null, serial = handle, assembler = assembler)
+                        InstrumentStatus("listening", "$portName @ ${cfg.baud}")
+                    }
+                }
+            }
+        }
+        else -> InstrumentStatus("error", "Unknown transport '${cfg.transport}'")
+    }
+
+    private suspend fun tcpListenLoop(cfg: InstrumentConfig, port: Int) {
+        val selector = SelectorManager(Dispatchers.Default)
+        try {
+            val server = aSocket(selector).tcp().bind("0.0.0.0", port)
+            try {
+                logRow(cfg, "info", "Listening on TCP port $port", null)
+                while (currentCoroutineContext().isActive) {
+                    val socket = server.accept()
+                    scope.launch {
+                        // One assembler per connection: analyzers open, send, close.
+                        val assembler = FrameAssembler(cfg)
+                        try {
+                            val channel = socket.openReadChannel()
+                            val buf = ByteArray(8 * 1024)
+                            while (true) {
+                                val n = channel.readAvailable(buf, 0, buf.size)
+                                if (n < 0) break
+                                if (n > 0) assembler.submit(buf.copyOf(n))
+                            }
+                        } finally {
+                            runCatching { socket.close() }
+                            assembler.finish()
+                        }
+                    }
+                }
+            } finally {
+                runCatching { server.close() }
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            setStatus(cfg.id, InstrumentStatus("error", e.message ?: "TCP listen failed on port $port"))
+            logRow(cfg, "error", "TCP listen failed: ${e.message}", null)
+        } finally {
+            runCatching { selector.close() }
+        }
+    }
+
+    private fun setStatus(id: String, s: InstrumentStatus) {
+        _status.value = _status.value + (id to s)
+    }
+
+    /**
+     * Byte accumulator → complete frames → ingest. All producers hand bytes to
+     * [submit]; a single consumer coroutine processes them strictly in arrival
+     * order (an unbounded channel, closed on [finish]/[abandon]).
+     */
+    private inner class FrameAssembler(private val cfg: InstrumentConfig) {
+        private val buffer = StringBuilder()
+        private val intake = Channel<ByteArray>(Channel.UNLIMITED)
+        private val job: Job = scope.launch {
+            for (bytes in intake) {
+                buffer.append(bytes.decodeToString())
+                if (buffer.length > 512 * 1024) buffer.deleteRange(0, buffer.length - 256 * 1024)
+                drainFrames()
+            }
+            if (buffer.isNotBlank()) {
+                logRow(cfg, "info",
+                    "Connection closed with ${buffer.length} unframed bytes (ignored)",
+                    buffer.toString())
+            }
+            buffer.setLength(0)
+        }
+
+        /** Thread-safe, non-suspending — callable straight from the serial
+         *  listener thread. Order of calls = order of processing. */
+        fun submit(bytes: ByteArray) {
+            intake.trySend(bytes)
+        }
+
+        /** Close the intake and wait until every queued byte was processed. */
+        suspend fun finish() {
+            intake.close()
+            job.join()
+        }
+
+        fun abandon() {
+            intake.close()
+            job.cancel()
+        }
+
+        private suspend fun drainFrames() {
+            while (true) {
+                when (cfg.driver) {
+                    "mispa_count_x" -> {
+                        val (frame, rest) = MispaCountX.extractFrame(buffer.toString())
+                        buffer.setLength(0); buffer.append(rest)
+                        if (frame == null) return
+                        ingestMispa(cfg, frame)
+                    }
+                    else -> {
+                        logRow(cfg, "error", "No parser for driver '${cfg.driver}'", null)
+                        buffer.setLength(0)
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    // ── ingestion (Mispa Count X) ──
+
+    private suspend fun ingestMispa(cfg: InstrumentConfig, frame: MispaCountX.Frame) {
+        setStatus(cfg.id, InstrumentStatus("listening",
+            _status.value[cfg.id]?.detail, lastFrameAt = nowIso()))
+        val stored = StoredInstrumentFrame(
+            driver = cfg.driver,
+            specimenId = frame.specimenId,
+            patientId = frame.patientId,
+            date = frame.date,
+            sequenceId = frame.sequenceId,
+            params = frame.params,
+            histograms = frame.histograms,
+            meta = buildMap {
+                frame.discriminators?.let { put("discriminators", it) }
+                if (frame.diseaseFlags.isNotEmpty()) put("disease_flags", frame.diseaseFlags.joinToString("; "))
+            },
+        )
+        logRow(cfg, "rx",
+            "Result frame · specimen ${frame.specimenId ?: "—"} · ${frame.params.size} params · " +
+                "${frame.histograms.size} histograms", frame.raw)
+
+        val order = frame.specimenId?.let { findOrder(it) }
+        if (order == null) {
+            queueUnmatched(cfg, stored,
+                if (frame.specimenId == null) "no specimen id keyed on the analyzer"
+                else "no order matches '${frame.specimenId}'")
+            return
+        }
+        if (order.status !in ENTRY_OPEN) {
+            queueUnmatched(cfg, stored, "order ${order.accessionNo} is ${order.status} — results locked")
+            return
+        }
+        val outcome = applyFrameToOrder(cfg, stored, order)
+        if (!outcome.matched) queueUnmatched(cfg, stored, outcome.summary)
+    }
+
+    /**
+     * Exact accession first, then numeric-tail resolution ('42' → ACC-S1-00042).
+     * The tail shortcut only auto-applies to THIS seat's own series: on a
+     * multi-seat lab another seat's ACC-S2-00042 may not have synced here yet,
+     * so a bare '42' meant for it would silently land on the wrong patient.
+     * Other seats' samples take the claim queue (one tap) instead.
+     */
+    private suspend fun findOrder(specimenId: String): LabOrder? {
+        labRepo.orderByAccession(specimenId.trim())?.let { return it }
+        val digits = specimenId.trim().takeIf { it.isNotEmpty() && it.all { c -> c.isDigit() } }
+            ?: return null
+        val tail = digits.trimStart('0').ifEmpty { "0" }.padStart(5, '0')
+        val hits = withContext(Dispatchers.Default) {
+            q.ordersByAccessionTail(tail).executeAsList()
+        }
+        if (hits.size != 1) return null       // ambiguous or none → claim queue
+        val ownSeries = "${prefs.accessionPrefix}-${prefs.accessionSeat}-"
+        if (!hits[0].accession_no.startsWith(ownSeries, ignoreCase = true)) return null
+        return labRepo.orderById(hits[0].id)
+    }
+
+    /**
+     * Write a stored frame into [order]: pick the ordered test whose catalog
+     * parameters best overlap the analyzer's params, then enterResult() each
+     * mapped value and persist histograms against that test. Pure apply — the
+     * CALLER decides what a non-match means (live path queues it, claim path
+     * reports it).
+     */
+    suspend fun applyFrameToOrder(cfg: InstrumentConfig, stored: StoredInstrumentFrame, order: LabOrder): ApplyOutcome {
+        val overrides = parseOverrides(cfg.paramMapJson)
+        val tests = labRepo.orderTests(order.id)
+        var best: Pair<LabTest, Map<String, String>>? = null   // test → analyzerKey→paramKey
+        for (ot in tests) {
+            val test = labRepo.testById(ot.testId) ?: continue
+            val mapping = mapParams(stored.params.keys, test, overrides)
+            if (mapping.isNotEmpty() && mapping.size > (best?.second?.size ?: 0)) {
+                best = test to mapping
+            }
+        }
+        val (test, mapping) = best
+            ?: return ApplyOutcome(false, 0,
+                "no ordered test on ${order.accessionNo} takes these parameters")
+
+        var applied = 0
+        val failed = mutableListOf<String>()
+        for ((analyzerKey, paramKey) in mapping) {
+            val value = stored.params[analyzerKey] ?: continue
+            labRepo.enterResult(order.id, test.id, paramKey, value, enteredBy = cfg.name)
+                .onSuccess { applied++ }
+                .onFailure { failed += "$analyzerKey: ${it.message}" }
+        }
+        val unmappedCount = stored.params.size - mapping.size
+
+        if (stored.histograms.isNotEmpty()) {
+            val now = nowIso()
+            val meta = stored.meta.takeIf { it.isNotEmpty() }
+                ?.let { m -> json.encodeToString(STRING_MAP, m) }
+            withContext(Dispatchers.Default) {
+                for ((kind, points) in stored.histograms) {
+                    q.upsertGraph(order.id, test.id, kind,
+                        json.encodeToString(DOUBLE_LIST, points), meta, now)
+                }
+            }
+        }
+
+        val summary = buildString {
+            append("Applied $applied/${stored.params.size} params to ${order.accessionNo} · ${test.name}")
+            if (stored.histograms.isNotEmpty()) append(" · ${stored.histograms.size} histograms")
+            if (unmappedCount > 0) append(" · $unmappedCount unmapped")
+            if (failed.isNotEmpty()) append(" · ${failed.size} failed (${failed.first()})")
+        }
+        logRow(cfg, "info", summary, null)
+        return ApplyOutcome(true, applied, summary)
+    }
+
+    // ── claim queue ──
+
+    private suspend fun queueUnmatched(cfg: InstrumentConfig, stored: StoredInstrumentFrame, reason: String) {
+        withContext(Dispatchers.Default) {
+            q.insertUnmatched(
+                Uuid.random().toString(), cfg.id.ifBlank { null }, stored.specimenId,
+                json.encodeToString(StoredInstrumentFrame.serializer(), stored), nowIso(),
+            )
+        }
+        logRow(cfg, "info", "Queued for manual claim — $reason", null)
+    }
+
+    /** Claim-queue apply: operator typed/scanned an accession for a stored
+     *  frame. The row is marked applied ONLY when results actually landed. */
+    suspend fun claimUnmatched(resultId: String, accessionNo: String): Result<String> = runCatching {
+        val row = withContext(Dispatchers.Default) { q.unmatchedById(resultId).executeAsOneOrNull() }
+            ?: error("That result is gone")
+        require(row.status == "unmatched") { "Already ${row.status} — nothing to apply" }
+        val stored = json.decodeFromString(StoredInstrumentFrame.serializer(), row.payload_json)
+        val typed = accessionNo.trim()
+        val order = labRepo.orderByAccession(typed)
+            ?: labRepo.orderByAccession(typed.uppercase())
+            ?: labRepo.orderByAccession(typed.lowercase())
+            ?: error("No order with accession $typed")
+        require(order.status in ENTRY_OPEN) { "Order ${order.accessionNo} is ${order.status} — results are locked" }
+        val cfg = row.instrument_id?.let { id ->
+            withContext(Dispatchers.Default) { q.instrumentById(id).executeAsOneOrNull()?.toModel() }
+        } ?: InstrumentConfig(id = "", name = "Analyzer", driver = stored.driver, transport = InstrumentTransport.TCP)
+        val outcome = applyFrameToOrder(cfg, stored, order)
+        if (!outcome.matched) error("No test on ${order.accessionNo} takes these parameters — check the ordered tests")
+        withContext(Dispatchers.Default) { q.markResultApplied(order.id, nowIso(), resultId) }
+        outcome.summary
+    }
+
+    suspend fun discardUnmatched(resultId: String) = withContext(Dispatchers.Default) {
+        q.markResultDiscarded(nowIso(), resultId)
+    }
+
+    // ── config CRUD + observation (Instruments screen) ──
+
+    fun instrumentsFlow(): Flow<List<InstrumentConfig>> =
+        q.listInstruments().asFlow().mapToList(Dispatchers.Default)
+            .map { rows -> rows.map { it.toModel() } }
+
+    fun logFlow(limit: Long = 100): Flow<List<Instrument_log>> =
+        q.recentLog(limit).asFlow().mapToList(Dispatchers.Default)
+
+    fun unmatchedFlow(): Flow<List<Instrument_results>> =
+        q.listUnmatched().asFlow().mapToList(Dispatchers.Default)
+
+    suspend fun saveInstrument(cfg: InstrumentConfig) {
+        withContext(Dispatchers.Default) {
+            val now = nowIso()
+            q.upsertInstrument(
+                cfg.id.ifBlank { Uuid.random().toString() }, cfg.name.trim().ifBlank { "Analyzer" },
+                cfg.driver, cfg.transport, cfg.serialPort?.trim()?.ifBlank { null },
+                cfg.baud.toLong(), cfg.tcpPort?.toLong(),
+                if (cfg.enabled) 1L else 0L, cfg.paramMapJson,
+                cfg.createdAt.ifBlank { now }, now,
+            )
+        }
+        restartAll()
+    }
+
+    suspend fun deleteInstrument(id: String) {
+        withContext(Dispatchers.Default) { q.deleteInstrument(id) }
+        restartAll()
+    }
+
+    suspend fun clearLog() = withContext(Dispatchers.Default) { q.clearLog() }
+
+    // ── internals ──
+
+    private suspend fun logRow(cfg: InstrumentConfig, direction: String, summary: String, raw: String?) {
+        runCatching {
+            withContext(Dispatchers.Default) {
+                q.insertLog(Uuid.random().toString(), cfg.id.ifBlank { null }, cfg.name,
+                    direction, summary.take(500), raw?.take(4000), nowIso())
+                q.trimLog(500)
+            }
+        }
+    }
+
+    private fun parseOverrides(paramMapJson: String?): Map<String, String> =
+        paramMapJson?.let { raw ->
+            runCatching { json.decodeFromString(STRING_MAP, raw) }.getOrNull()
+        } ?: emptyMap()
+
+    private fun Instruments.toModel() = InstrumentConfig(
+        id = id, name = name, driver = driver_key, transport = transport,
+        serialPort = serial_port, baud = baud.toInt(), tcpPort = tcp_port?.toInt(),
+        enabled = enabled == 1L, paramMapJson = param_map_json,
+        createdAt = created_at, updatedAt = updated_at,
+    )
+
+    companion object {
+        private val ENTRY_OPEN = setOf(
+            LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED,
+        )
+
+        private val STRING_MAP = MapSerializer(String.serializer(), String.serializer())
+        private val DOUBLE_LIST = ListSerializer(Double.serializer())
+
+        /** "LYMP%" → "lymppct", "MID#" → "midabs", "RDW-SD" → "rdwsd". */
+        internal fun norm(s: String): String =
+            s.replace("%", "pct").replace("#", "abs")
+                .lowercase().filter { it.isLetterOrDigit() }
+
+        /**
+         * Conservative built-in synonyms per Mispa param. Anything not
+         * matched stays unmapped (visible in the log) — the config's explicit
+         * param map is the intended fix, never a fuzzy guess. Notably GRAN%
+         * is NOT mapped to "neutrophils": a 3-part granulocyte count isn't a
+         * neutrophil count; that substitution is the lab's call to configure.
+         */
+        internal val MISPA_ALIASES: Map<String, List<String>> = mapOf(
+            "WBC" to listOf("wbc", "twbc", "tlc", "totalwbccount", "totalleucocytecount", "totalleukocytecount", "wbccount"),
+            "RBC" to listOf("rbc", "rbccount", "totalrbc", "totalrbccount"),
+            "PLT" to listOf("plt", "platelet", "platelets", "plateletcount", "pltcount"),
+            "HGB" to listOf("hgb", "hb", "haemoglobin", "hemoglobin"),
+            "HCT" to listOf("hct", "pcv", "haematocrit", "hematocrit", "packedcellvolume"),
+            "MCV" to listOf("mcv"),
+            "MCH" to listOf("mch"),
+            "MCHC" to listOf("mchc"),
+            "RDW-SD" to listOf("rdwsd"),
+            "RDW-CV" to listOf("rdwcv", "rdw"),
+            "MPV" to listOf("mpv"),
+            "LYMP%" to listOf("lymppct", "lympct", "lymphpct", "lymphocytespct", "lymphocytepct", "lym", "lymp", "lymph", "lymphocytes", "lymphocyte"),
+            "MID%" to listOf("midpct", "mid", "mixedpct", "mxdpct", "mixed", "mxd"),
+            "GRAN%" to listOf("granpct", "gran", "granulocytespct", "granulocytepct", "granulocytes", "grapct"),
+            "LYMP#" to listOf("lympabs", "lymabs", "lymphabs", "abslymphocytes", "lymphocytesabs"),
+            "MID#" to listOf("midabs", "mxdabs", "mixedabs"),
+            "GRAN#" to listOf("granabs", "granulocytesabs", "absgranulocytes", "graabs"),
+            "PCT" to listOf("plateletcrit"),
+            "PDW" to listOf("pdw"),
+            "LPCR" to listOf("lpcr", "plcr"),
+        )
+
+        /**
+         * analyzerKey → catalog parameter_key for one test. Explicit overrides
+         * win. Then TWO passes: exact normalised key/name equality first, and
+         * only afterwards whole-word name-token matches — a token match must be
+         * UNIQUE among the test's still-unclaimed parameters or it is skipped.
+         * A percentage key never binds a parameter whose name says absolute
+         * (and vice versa): "Lymphocytes" takes LYMP%, "Absolute Lymphocyte
+         * Count" doesn't. One catalog parameter never takes two analyzer
+         * values.
+         */
+        internal fun mapParams(
+            analyzerKeys: Collection<String>,
+            test: LabTest,
+            overrides: Map<String, String>,
+        ): Map<String, String> {
+            val out = LinkedHashMap<String, String>()
+            val catalogKeys = test.parameters.map { it.key }.toSet()
+
+            fun taken(paramKey: String) = out.values.any { it == paramKey }
+            fun crossKindClash(analyzerKey: String, pKeyN: String, pNameN: String): Boolean {
+                val n = pKeyN + pNameN
+                return when {
+                    analyzerKey.endsWith("%") -> "abs" in n || "absolute" in n
+                    analyzerKey.endsWith("#") -> "pct" in n || "percent" in n
+                    else -> false
+                }
+            }
+
+            val pending = mutableListOf<String>()
+            for (ak in analyzerKeys) {
+                val override = overrides[ak]
+                if (override != null) {
+                    if (override in catalogKeys && !taken(override)) out[ak] = override
+                    continue
+                }
+                pending += ak
+            }
+
+            // Pass 1: exact normalised key/name equality.
+            val stillPending = mutableListOf<String>()
+            for (ak in pending) {
+                val aliases = (MISPA_ALIASES[ak] ?: listOf(norm(ak))).toSet()
+                val hit = test.parameters.firstOrNull { p ->
+                    val keyN = norm(p.key); val nameN = norm(p.name)
+                    (keyN in aliases || nameN in aliases) &&
+                        !crossKindClash(ak, keyN, nameN) && !taken(p.key)
+                }
+                if (hit != null) out[ak] = hit.key else stillPending += ak
+            }
+
+            // Pass 2: whole-word name tokens — only when exactly ONE parameter
+            // qualifies, so "Lymphocytes" vs "Lymphocytes (manual)" maps neither.
+            for (ak in stillPending) {
+                val aliases = (MISPA_ALIASES[ak] ?: listOf(norm(ak))).toSet()
+                val candidates = test.parameters.filter { p ->
+                    val keyN = norm(p.key); val nameN = norm(p.name)
+                    val nameTokens = p.name.split(' ', '(', ')', '/', ',', '-')
+                        .map { norm(it) }.filter { it.isNotEmpty() }.toSet()
+                    nameTokens.any { it in aliases } &&
+                        !crossKindClash(ak, keyN, nameN) && !taken(p.key)
+                }
+                if (candidates.size == 1) out[ak] = candidates[0].key
+            }
+            return out
+        }
+    }
+}
+
+private fun nowIso(): String = kotlin.time.Clock.System.now().toString()

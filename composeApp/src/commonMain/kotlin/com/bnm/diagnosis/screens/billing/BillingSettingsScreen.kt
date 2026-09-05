@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.Biotech
+import androidx.compose.material.icons.outlined.Cable
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.CloudSync
 import androidx.compose.material.icons.outlined.DeleteSweep
@@ -112,6 +113,10 @@ fun BillingSettingsScreen(
     labSync: LabSyncEngine? = null,
     /** License-bound lab name — printed on the report letterhead (read-only here). */
     labName: String = "BNM Diagnosis",
+    /** I0: opens Instruments (analyzer interfacing). Null hides the row. */
+    onOpenInstruments: (() -> Unit)? = null,
+    /** Live one-liner for the Instruments row ("2 listening", "a listener is down"). */
+    instrumentsSummary: String? = null,
 ) {
     val repo = LocalBillingRepository.current
     val scope = rememberCoroutineScope()
@@ -223,6 +228,18 @@ fun BillingSettingsScreen(
                         },
                         onClick = { showBarcodeDialog = true },
                     )
+                    if (onOpenInstruments != null) {
+                        RowDivider()
+                        SettingsRow(
+                            icon = Icons.Outlined.Cable,
+                            tint = MaterialTheme.colorScheme.primary,
+                            title = "Instruments",
+                            subtitle = instrumentsSummary
+                                ?: "Connect analyzers — results enter themselves",
+                            subtitleMaxLines = 2,
+                            onClick = onOpenInstruments,
+                        )
+                    }
                 }
             }
 

@@ -78,6 +78,19 @@ DELETE FROM counter_series;
 wipeEcomEntity:
 DELETE FROM ecom_entity;
 
+-- Analyzer data: raw frames + unmatched results + measured graphs are patient
+-- data (the previous lab's), so they go too. The `instruments` connection
+-- config itself stays — the hardware wired to this PC doesn't change with the
+-- licence, exactly like printer settings.
+wipeInstrumentTraffic:
+DELETE FROM instrument_log;
+
+wipeInstrumentUnmatched:
+DELETE FROM instrument_results;
+
+wipeInstrumentGraphs:
+DELETE FROM lab_result_graphs;
+
 -- Sanity probe for tests and for the confirmation dialog's "N records" line.
 countTenantRows:
 SELECT

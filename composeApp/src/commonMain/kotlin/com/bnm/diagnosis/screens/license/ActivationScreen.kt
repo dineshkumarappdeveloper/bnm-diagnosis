@@ -105,6 +105,10 @@ fun ActivationScreen(
     licenseManager: LicenseManager,
     onActivated: (LicenseActivation) -> Unit,
     onEnterApp: () -> Unit,
+    /** Runs BEFORE a tenant-switch wipe — the host stops the analyzer
+     *  listeners so no frame lands between "old lab erased" and "new lab
+     *  activated" (it would re-seed the new tenant with old-lab data). */
+    onBeforeTenantWipe: suspend () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var key by remember { mutableStateOf("") }
@@ -149,7 +153,9 @@ fun ActivationScreen(
             if (eraseConfirmed && licenseManager.isDifferentTenant(k)) {
                 // Wipe BEFORE saving the new activation, so a crash in between
                 // leaves the device unlicensed-but-clean rather than licensed to
-                // the new lab while still holding the old lab's data.
+                // the new lab while still holding the old lab's data. Analyzer
+                // listeners are stopped first for the same reason.
+                runCatching { onBeforeTenantWipe() }
                 runCatching { labRepo.resetForNewTenant() }
             }
             labApi.activate(

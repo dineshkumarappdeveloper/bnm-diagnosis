@@ -88,6 +88,7 @@ kotlin {
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.8.0")
                 implementation(libs.sqldelight.sqlite.driver)
                 implementation(libs.pdfbox) // styled A4 lab-report PDFs (report/ReportPdf.desktop.kt)
+                implementation("com.fazecast:jSerialComm:2.11.0") // RS-232 analyzer interfacing (instruments/)
             }
         }
         commonMain.dependencies {

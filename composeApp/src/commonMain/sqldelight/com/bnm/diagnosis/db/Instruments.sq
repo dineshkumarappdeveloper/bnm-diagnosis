@@ -1,0 +1,134 @@
+-- ── Analyzer interfacing (I0/I1) ──
+--
+-- instruments        = per-analyzer connection config (device/lab setup — kept
+--                      across tenant switches, like printer prefs: the hardware
+--                      wired to this PC doesn't change with the licence).
+-- instrument_log     = raw traffic log for commissioning/debugging. Contains
+--                      frame payloads (PHI) → wiped on tenant switch, trimmed
+--                      to the newest rows continuously.
+-- instrument_results = frames that could not be applied to an order (unknown /
+--                      missing specimen id) → the claim queue. Tenant data.
+-- lab_result_graphs  = measured instrument curves (e.g. 128-point WBC/RBC/PLT
+--                      histograms) captured with a result, frozen like every
+--                      other result artefact. Local-only for now (NOT in the
+--                      result_bundle sync payload). Tenant data.
+
+CREATE TABLE IF NOT EXISTS instruments (
+    id TEXT NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL,
+    driver_key TEXT NOT NULL,            -- 'mispa_count_x' (ASTM/HL7 arrive in I2/I3)
+    transport TEXT NOT NULL,             -- 'serial' | 'tcp'
+    serial_port TEXT,                    -- e.g. 'COM3' / '/dev/tty.usbserial-110'
+    baud INTEGER NOT NULL DEFAULT 115200,
+    tcp_port INTEGER,                    -- listen port when transport='tcp'
+    enabled INTEGER NOT NULL DEFAULT 1,
+    param_map_json TEXT,                 -- {"GRAN%":"neut_pct", ...} explicit overrides
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS instrument_log (
+    id TEXT NOT NULL PRIMARY KEY,
+    instrument_id TEXT,
+    instrument_name TEXT,
+    direction TEXT NOT NULL,             -- 'rx' | 'tx' | 'info' | 'error'
+    summary TEXT NOT NULL,
+    raw TEXT,                            -- capped excerpt of the frame
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS instrument_log_time ON instrument_log(created_at);
+
+CREATE TABLE IF NOT EXISTS instrument_results (
+    id TEXT NOT NULL PRIMARY KEY,
+    instrument_id TEXT,
+    specimen_id TEXT,
+    payload_json TEXT NOT NULL,          -- parsed frame (params + histograms)
+    status TEXT NOT NULL DEFAULT 'unmatched',   -- unmatched | applied | discarded
+    matched_order_id TEXT,
+    received_at TEXT NOT NULL,
+    applied_at TEXT
+);
+CREATE INDEX IF NOT EXISTS instrument_results_open ON instrument_results(status, received_at);
+
+CREATE TABLE IF NOT EXISTS lab_result_graphs (
+    order_id TEXT NOT NULL,
+    test_id TEXT NOT NULL,
+    kind TEXT NOT NULL,                  -- 'wbc' | 'rbc' | 'plt'
+    points_json TEXT NOT NULL,           -- JSON array of numbers, as measured
+    meta_json TEXT,                      -- discriminators/flags from the analyzer
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (order_id, test_id, kind)
+);
+
+-- ── instruments ──
+
+listInstruments:
+SELECT * FROM instruments ORDER BY created_at;
+
+instrumentById:
+SELECT * FROM instruments WHERE id = ?;
+
+upsertInstrument:
+INSERT OR REPLACE INTO instruments(id, name, driver_key, transport, serial_port, baud, tcp_port, enabled, param_map_json, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+deleteInstrument:
+DELETE FROM instruments WHERE id = ?;
+
+-- ── traffic log ──
+
+insertLog:
+INSERT INTO instrument_log(id, instrument_id, instrument_name, direction, summary, raw, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+recentLog:
+SELECT * FROM instrument_log ORDER BY created_at DESC, id DESC LIMIT :limit;
+
+trimLog:
+DELETE FROM instrument_log WHERE id NOT IN
+  (SELECT id FROM instrument_log ORDER BY created_at DESC, id DESC LIMIT :keep);
+
+clearLog:
+DELETE FROM instrument_log;
+
+-- ── unmatched-result claim queue ──
+
+insertUnmatched:
+INSERT OR REPLACE INTO instrument_results(id, instrument_id, specimen_id, payload_json, status, matched_order_id, received_at, applied_at)
+VALUES (?, ?, ?, ?, 'unmatched', NULL, ?, NULL);
+
+listUnmatched:
+SELECT * FROM instrument_results WHERE status = 'unmatched' ORDER BY received_at DESC LIMIT 50;
+
+unmatchedCount:
+SELECT count(*) FROM instrument_results WHERE status = 'unmatched';
+
+unmatchedById:
+SELECT * FROM instrument_results WHERE id = ?;
+
+markResultApplied:
+UPDATE instrument_results SET status = 'applied', matched_order_id = ?, applied_at = ? WHERE id = ?;
+
+markResultDiscarded:
+UPDATE instrument_results SET status = 'discarded', applied_at = ? WHERE id = ?;
+
+-- Mispa operators often key just the numeric part of the accession on the
+-- analyzer keypad ('42' for ACC-S1-00042) — resolve by numeric tail, newest
+-- first. LIMIT 2 so the caller can detect ambiguity.
+ordersByAccessionTail:
+SELECT id, accession_no, status FROM lab_orders
+WHERE accession_no LIKE '%-' || :tail
+ORDER BY created_at DESC LIMIT 2;
+
+-- ── result graphs ──
+
+upsertGraph:
+INSERT OR REPLACE INTO lab_result_graphs(order_id, test_id, kind, points_json, meta_json, created_at)
+VALUES (?, ?, ?, ?, ?, ?);
+
+graphsForOrder:
+SELECT * FROM lab_result_graphs WHERE order_id = ? ORDER BY kind;
+
+-- Tenant wipes for these tables live in TenantReset.sq (wipeInstrumentTraffic /
+-- wipeInstrumentUnmatched / wipeInstrumentGraphs) with every other wipe — ONE
+-- checklist, no duplicates to drift.

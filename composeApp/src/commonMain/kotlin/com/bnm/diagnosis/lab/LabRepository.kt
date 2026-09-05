@@ -161,6 +161,11 @@ class LabRepository(
             wipeQ.wipeBillingOutbox()
             wipeQ.wipeCounterSeries()
             wipeQ.wipeEcomEntity()
+            // Analyzer traffic/queues/graphs hold the OLD lab's patient data;
+            // the instrument connection config itself survives (hardware setup).
+            wipeQ.wipeInstrumentTraffic()
+            wipeQ.wipeInstrumentUnmatched()
+            wipeQ.wipeInstrumentGraphs()
             // Watermarks last: leaving them ahead of an now-empty tenant would
             // mean the first genuine rows are never pushed.
             db.syncStateQueries.clearAllState()

@@ -49,6 +49,7 @@ import com.bnm.diagnosis.chat.SyncEngine
 import com.bnm.diagnosis.connectivity.ConnectivityMonitor
 import com.bnm.diagnosis.connectivity.LocalConnectivity
 import com.bnm.diagnosis.db.createAppDatabase
+import com.bnm.diagnosis.instruments.InstrumentEngine
 import com.bnm.diagnosis.lab.LabRepository
 import com.bnm.diagnosis.lab.LocalLabRepository
 import com.bnm.diagnosis.lab.SeedCatalog
@@ -89,6 +90,7 @@ import com.bnm.diagnosis.report.ReportAssembler
 import com.bnm.diagnosis.report.ReportUploader
 import com.bnm.diagnosis.update.quitForUpdate
 import com.bnm.diagnosis.billing.PrintProfiles
+import com.bnm.diagnosis.screens.settings.InstrumentsScreen
 import com.bnm.diagnosis.screens.settings.PrintSettingsScreen
 import com.bnm.diagnosis.billing.PrintKind
 import com.bnm.diagnosis.print.BtPrinter
@@ -156,6 +158,26 @@ fun App() {
     val labSync = remember {
         LabSyncEngine(database, ApiClient.json, labApi, licenseManager,
             drainReports = { reportUploader.drain() })
+    }
+
+    // ── I0/I1: analyzer interfacing — always-on serial/TCP listeners that feed
+    // instrument results (and measured histograms) straight into lab orders.
+    // Purely local: no licence/connectivity gate, results sync later as usual.
+    val instrumentEngine = remember { InstrumentEngine(database, labRepo, ApiClient.json) }
+    LaunchedEffect(Unit) { instrumentEngine.start() }
+    // A tenant switch stops the listeners before wiping (ActivationScreen's
+    // onBeforeTenantWipe); bring them back once a (new) licence is in place.
+    // Keyed on the licence identity, not every state emission — heartbeats
+    // must not churn open serial ports.
+    LaunchedEffect(Unit) {
+        var lastIdentity: String? = null
+        licenseManager.state.collect { st ->
+            val identity = if (st.licensed) "${st.businessId}|${st.labName}" else null
+            if (identity != null && lastIdentity != null && identity != lastIdentity) {
+                instrumentEngine.restartAll()
+            }
+            lastIdentity = identity
+        }
     }
 
     // Heartbeat on app start (when online) + on every reconnect: refresh the
@@ -318,6 +340,7 @@ fun App() {
                         ActivationScreen(
                             labApi = labApi,
                             licenseManager = licenseManager,
+                            onBeforeTenantWipe = { instrumentEngine.stopAll() },
                             onActivated = { a ->
                                 // A license bound to a BNM business pre-selects it
                                 // so the billing sync spine keeps working.
@@ -622,6 +645,7 @@ fun App() {
 
                     composable(Screen.Settings.route) {
                         val businessId = authRepository.getSelectedBusinessId() ?: licState.businessId ?: ""
+                        val instStatuses by instrumentEngine.status.collectAsState()
                         BillingSettingsScreen(
                             onQuitForUpdate = { quitForUpdate() },
                             api = api,
@@ -634,6 +658,21 @@ fun App() {
                             staffManageAllowed = signedInStaff?.canManageStaff == true,
                             labSync = labSync,
                             labName = licState.labName ?: authRepository.getSelectedBusinessName() ?: "BNM Diagnosis",
+                            onOpenInstruments = { navController.navigate(Screen.Instruments.route) },
+                            instrumentsSummary = when {
+                                instStatuses.isEmpty() -> "Connect analyzers — results enter themselves"
+                                instStatuses.values.any { it.state == "error" } -> "Attention needed — a listener is down"
+                                instStatuses.values.any { it.state == "listening" } ->
+                                    "${instStatuses.values.count { it.state == "listening" }} listening"
+                                else -> "All analyzers disabled"
+                            },
+                        )
+                    }
+
+                    composable(Screen.Instruments.route) {
+                        InstrumentsScreen(
+                            engine = instrumentEngine,
+                            onBack = { navController.popBackStack() },
                         )
                     }
                 }

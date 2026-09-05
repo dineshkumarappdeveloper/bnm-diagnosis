@@ -179,5 +179,28 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
         "published_at TEXT, expires_at TEXT, sha256 TEXT, created_at TEXT NOT NULL, updated_at TEXT)", 0)
     driver.execute(null, "CREATE UNIQUE INDEX IF NOT EXISTS lab_reports_token ON lab_reports(token)", 0)
 
+    // ── I0/I1: analyzer interfacing (instruments + traffic log + claim queue
+    // + measured result graphs) ──
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS instruments (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, " +
+        "driver_key TEXT NOT NULL, transport TEXT NOT NULL, serial_port TEXT, " +
+        "baud INTEGER NOT NULL DEFAULT 115200, tcp_port INTEGER, enabled INTEGER NOT NULL DEFAULT 1, " +
+        "param_map_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)", 0)
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS instrument_log (id TEXT NOT NULL PRIMARY KEY, instrument_id TEXT, " +
+        "instrument_name TEXT, direction TEXT NOT NULL, summary TEXT NOT NULL, raw TEXT, " +
+        "created_at TEXT NOT NULL)", 0)
+    driver.execute(null, "CREATE INDEX IF NOT EXISTS instrument_log_time ON instrument_log(created_at)", 0)
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS instrument_results (id TEXT NOT NULL PRIMARY KEY, instrument_id TEXT, " +
+        "specimen_id TEXT, payload_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'unmatched', " +
+        "matched_order_id TEXT, received_at TEXT NOT NULL, applied_at TEXT)", 0)
+    driver.execute(null,
+        "CREATE INDEX IF NOT EXISTS instrument_results_open ON instrument_results(status, received_at)", 0)
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS lab_result_graphs (order_id TEXT NOT NULL, test_id TEXT NOT NULL, " +
+        "kind TEXT NOT NULL, points_json TEXT NOT NULL, meta_json TEXT, created_at TEXT NOT NULL, " +
+        "PRIMARY KEY (order_id, test_id, kind))", 0)
+
     return AppDatabase(driver)
 }
