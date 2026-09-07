@@ -30,6 +30,13 @@ private const val MARGIN_MM = 14f
  *  20 mm keeps a ~49-module code at ~5 px per module on a 300 dpi print. */
 private const val QR_MM = 20f
 
+/** Height of the accession barcode in the patient box, mm. 8 mm scans from a
+ *  desk CCD reader without dominating the box. */
+private const val BARCODE_MM = 8f
+/** Code 128 module width, mm — 0.3 mm is the safe X-dimension for laser
+ *  output; narrower only when a long accession would not fit the column. */
+private const val BARCODE_MODULE_MM = 0.3f
+
 actual fun writeLabReportPdf(doc: ReportDoc): String {
     val dir = File(System.getProperty("java.io.tmpdir"), "bnm-diagnosis-reports").apply { mkdirs() }
     val safe = doc.accession.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "lab" }
@@ -294,7 +301,12 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         val rightCol = columnLines(rightCells)
         val leftH = leftCol.sumOf { it.second.size } * lineH
         val rightH = rightCol.sumOf { it.second.size } * lineH
-        val boxH = maxOf(leftH, rightH) + pad * 2f
+        // The accession barcode sits at the top of the right column, above
+        // the rows; the "Accession" row right under it is its readable text.
+        val bars = accessionBarcode(doc.accession)
+        val barH = if (bars != null) BARCODE_MM * MM else 0f
+        val barGap = if (bars != null) 6f else 0f
+        val boxH = maxOf(leftH, barH + barGap + rightH) + pad * 2f
 
         // No ensure(): this is drawn by newPage() at the top of a fresh sheet,
         // and a page break from inside it would recurse straight back here.
@@ -304,8 +316,14 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
             c.addRect(left, y - boxH, contentW, boxH); c.stroke()
         }
 
-        fun drawColumn(col: List<Pair<Cell, List<String>>>, x0: Float) {
-            var by = y - pad - 9f
+        if (bars != null) {
+            val module = minOf(BARCODE_MODULE_MM * MM, (colW - pad * 2f) / bars.size)
+            val bw = module * bars.size
+            drawBars(bars, right - pad - bw, y - pad - barH, module, barH)
+        }
+
+        fun drawColumn(col: List<Pair<Cell, List<String>>>, x0: Float, top: Float) {
+            var by = top
             for ((cell, lines) in col) {
                 text(x0, by, cell.label, fontR, 7.3f, gray)
                 lines.forEach { l ->
@@ -314,9 +332,25 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
                 }
             }
         }
-        drawColumn(leftCol, left + pad)
-        drawColumn(rightCol, left + colW + pad)
+        drawColumn(leftCol, left + pad, y - pad - 9f)
+        drawColumn(rightCol, left + colW + pad, y - pad - barH - barGap - 9f)
         y -= boxH + 14f
+    }
+
+    /** Code 128 bars as filled rectangles (runs merged) — resolution-independent
+     *  like the QR, and no image codec. [x]/[yBottom] = bottom-left of the symbol. */
+    private fun drawBars(bars: BooleanArray, x: Float, yBottom: Float, module: Float, h: Float) {
+        val c = cs ?: return
+        c.setNonStrokingColor(Color.BLACK)
+        var i = 0
+        while (i < bars.size) {
+            if (!bars[i]) { i++; continue }
+            var run = 1
+            while (i + run < bars.size && bars[i + run]) run++
+            c.addRect(x + i * module, yBottom, module * run, h)
+            i += run
+        }
+        c.fill()
     }
 
     /** Department banner (PER_DEPARTMENT only): centred spaced capitals in the

@@ -44,6 +44,9 @@ private const val MARGIN_MM = 14f
 /** Side of the QR SYMBOL in mm; the 4-module quiet zone is reserved around it.
  *  Mirrors the desktop renderer so both outputs measure the same. */
 private const val QR_MM = 20f
+/** Accession barcode in the patient box — mirrors the desktop constants. */
+private const val BARCODE_MM = 8f
+private const val BARCODE_MODULE_MM = 0.3f
 private const val PAGE_W = 595
 private const val PAGE_H = 842
 
@@ -381,15 +384,25 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         val rightCol = columnLines(rightCells)
         val leftH = leftCol.sumOf { it.second.size } * lineH
         val rightH = rightCol.sumOf { it.second.size } * lineH
-        val boxH = maxOf(leftH, rightH) + pad * 2f
+        // Accession barcode at the top of the right column — mirror of the desktop renderer.
+        val bars = accessionBarcode(doc.accession)
+        val barH = if (bars != null) BARCODE_MM * MM else 0f
+        val barGap = if (bars != null) 6f else 0f
+        val boxH = maxOf(leftH, barH + barGap + rightH) + pad * 2f
 
         // No ensure(): drawn by newPage() at the top of a fresh sheet; a page
         // break from inside it would recurse straight back here.
         fillRect(left, y, contentW, boxH, BOX_FILL)
         strokeRect(left, y, contentW, boxH, BOX_STROKE, 0.8f)
 
-        fun drawColumn(col: List<Pair<Cell, List<String>>>, x0: Float) {
-            var by = y + pad + 9f
+        if (bars != null) {
+            val module = minOf(BARCODE_MODULE_MM * MM, (colW - pad * 2f) / bars.size)
+            val bw = module * bars.size
+            drawBars(bars, right - pad - bw, y + pad, module, barH)
+        }
+
+        fun drawColumn(col: List<Pair<Cell, List<String>>>, x0: Float, top: Float) {
+            var by = top
             for ((cell, lines) in col) {
                 text(x0, by, cell.label, 7.3f, bold = false, GRAY)
                 lines.forEach { l ->
@@ -398,9 +411,23 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
                 }
             }
         }
-        drawColumn(leftCol, left + pad)
-        drawColumn(rightCol, left + colW + pad)
+        drawColumn(leftCol, left + pad, y + pad + 9f)
+        drawColumn(rightCol, left + colW + pad, y + pad + barH + barGap + 9f)
         y += boxH + 14f
+    }
+
+    /** Code 128 bars as filled rectangles (runs merged); [x]/[yTop] = top-left. */
+    private fun drawBars(bars: BooleanArray, x: Float, yTop: Float, module: Float, h: Float) {
+        val c = canvas ?: return   // measure pass draws nothing
+        val p = Paint().apply { color = 0xFF000000.toInt(); style = Paint.Style.FILL }
+        var i = 0
+        while (i < bars.size) {
+            if (!bars[i]) { i++; continue }
+            var run = 1
+            while (i + run < bars.size && bars[i + run]) run++
+            c.drawRect(x + i * module, yTop, x + (i + run) * module, yTop + h, p)
+            i += run
+        }
     }
 
     /** Department banner (PER_DEPARTMENT only) — mirror of the desktop one. */

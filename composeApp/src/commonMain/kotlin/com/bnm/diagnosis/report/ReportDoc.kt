@@ -5,6 +5,7 @@ import com.bnm.diagnosis.lab.LabOrderTest
 import com.bnm.diagnosis.lab.LabRepository
 import com.bnm.diagnosis.lab.LabResult
 import com.bnm.diagnosis.lab.Patient
+import com.bnm.diagnosis.print.Code128
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 
@@ -154,6 +155,19 @@ fun flagLegend(flags: Iterable<String?>): String {
     if (present.any { it == "A" }) parts += "A abnormal"
     if (present.any { LabRepository.isCriticalFlag(it) }) parts += "!! CRITICAL - inform the physician"
     return "Flag key:  " + parts.joinToString("  ·  ")
+}
+
+/**
+ * The accession as Code 128 modules (true = bar), or null when it cannot be
+ * encoded (blank, non-ASCII) — the renderers then print the text alone. The
+ * SAME symbol that is on the sample tube, so a bench scanner finds the order
+ * from the report as easily as from the sample; the reference labs print
+ * the SID barcode at exactly this spot. Shared so both renderers agree.
+ */
+fun accessionBarcode(accession: String): BooleanArray? {
+    val a = accession.trim()
+    if (!Code128.isEncodable(a)) return null
+    return runCatching { Code128.modules(a) }.getOrNull()
 }
 
 /**
