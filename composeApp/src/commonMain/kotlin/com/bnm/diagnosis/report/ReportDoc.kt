@@ -28,6 +28,63 @@ enum class LetterheadMode {
     PREPRINTED,
 }
 
+/**
+ * How the tests split across pages.
+ *
+ * Labs hand pages to different people: the haematology sheet is filed in one
+ * place, the biochemistry sheet goes to another consultant, one page gets
+ * photographed for WhatsApp. So a page has to stand on its own — every page
+ * carries the patient block, and a page group ends with the sign-off, not just
+ * the last page of the document.
+ */
+enum class ReportPagination(
+    val slug: String,
+    val label: String,
+    val blurb: String,
+    /** What a single sheet carries under this layout — stated per layout,
+     *  because only PER_TEST can truthfully promise a sign-off on every sheet. */
+    val sheetNote: String,
+) {
+    /** Tests follow one another; a page break only when the sheet is full. */
+    CONTINUOUS(
+        "continuous",
+        "Continuous",
+        "Tests follow one another and a new sheet starts only when the page is full. Fewest pages.",
+        "Every sheet carries the patient's details; the sign-off comes once, at the end of the report.",
+    ),
+
+    /** Every test starts on a fresh page and closes with the sign-off. */
+    PER_TEST(
+        "per_test",
+        "One test per page",
+        "Every test starts on a fresh sheet and ends with the sign-off, so each page is a complete " +
+            "report on its own.",
+        "Every sheet carries the patient's details and each test closes with the sign-off — any " +
+            "sheet can be handed over on its own.",
+    ),
+
+    /**
+     * Tests in the same department (the catalog category — Haematology,
+     * Biochemistry…) share a page; a test with no department gets its own.
+     * The sheet the reference labs print: "BIO CHEMISTRY" with sugar, urea and
+     * creatinine together, the CBC on a sheet of its own.
+     */
+    PER_DEPARTMENT(
+        "per_department",
+        "One department per page",
+        "Tests from the same department (the catalog category) share a sheet — sugar, urea and " +
+            "creatinine together under Biochemistry, the CBC on its own. A test with no category " +
+            "gets its own sheet.",
+        "Every sheet carries the patient's details, and each department closes with the sign-off.",
+    );
+
+    companion object {
+        /** Unknown or missing → [PER_TEST], the documented default. */
+        fun fromSlug(slug: String?): ReportPagination =
+            entries.firstOrNull { it.slug == slug } ?: PER_TEST
+    }
+}
+
 /** Small preset accent palette (letterhead band + section titles only). */
 object ReportPalette {
     const val TEAL = 0x0E8C8C
@@ -151,8 +208,66 @@ data class ReportRow(
     val flag: String?,
 )
 
-/** One test = one titled section with a Parameter/Result/Unit/Ref/Flag table. */
-data class ReportSection(val title: String, val rows: List<ReportRow>)
+/**
+ * One test = one titled section with a Parameter/Result/Unit/Ref/Flag table.
+ * [department] is the catalog category (null when the test has none); only
+ * [ReportPagination.PER_DEPARTMENT] reads it.
+ */
+data class ReportSection(
+    val title: String,
+    val rows: List<ReportRow>,
+    val department: String? = null,
+)
+
+/**
+ * The sections that share one page sequence. A group ALWAYS starts on a fresh
+ * page and ALWAYS ends with the sign-off block, so every group is a complete
+ * report by itself — that is the whole point of splitting.
+ */
+data class ReportPageGroup(
+    /** Department banner drawn above the sections, or null for none. */
+    val heading: String?,
+    val sections: List<ReportSection>,
+) {
+    /** Flag key for THIS group's rows only — a legend for marks that sit on
+     *  some other sheet is noise on this one. */
+    val flagLegendLine: String
+        get() = flagLegend(sections.flatMap { it.rows }.map { it.flag })
+}
+
+/**
+ * Split [sections] into page groups per [pagination]. Pure, and BOTH renderers
+ * draw exactly these, so the desktop and Android PDFs paginate identically.
+ *
+ * An empty section list still yields one (empty) group: the patient block and
+ * the sign-off must print even when nothing has been resulted yet.
+ */
+fun pageGroups(pagination: ReportPagination, sections: List<ReportSection>): List<ReportPageGroup> {
+    if (sections.isEmpty()) return listOf(ReportPageGroup(null, emptyList()))
+    return when (pagination) {
+        ReportPagination.CONTINUOUS -> listOf(ReportPageGroup(null, sections))
+        ReportPagination.PER_TEST -> sections.map { ReportPageGroup(null, listOf(it)) }
+        ReportPagination.PER_DEPARTMENT -> {
+            // First-appearance order. The key is case/space-insensitive so
+            // "Biochemistry" and "biochemistry " land together, and the banner
+            // uses the spelling of the first test seen. Uncategorised tests
+            // never merge with each other: nothing says they belong together.
+            val groups = ArrayList<ReportPageGroup>()
+            val indexByKey = HashMap<String, Int>()
+            for (s in sections) {
+                val dept = s.department?.trim()?.takeIf { it.isNotEmpty() }
+                val at = dept?.let { indexByKey[it.lowercase()] }
+                if (at == null) {
+                    if (dept != null) indexByKey[dept.lowercase()] = groups.size
+                    groups += ReportPageGroup(dept, listOf(s))
+                } else {
+                    groups[at] = groups[at].copy(sections = groups[at].sections + s)
+                }
+            }
+            groups
+        }
+    }
+}
 
 data class ReportDoc(
     val mode: LetterheadMode,
@@ -179,9 +294,10 @@ data class ReportDoc(
     /** Uppercased priority, null when routine. */
     val priority: String?,
     val sections: List<ReportSection>,
-    /** Key for the Flag-column marks ([flagLegend]); "" when nothing is flagged.
-     *  Renderers draw it once, under the last section. */
-    val flagLegendLine: String = "",
+    /** How [sections] split across sheets — see [pageGroups]. The DOC defaults
+     *  to continuous (the pre-split layout); the device default lives in
+     *  [ReportPrefs] and is applied by the assembler. */
+    val pagination: ReportPagination = ReportPagination.CONTINUOUS,
     val verifiedBy: String?,
     val approvedBy: String?,
     /** When the pathologist approved, "yyyy-MM-dd HH:mm". NABL expects the
@@ -193,7 +309,12 @@ data class ReportDoc(
     /** Report-download QR; null on standalone licences (see [ReportQr]). */
     val qr: ReportQr? = null,
     val generatedAt: String,
-)
+) {
+    /** What the renderers actually draw: each group on fresh sheets, each
+     *  closed by the sign-off. Derived, so it can never disagree with
+     *  [sections] + [pagination]. */
+    val pageGroups: List<ReportPageGroup> get() = pageGroups(pagination, sections)
+}
 
 /**
  * Assemble a [ReportDoc] from the live domain objects. Mirrors the field
@@ -220,6 +341,11 @@ fun buildReportDoc(
      *  is what a standalone licence must get. Assembled by [ReportAssembler];
      *  this function stays pure and never mints a token of its own. */
     qr: ReportQr? = null,
+    /** Page split; the assembler passes the device's [ReportPrefs] choice. */
+    pagination: ReportPagination = ReportPagination.CONTINUOUS,
+    /** Department (catalog category) of an ordered test; only PER_DEPARTMENT
+     *  reads it. The order line does not carry it, hence the lookup. */
+    department: (LabOrderTest) -> String? = { null },
 ): ReportDoc {
     val age = LabRepository.resolveAgeYears(patient.dob, patient.ageYears)
     val ageLabel = when {
@@ -240,6 +366,7 @@ fun buildReportDoc(
                     flag = r.flag,
                 )
             },
+            department = department(t),
         )
     }
     return ReportDoc(
@@ -258,7 +385,7 @@ fun buildReportDoc(
         reported = order.reportedAt?.let { reportStamp(it) ?: it.take(10) },
         priority = order.priority.takeIf { !it.equals("routine", ignoreCase = true) }?.uppercase(),
         sections = sections,
-        flagLegendLine = flagLegend(sections.flatMap { it.rows }.map { it.flag }),
+        pagination = pagination,
         verifiedBy = results.firstNotNullOfOrNull { it.verifiedBy?.takeIf { v -> v.isNotBlank() } },
         approvedBy = results.firstNotNullOfOrNull { it.approvedBy?.takeIf { v -> v.isNotBlank() } },
         // Results carry the sign-off stamp; the order's own approved_at is the
@@ -278,6 +405,7 @@ fun buildReportDoc(
  */
 fun sampleReportDoc(
     labName: String = "BNM Diagnosis",
+    pagination: ReportPagination = ReportPagination.CONTINUOUS,
     mode: LetterheadMode = LetterheadMode.PRINTED,
     headerMm: Float = 40f,
     footerMm: Float = 20f,
@@ -302,10 +430,15 @@ fun sampleReportDoc(
     registered = "2026-08-25 09:12",
     reported = "2026-08-25 13:45",
     priority = null,
+    pagination = pagination,
+    // Departments are what PER_DEPARTMENT groups by: the LFT and the fasting
+    // glucose are both Biochemistry, so that mode shows them SHARING a sheet
+    // while PER_TEST gives each its own.
     sections = listOf(
         ReportSection(
             "Complete Blood Count (CBC)",
-            listOf(
+            department = "Hematology",
+            rows = listOf(
                 ReportRow("Haemoglobin", "10.2", "g/dL", "12.0 - 15.0", "L"),
                 ReportRow("Total leucocyte count", "11.8", "10^3/uL", "4.0 - 11.0", "H"),
                 ReportRow("Neutrophils", "68", "%", "40 - 80", "N"),
@@ -323,7 +456,8 @@ fun sampleReportDoc(
         ),
         ReportSection(
             "Liver Function Test (LFT)",
-            listOf(
+            department = "Biochemistry",
+            rows = listOf(
                 ReportRow("Bilirubin total", "1.1", "mg/dL", "0.3 - 1.2", "N"),
                 ReportRow("Bilirubin direct", "0.3", "mg/dL", "0.0 - 0.4", "N"),
                 ReportRow("SGOT (AST)", "142", "U/L", "5 - 40", "H"),
@@ -335,17 +469,22 @@ fun sampleReportDoc(
             ),
         ),
         ReportSection(
+            "Fasting Blood Sugar (FBS)",
+            department = "Biochemistry",
+            rows = listOf(
+                ReportRow("Glucose (fasting)", "126", "mg/dL", "70 - 100", "H"),
+            ),
+        ),
+        ReportSection(
             "Serology",
-            listOf(
+            department = "Serology",
+            rows = listOf(
                 ReportRow("HBsAg (rapid)", "Reactive", "", "Non-reactive", "A"),
                 ReportRow("HIV I & II (rapid)", "Non-reactive", "", "Non-reactive", "N"),
                 ReportRow("HCV (rapid)", "Non-reactive", "", "Non-reactive", "N"),
             ),
         ),
     ),
-    // The sample sections above deliberately cover every mark, so the legend is
-    // stated literally rather than re-derived from the (inline) row list.
-    flagLegendLine = flagLegend(listOf("N", "L", "H", "A", "CL")),
     verifiedBy = "Tech. S. Kumar",
     approvedBy = "Dr. A. Lakshmi, MD (Path.)",
     approvedOn = "2026-08-25 13:40",

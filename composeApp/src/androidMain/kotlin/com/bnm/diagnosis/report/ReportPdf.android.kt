@@ -198,16 +198,24 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
     private fun runPass(target: PdfDocument?) {
         pdf = target; page = null; canvas = null; pageNo = 0
         newPage()
-        drawTitle()
-        drawPatientBlock()
-        doc.sections.forEach { drawSection(it) }
-        drawSignatures()
+        doc.pageGroups.forEachIndexed { i, group ->
+            // Every group after the first starts on a fresh sheet — mirror of
+            // the desktop renderer.
+            if (i > 0) newPage()
+            group.heading?.let { drawGroupHeading(it) }
+            group.sections.forEachIndexed { j, s ->
+                drawSection(s, closesGroup = j == group.sections.lastIndex)
+            }
+            drawSignatures(group.flagLegendLine, group.sections.lastOrNull())
+        }
         finishPage()
         pdf = null
     }
 
     // ── page plumbing ──
 
+    /** Fresh sheet: letterhead/footer band, title, and the patient block on
+     *  EVERY page (see the desktop renderer for why). */
     private fun newPage() {
         finishPage()
         pageNo++
@@ -221,6 +229,8 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
             drawFooter()
         }
         y = topY + 6f
+        drawTitle()
+        drawPatientBlock()
     }
 
     private fun finishPage() {
@@ -366,7 +376,8 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         val rightH = rightCol.sumOf { it.second.size } * lineH
         val boxH = maxOf(leftH, rightH) + pad * 2f
 
-        ensure(boxH + 8f)
+        // No ensure(): drawn by newPage() at the top of a fresh sheet; a page
+        // break from inside it would recurse straight back here.
         fillRect(left, y, contentW, boxH, BOX_FILL)
         strokeRect(left, y, contentW, boxH, BOX_STROKE, 0.8f)
 
@@ -385,6 +396,15 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         y += boxH + 14f
     }
 
+    /** Department banner (PER_DEPARTMENT only) — mirror of the desktop one. */
+    private fun drawGroupHeading(title: String) {
+        ensure(30f)
+        val p = paintFor(10f, bold = true, accent).apply { letterSpacing = 0.16f }
+        val t = title.uppercase()
+        canvas?.drawText(t, (pageW - p.measureText(t)) / 2f, y + 10f, p)
+        y += 18f
+    }
+
     private fun tableHeader() {
         val h = 15f
         ensure(h + 14f)
@@ -398,24 +418,42 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         y += h + 3f
     }
 
-    private fun drawSection(section: ReportSection) {
+    private fun drawSection(section: ReportSection, closesGroup: Boolean) {
         ensure(52f)
-        text(left, y + 11f, section.title, 11f, bold = true, accent)
-        y += 15f
-        hline(left, right, y, accent, 0.9f)
-        y += 5f
+        sectionTitle(section.title)
         tableHeader()
-        section.rows.forEach { drawRow(it) }
+        section.rows.forEachIndexed { i, row ->
+            // KEEP-WITH-NEXT — the group's final row travels with the sign-off;
+            // see the desktop renderer for why.
+            val keepWith = if (closesGroup && i == section.rows.lastIndex) 10f + signOff.need else 0f
+            drawRow(row, section, keepWith)
+        }
         y += 10f
     }
 
-    private fun drawRow(row: ReportRow) {
+    private fun sectionTitle(title: String) {
+        text(left, y + 11f, title, 11f, bold = true, accent)
+        y += 15f
+        hline(left, right, y, accent, 0.9f)
+        y += 5f
+    }
+
+    /** A spilled table re-states its test on the fresh sheet — mirror of the
+     *  desktop renderer; see its KDoc. */
+    private fun continueSection(section: ReportSection) {
+        newPage()
+        sectionTitle(section.title + " (contd.)")
+        tableHeader()
+    }
+
+    /** [keepWith]: extra room that must follow this row on the same sheet. */
+    private fun drawRow(row: ReportRow, section: ReportSection, keepWith: Float = 0f) {
         val paramLines = wrapText(row.param, 9f, false, wParam - 10f)
         val refLines = wrapText(row.ref.ifBlank { "-" }, 8.5f, false, wRef - 6f)
         val lineH = 11f
         val lines = maxOf(paramLines.size, refLines.size, 1)
         val rowH = lines * lineH + 3.5f
-        if (y + rowH > bottomY) { newPage(); tableHeader() }
+        if (y + rowH + keepWith > bottomY) continueSection(section)
 
         val emphasis = flagEmphasisRgb(row.flag)
         val vColor = emphasis?.let { opaque(it) } ?: INK
@@ -462,13 +500,14 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
     /** Sign-off + report-download QR — mirror of the desktop renderer, with y
      *  growing DOWNWARD. See the desktop KDoc for why the layout is shaped this
      *  way; an unsigned, QR-less report collapses to the original measurements. */
-    private fun drawSignatures() {
-        val sig = doc.signature
-        val sigBmp = signatureBitmap?.takeIf { it.width > 0 && it.height > 0 }
+    /** Sign-off geometry independent of where it lands — mirror of the desktop
+     *  SignOffMetrics; [need] is what keep-with-next reserves. */
+    private inner class SignOffMetrics {
+        val sigBmp: Bitmap? = signatureBitmap?.takeIf { it.width > 0 && it.height > 0 }
         val gap = if (sigBmp != null) 48f else 34f
         val credentialLines = listOfNotNull(
-            sig?.qualifications?.takeIf { it.isNotBlank() },
-            sig?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
+            doc.signature?.qualifications?.takeIf { it.isNotBlank() },
+            doc.signature?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
             doc.approvedOn?.takeIf { it.isNotBlank() }?.let { "Approved on $it" },
         )
         val signOffH = gap + 25f + credentialLines.size * 10f
@@ -480,8 +519,28 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         val quiet = if (qr == null) 0f else qrSide / qr.matrix.size * 4f
         val qrH = if (qr == null) 0f else qrSide + quiet * 2f + 4f +
             qrCaption.size * 9f + qrNote.size * 8f
+        val need = maxOf(signOffH, qrH) + 40f
+    }
 
-        ensure(maxOf(signOffH, qrH) + 30f)
+    private val signOff by lazy { SignOffMetrics() }
+
+    private fun drawSignatures(flagLegendLine: String, lastSection: ReportSection?) {
+        val m = signOff
+        val sigBmp = m.sigBmp
+        val gap = m.gap
+        val credentialLines = m.credentialLines
+        val qr = m.qr
+        val qrSide = m.qrSide
+        val qrCaption = m.qrCaption
+        val qrNote = m.qrNote
+        val quiet = m.quiet
+
+        // Fallback for a section with no rows (keep-with-next covers the rest):
+        // the fresh sheet must still name the test it signs off.
+        if (y + m.need > bottomY) {
+            newPage()
+            lastSection?.let { sectionTitle(it.title + " (contd.)") }
+        }
 
         val blockTop = y
         val lineY = blockTop + gap
@@ -524,8 +583,8 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
 
         y = maxOf(lineY + 40f + credentialLines.size * 10f, qrBottom + 6f)
         // Flag key — mirror of the desktop renderer (note: y grows DOWNWARD here).
-        if (doc.flagLegendLine.isNotEmpty()) {
-            text(left, y, doc.flagLegendLine, 7.5f, bold = false, GRAY)
+        if (flagLegendLine.isNotEmpty()) {
+            text(left, y, flagLegendLine, 7.5f, bold = false, GRAY)
             y += 12f
         }
         textCenter(y, "--- End of report ---", 7.5f, bold = false, GRAY)

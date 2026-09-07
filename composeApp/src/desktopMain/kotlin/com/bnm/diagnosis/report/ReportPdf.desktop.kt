@@ -154,16 +154,29 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
 
     fun render() {
         newPage()
-        drawTitle()
-        drawPatientBlock()
-        doc.sections.forEach { drawSection(it) }
-        drawSignatures()
+        doc.pageGroups.forEachIndexed { i, group ->
+            // Every group after the first starts on a fresh sheet — that is
+            // what makes it a report a lab can hand over on its own.
+            if (i > 0) newPage()
+            group.heading?.let { drawGroupHeading(it) }
+            group.sections.forEachIndexed { j, s ->
+                drawSection(s, closesGroup = j == group.sections.lastIndex)
+            }
+            drawSignatures(group.flagLegendLine, group.sections.lastOrNull())
+        }
         cs?.close(); cs = null
         stampFooters()
     }
 
     // ── page plumbing ──
 
+    /**
+     * Fresh sheet: letterhead (or the reserved blank band), then the title and
+     * the patient block. The patient block is on EVERY page, not just the
+     * first — sheets get separated (a department page goes to one consultant,
+     * one page is photographed), and ISO 15189 / NABL want each page to
+     * identify the patient and the report by itself.
+     */
     private fun newPage() {
         cs?.close()
         val page = PDPage(pageRect)
@@ -172,6 +185,8 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         cs = PDPageContentStream(pdf, page, AppendMode.OVERWRITE, false)
         if (doc.mode == LetterheadMode.PRINTED) drawLetterhead()
         y = topY - 6f
+        drawTitle()
+        drawPatientBlock()
     }
 
     private fun ensure(need: Float) {
@@ -281,7 +296,8 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         val rightH = rightCol.sumOf { it.second.size } * lineH
         val boxH = maxOf(leftH, rightH) + pad * 2f
 
-        ensure(boxH + 8f)
+        // No ensure(): this is drawn by newPage() at the top of a fresh sheet,
+        // and a page break from inside it would recurse straight back here.
         fillRect(left, y - boxH, contentW, boxH, boxFill)
         cs?.let { c ->
             c.setStrokingColor(boxStroke); c.setLineWidth(0.8f)
@@ -303,6 +319,25 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         y -= boxH + 14f
     }
 
+    /** Department banner (PER_DEPARTMENT only): centred spaced capitals in the
+     *  accent, the way the reference labs head a "BIO CHEMISTRY" sheet. */
+    private fun drawGroupHeading(title: String) {
+        ensure(30f)
+        val c = cs ?: return
+        val t = winAnsi(title.uppercase())
+        val spacing = 1.6f
+        val w = textWidth(t, fontB, 10f) + spacing * (t.length - 1)
+        c.setNonStrokingColor(accent)
+        c.setCharacterSpacing(spacing)
+        c.beginText()
+        c.setFont(fontB, 10f)
+        c.newLineAtOffset((pageW - w) / 2f, y - 10f)
+        c.showText(t)
+        c.endText()
+        c.setCharacterSpacing(0f)
+        y -= 18f
+    }
+
     private fun tableHeader() {
         val h = 15f
         ensure(h + 14f)
@@ -316,24 +351,49 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         y -= h + 3f
     }
 
-    private fun drawSection(section: ReportSection) {
+    private fun drawSection(section: ReportSection, closesGroup: Boolean) {
         ensure(52f) // title + rule + header + first row
-        text(left, y - 11f, section.title, fontB, 11f, accent)
-        y -= 15f
-        hline(left, right, y, accent, 0.9f)
-        y -= 5f
+        sectionTitle(section.title)
         tableHeader()
-        for (row in section.rows) drawRow(row)
+        section.rows.forEachIndexed { i, row ->
+            // KEEP-WITH-NEXT: the group's final row travels with the sign-off.
+            // Otherwise a test whose rows just fill the sheet gets its results
+            // on one page and its signature on the next — a results sheet
+            // nobody signed, and a signed sheet that shows no result. Found by
+            // review: a 24-32 row CBC did exactly that under the defaults.
+            val keepWith = if (closesGroup && i == section.rows.lastIndex) 10f + signOff.need else 0f
+            drawRow(row, section, keepWith)
+        }
         y -= 10f
     }
 
-    private fun drawRow(row: ReportRow) {
+    private fun sectionTitle(title: String) {
+        text(left, y - 11f, title, fontB, 11f, accent)
+        y -= 15f
+        hline(left, right, y, accent, 0.9f)
+        y -= 5f
+    }
+
+    /**
+     * A table that spills onto a fresh sheet re-states which test it belongs
+     * to. Every sheet has to read on its own, and a page of bare rows under a
+     * "Parameter / Result" header does not — the reader cannot tell a
+     * continued LFT from a continued lipid profile.
+     */
+    private fun continueSection(section: ReportSection) {
+        newPage()
+        sectionTitle(section.title + " (contd.)")
+        tableHeader()
+    }
+
+    /** [keepWith]: extra room that must follow this row on the same sheet. */
+    private fun drawRow(row: ReportRow, section: ReportSection, keepWith: Float = 0f) {
         val paramLines = wrapText(row.param, fontR, 9f, wParam - 10f)
         val refLines = wrapText(row.ref.ifBlank { "-" }, fontR, 8.5f, wRef - 6f)
         val lineH = 11f
         val lines = maxOf(paramLines.size, refLines.size, 1)
         val rowH = lines * lineH + 3.5f
-        if (y - rowH < bottomY) { newPage(); tableHeader() }
+        if (y - rowH - keepWith < bottomY) continueSection(section)
 
         val emphasis = flagEmphasisRgb(row.flag)
         val vColor = emphasis?.let { awt(it) } ?: ink
@@ -363,15 +423,19 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
      * image, no credentials and no approval date, every measurement below
      * collapses to exactly what this function drew before signatures existed.
      */
-    private fun drawSignatures() {
-        val sig = doc.signature
-        // A local val, so the null check below smart-casts for drawSignatureImage.
-        val sigImage = sig?.imagePng?.takeIf { it.isNotEmpty() }
-        // The gap is where a pen would go; an image needs a little more room.
+    /**
+     * The sign-off block's geometry — everything about it that does not depend
+     * on where it lands, computed once. [need] is the room the block, the flag
+     * key and the end-of-report line take together; it is what the
+     * keep-with-next rule in [drawSection] reserves under the group's last row.
+     */
+    private inner class SignOffMetrics {
+        val sigImage: ByteArray? = doc.signature?.imagePng?.takeIf { it.isNotEmpty() }
+        /** The gap is where a pen would go; an image needs a little more room. */
         val gap = if (sigImage != null) 48f else 34f
         val credentialLines = listOfNotNull(
-            sig?.qualifications?.takeIf { it.isNotBlank() },
-            sig?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
+            doc.signature?.qualifications?.takeIf { it.isNotBlank() },
+            doc.signature?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
             doc.approvedOn?.takeIf { it.isNotBlank() }?.let { "Approved on $it" },
         )
         val signOffH = gap + 25f + credentialLines.size * 10f
@@ -387,7 +451,32 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         val qrH = if (qr == null) 0f else qrSide + quiet * 2f + 4f +
             qrCaption.size * 9f + qrNote.size * 8f
 
-        ensure(maxOf(signOffH, qrH) + 30f)
+        /** 40pt under the taller column: the 40pt drop below the rule, then
+         *  the flag key and the end-of-report line (12pt each) still land
+         *  above the footer band. */
+        val need = maxOf(signOffH, qrH) + 40f
+    }
+
+    private val signOff by lazy { SignOffMetrics() }
+
+    private fun drawSignatures(flagLegendLine: String, lastSection: ReportSection?) {
+        val m = signOff
+        val sigImage = m.sigImage
+        val gap = m.gap
+        val credentialLines = m.credentialLines
+        val qr = m.qr
+        val qrSide = m.qrSide
+        val qrCaption = m.qrCaption
+        val qrNote = m.qrNote
+        val quiet = m.quiet
+
+        // Keep-with-next in drawSection normally guarantees the room. This
+        // fallback is for a section with no result rows at all — the fresh
+        // sheet must still name the test it signs off.
+        if (y - m.need < bottomY) {
+            newPage()
+            lastSection?.let { sectionTitle(it.title + " (contd.)") }
+        }
 
         val blockTop = y
         val lineY = blockTop - gap
@@ -428,8 +517,8 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         // abnormal — a legend explaining marks that aren't there is noise on a
         // patient's paper. Already WinAnsi-safe (ASCII + U+00B7), which matters
         // because winAnsi() collapses anything else to '?'.
-        if (doc.flagLegendLine.isNotEmpty()) {
-            text(left, y, doc.flagLegendLine, fontR, 7.5f, gray)
+        if (flagLegendLine.isNotEmpty()) {
+            text(left, y, flagLegendLine, fontR, 7.5f, gray)
             y -= 12f
         }
         textCenter(y, "--- End of report ---", fontR, 7.5f, gray)

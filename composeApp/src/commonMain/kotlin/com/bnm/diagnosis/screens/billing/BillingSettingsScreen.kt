@@ -67,6 +67,7 @@ import com.bnm.diagnosis.api.BillingApi
 import com.bnm.diagnosis.auth.AuthRepository
 import com.bnm.diagnosis.billing.BillingPrefs
 import com.bnm.diagnosis.billing.PrintProfiles
+import com.bnm.diagnosis.report.ReportPrefs
 import com.bnm.diagnosis.chat.LocalBillingRepository
 import com.bnm.diagnosis.chat.LocalSyncEngine
 import com.bnm.diagnosis.chat.currentFy
@@ -157,7 +158,10 @@ fun BillingSettingsScreen(
     // back, and this destination is recomposed from scratch when it comes back
     // off the nav stack — a plain read is what keeps the subtitle honest.
     val invoicePrinter = PrintProfiles.invoice.summary
-    val reportPrinter = PrintProfiles.report.summary
+    val reportPrinter = PrintProfiles.report.let { p ->
+        // The page split is as much "how a report comes out" as the printer is.
+        if (p.enabled) p.summary + " · " + ReportPrefs().pagination().label.lowercase() else p.summary
+    }
 
     Scaffold(
         topBar = {

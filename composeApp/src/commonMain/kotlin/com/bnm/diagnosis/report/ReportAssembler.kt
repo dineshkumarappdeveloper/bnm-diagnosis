@@ -79,6 +79,11 @@ class ReportAssembler(
             },
             signature = signatureFor(approvedBy),
             qr = qrFor(order.id, order.accessionNo, order.status),
+            pagination = prefs.pagination(),
+            // The department is the catalog category; the order line only
+            // snapshots the test NAME, so it comes from the catalog lookup the
+            // parameter names already use.
+            department = { t -> catalog[t.testId]?.category },
         )
     }
 

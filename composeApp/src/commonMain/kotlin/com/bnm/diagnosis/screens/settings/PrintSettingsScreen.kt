@@ -43,6 +43,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,9 +54,16 @@ import androidx.compose.ui.unit.dp
 import com.bnm.diagnosis.billing.PrintKind
 import com.bnm.diagnosis.billing.PrintProfiles
 import com.bnm.diagnosis.print.BtPrinter
+import com.bnm.diagnosis.report.ReportPagination
 import com.bnm.diagnosis.report.ReportPalette
 import com.bnm.diagnosis.report.ReportPrefs
+import com.bnm.diagnosis.report.openPdf
+import com.bnm.diagnosis.report.sampleReportDoc
+import com.bnm.diagnosis.report.writeLabReportPdf
 import com.bnm.diagnosis.ui.theme.AppTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Desktop is the primary target, so the two profiles sit side by side as soon
  *  as there is room. Same breakpoint the lab screens use (LabHomeScreen). */
@@ -120,12 +128,16 @@ fun PrintSettingsScreen(
                         PrinterProfileCard(PrintKind.INVOICE, onPickBluetooth, Modifier.weight(1f))
                         PrinterProfileCard(PrintKind.REPORT, onPickBluetooth, Modifier.weight(1f)) {
                             LetterheadBlock(labName)
+                            PageLayoutBlock()
+                            ReportPreviewButton(labName)
                         }
                     }
                 } else {
                     PrinterProfileCard(PrintKind.INVOICE, onPickBluetooth, Modifier.fillMaxWidth())
                     PrinterProfileCard(PrintKind.REPORT, onPickBluetooth, Modifier.fillMaxWidth()) {
                         LetterheadBlock(labName)
+                        PageLayoutBlock()
+                        ReportPreviewButton(labName)
                     }
                 }
             }
@@ -473,6 +485,75 @@ private fun ColumnScope.LetterheadBlock(labName: String?) {
                 }
             }
         }
+    }
+}
+
+/**
+ * How the report splits across sheets. Sits under the letterhead because it is
+ * the other half of "what a printed page looks like": a lab that files its
+ * haematology and biochemistry sheets separately picks that here, next to the
+ * paper it prints on.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ColumnScope.PageLayoutBlock() {
+    val c = AppTheme.colors
+    val prefs = remember { ReportPrefs() }
+    var layout by remember { mutableStateOf(prefs.pagination()) }
+
+    HorizontalDivider(color = c.border)
+    Text("Page layout", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        ReportPagination.entries.forEach { p ->
+            ChoiceChip(p.label, layout == p) { layout = p; prefs.paginationSlug = p.slug }
+        }
+    }
+    Text(layout.blurb, style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
+    Text(layout.sheetNote, style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
+}
+
+/**
+ * Renders the deterministic sample report with THIS device's letterhead and
+ * page-layout choices and opens it — the only way to see a setting before a
+ * real patient's report goes out on it.
+ */
+@Composable
+private fun ColumnScope.ReportPreviewButton(labName: String?) {
+    val prefs = remember { ReportPrefs() }
+    val scope = rememberCoroutineScope()
+    var msg by remember { mutableStateOf<String?>(null) }
+
+    OutlinedButton(
+        onClick = {
+            scope.launch {
+                msg = "Rendering sample…"
+                msg = try {
+                    withContext(Dispatchers.Default) {
+                        val path = writeLabReportPdf(
+                            sampleReportDoc(
+                                labName = labName?.takeIf { it.isNotBlank() } ?: "BNM Diagnosis",
+                                pagination = prefs.pagination(),
+                                mode = prefs.mode(),
+                                headerMm = prefs.headerMm.toFloat(),
+                                footerMm = prefs.footerMm.toFloat(),
+                                accentRgb = prefs.accentRgb,
+                                letterheadLines = prefs.letterheadLines(),
+                            )
+                        )
+                        if (path.isBlank()) "PDF reports arrive on iOS later" else openPdf(path)
+                    }
+                } catch (e: Throwable) {
+                    "Preview failed: ${e.message}"
+                }
+            }
+        },
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text("Preview sample report") }
+    msg?.let {
+        Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
     }
 }
 

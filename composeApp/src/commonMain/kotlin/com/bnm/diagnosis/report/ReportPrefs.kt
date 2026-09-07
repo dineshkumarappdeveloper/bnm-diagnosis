@@ -52,6 +52,18 @@ class ReportPrefs {
         get() = s.getInt(K_ACCENT, ReportPalette.TEAL)
         set(v) = s.putInt(K_ACCENT, v)
 
+    /**
+     * How the A4 report splits across sheets — a [ReportPagination] slug.
+     * Defaults to ONE TEST PER PAGE: that is how the labs this ships to file
+     * and hand over reports (user rule, 2026-09-07). An unknown slug is
+     * coerced back to that default rather than stored.
+     */
+    var paginationSlug: String
+        get() = s.getString(K_PAGINATION, ReportPagination.PER_TEST.slug)
+        set(v) = s.putString(K_PAGINATION, ReportPagination.fromSlug(v).slug)
+
+    fun pagination(): ReportPagination = ReportPagination.fromSlug(paginationSlug)
+
     /** The letterhead lines as printed: address, then phone/email combined, then extra. */
     fun letterheadLines(): List<String> {
         val contact = listOf(
@@ -70,5 +82,6 @@ class ReportPrefs {
         const val K_EMAIL = "report_lh_email"
         const val K_EXTRA = "report_lh_extra"
         const val K_ACCENT = "report_accent_rgb"
+        const val K_PAGINATION = "report_pagination"
     }
 }
