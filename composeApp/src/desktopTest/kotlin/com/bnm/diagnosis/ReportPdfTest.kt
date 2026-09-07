@@ -186,6 +186,23 @@ class ReportPdfTest {
     }
 
     @Test
+    fun `a short table beside a tall graph panel keeps its sign-off on the same sheet`() {
+        // Two rows and four graphs: the section ends at the PANEL's bottom, far
+        // below its last row, so the keep-with-next on that row cannot see the
+        // sign-off coming. Pushed down by a filler of every length, the CBC must
+        // still sign on the sheet that shows it — never a sheet of signatures.
+        val base = sampleReportDoc(pagination = ReportPagination.CONTINUOUS)
+        val cbc = base.sections.first { it.graphs.isNotEmpty() }.let { it.copy(rows = it.rows.take(2)) }
+        for (n in 0..34) {
+            val filler = ReportSection("Filler", rows = (1..n).map { ReportRow("Analyte $it", "1.0", "g/dL", "0.5 - 2.0", "N") })
+            val pages = pageTexts(base.copy(sections = listOf(filler, cbc)))
+            assertEverySheetStandsAlone(pages)
+            val signed = pages.single { "End of report" in it }
+            assertTrue(cbc.title in signed && "WBC" in signed, "filler $n rows: the signed sheet must carry the CBC and its panel")
+        }
+    }
+
+    @Test
     fun `a test whose rows just fill a sheet keeps its last row with the sign-off`() {
         // 28 single-line rows fit under the patient block, but the sign-off no
         // longer does. Without keep-with-next this printed as: sheet 1 = every

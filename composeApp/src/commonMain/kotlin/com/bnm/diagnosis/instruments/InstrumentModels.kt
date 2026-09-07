@@ -44,6 +44,9 @@ data class InstrumentDriver(
     val defaultBaud: Int,
     /** Bidirectional drivers can answer host queries (barcode → test list). */
     val bidirectional: Boolean,
+    /** The analyzer waits for the app's ACK, which only the TCP path can send:
+     *  serial is not offered for it. */
+    val tcpOnly: Boolean = false,
 )
 
 val INSTRUMENT_DRIVERS = listOf(
@@ -60,6 +63,7 @@ val INSTRUMENT_DRIVERS = listOf(
         detail = "5-part hematology · HL7 v2.3.1 over TCP (MLLP) · results, WBC/RBC/PLT histograms, DIFF scattergram",
         defaultBaud = 115200,
         bidirectional = false,
+        tcpOnly = true,
     ),
     // I2: astm_serial (generic ASTM E1394 bidirectional, host query)
     // I3: hl7_tcp (Erba CXL Pro Plus — HL7 v2.3.1 over TCP, QRY/DSR)

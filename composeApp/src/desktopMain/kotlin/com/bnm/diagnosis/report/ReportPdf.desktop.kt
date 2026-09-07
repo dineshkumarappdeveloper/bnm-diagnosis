@@ -413,8 +413,12 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         cols = Cols(if (panel.isEmpty()) contentW else contentW - panelW - PANEL_GAP)
         val panelH = if (panel.isEmpty()) 0f else panelHeight(panel)
         // The graph panel never splits across sheets: it needs its full height
-        // under the title, or the whole section moves to a fresh sheet.
-        ensure(maxOf(52f, 20f + panelH))
+        // under the title, or the whole section moves to a fresh sheet. When the
+        // section closes its group the sign-off must fit under the panel too —
+        // a two-row table beside a four-graph panel ends at the PANEL's bottom,
+        // and without this the signatures went to a sheet of their own (review).
+        val tail = if (closesGroup && panel.isNotEmpty()) 16f + signOff.need else 0f
+        ensure(maxOf(52f, 20f + panelH + tail))
         sectionTitle(section.title)
         val panelTop = y
         val panelPage = pageIndex

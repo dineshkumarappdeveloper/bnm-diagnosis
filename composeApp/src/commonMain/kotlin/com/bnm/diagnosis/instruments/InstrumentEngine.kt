@@ -200,8 +200,9 @@ class InstrumentEngine(
                                 if (n > 0) assembler.submit(buf.copyOf(n))
                             }
                         } finally {
-                            runCatching { socket.close() }
-                            assembler.finish()
+                            // Drain BEFORE closing: the last chunk may complete a
+                            // message whose ACK still has to go out on this socket.
+                            try { assembler.finish() } finally { runCatching { socket.close() } }
                         }
                     }
                 }
@@ -238,7 +239,7 @@ class InstrumentEngine(
         private val job: Job = scope.launch {
             for (bytes in intake) {
                 buffer.append(bytes.decodeToString())
-                if (buffer.length > 512 * 1024) buffer.deleteRange(0, buffer.length - 256 * 1024)
+                trimOverflow()
                 drainFrames()
             }
             if (buffer.isNotBlank()) {
@@ -266,6 +267,37 @@ class InstrumentEngine(
             job.cancel()
         }
 
+        /**
+         * Bound the buffer WITHOUT losing the frame in flight. The original cap
+         * (512 KB, oldest half dropped) suited 2 KB Mispa frames and would have
+         * been fatal for an HL7 result carrying three histograms and a BMP: a
+         * few hundred KB arriving in 1.5 KB chunks, so the cut took the <VT>
+         * with it — the message never framed and the analyzer never got its
+         * ACK. HL7 keeps everything from the last frame start and lets one
+         * frame grow to [MAX_HL7_BYTES]; past that it is abandoned with an
+         * MSA|AE (so the analyzer stops waiting) and logged.
+         */
+        private suspend fun trimOverflow() {
+            if (cfg.driver != "mindray_hl7") {
+                if (buffer.length > 512 * 1024) buffer.deleteRange(0, buffer.length - 256 * 1024)
+                return
+            }
+            if (buffer.length <= MAX_HL7_BYTES) return
+            val start = buffer.lastIndexOf(SB_STR)
+            if (start < 0) { buffer.setLength(0); return }        // no frame start anywhere: junk
+            if (start > 0) buffer.deleteRange(0, start)           // junk before the open frame
+            if (buffer.length <= MAX_HL7_BYTES) return
+            val head = buffer.substring(1, minOf(buffer.length, 4000))
+            logRow(cfg, "error",
+                "HL7 message passed ${MAX_HL7_BYTES / (1024 * 1024)} MB with no end-of-block — dropped, MSA|AE sent", head)
+            if (reply != null) {
+                val nak = Hl7Ack.forMessage(Hl7Message.parse(head), "AE", ackControlId = ackControlId(), timestamp = hl7Timestamp())
+                runCatching { reply(nak) }
+                    .onFailure { logRow(cfg, "error", "MSA|AE could not be sent: ${it.message}", null) }
+            }
+            buffer.setLength(0)
+        }
+
         private suspend fun drainFrames() {
             while (true) {
                 when (cfg.driver) {
@@ -276,6 +308,9 @@ class InstrumentEngine(
                         ingestMispa(cfg, frame)
                     }
                     "mindray_hl7" -> {
+                        // A long message arrives in hundreds of chunks; don't copy
+                        // the whole buffer for each until an end-of-block is in.
+                        if (buffer.indexOf(EB_STR) < 0) return
                         val (message, rest) = Mllp.extract(buffer.toString())
                         buffer.setLength(0); buffer.append(rest)
                         if (message == null) return
@@ -364,6 +399,29 @@ class InstrumentEngine(
         routeFrame(cfg, stored)
     }
 
+    /**
+     * Raw transport bytes through the same assembler the listeners use, then
+     * wait until every frame in them was routed. What the TCP loop does per
+     * connection minus the socket — the engine test drives the whole
+     * MLLP → ACK → route → apply → graphs path through it. [chunk] splits the
+     * delivery the way a TCP stack fragments a long message.
+     */
+    internal suspend fun ingestBytes(
+        cfg: InstrumentConfig,
+        bytes: ByteArray,
+        chunk: Int = bytes.size,
+        reply: (suspend (ByteArray) -> Unit)? = null,
+    ) {
+        val assembler = FrameAssembler(cfg, reply)
+        var at = 0
+        while (at < bytes.size) {
+            val end = minOf(bytes.size, at + chunk.coerceAtLeast(1))
+            assembler.submit(bytes.copyOfRange(at, end))
+            at = end
+        }
+        assembler.finish()
+    }
+
     /** Match a parsed frame to an open order, else the claim queue. */
     private suspend fun routeFrame(cfg: InstrumentConfig, stored: StoredInstrumentFrame) {
         val order = stored.specimenId?.let { findOrder(it) }
@@ -436,17 +494,27 @@ class InstrumentEngine(
 
         var applied = 0
         val failed = mutableListOf<String>()
+        val unconverted = mutableListOf<String>()
         for ((analyzerKey, paramKey) in mapping) {
             val raw = stored.params[analyzerKey] ?: continue
             // The analyzer's unit → the catalog's (10*9/L → cells/cumm, g/L → g/dL).
-            // An unknown pair passes through unchanged; the value still lands.
+            // A pair the app cannot bridge passes through unchanged — the value
+            // still lands (a number on the bench beats nothing) but the log
+            // says so in red: 10*4/uL printed as /cumm is off by ten thousand.
             val target = test.parameters.firstOrNull { it.key == paramKey }?.unit
-            val value = AnalyzerUnits.convert(raw, stored.units[analyzerKey], target)
+            val from = stored.units[analyzerKey]
+            val value = AnalyzerUnits.convert(raw, from, target)
+            if (value == raw && AnalyzerUnits.needsConversion(from, target)) unconverted += "$analyzerKey $from → $target"
             labRepo.enterResult(order.id, test.id, paramKey, value, enteredBy = cfg.name)
                 .onSuccess { applied++ }
                 .onFailure { failed += "$analyzerKey: ${it.message}" }
         }
         val unmappedCount = stored.params.size - mapping.size
+        if (unconverted.isNotEmpty()) {
+            logRow(cfg, "error",
+                "Unit not converted — stored as the analyzer sent it: ${unconverted.joinToString(", ")}. " +
+                    "Give the catalog parameter a unit the app can convert to, or correct the value by hand.", null)
+        }
 
         // One graph row per kind: measured points, the analyzer's bitmap, or both.
         val graphKinds = stored.histograms.keys + stored.images.keys
@@ -468,6 +536,7 @@ class InstrumentEngine(
             if (stored.histograms.isNotEmpty()) append(" · ${stored.histograms.size} histograms")
             if (stored.images.isNotEmpty()) append(" · ${stored.images.size} images")
             if (unmappedCount > 0) append(" · $unmappedCount unmapped")
+            if (unconverted.isNotEmpty()) append(" · ${unconverted.size} unit mismatch")
             if (failed.isNotEmpty()) append(" · ${failed.size} failed (${failed.first()})")
         }
         logRow(cfg, "info", summary, null)
@@ -570,6 +639,12 @@ class InstrumentEngine(
     )
 
     companion object {
+        /** One HL7 frame may grow this far before it is abandoned (a BC-5130
+         *  result with every graph on is a few hundred KB). */
+        private const val MAX_HL7_BYTES = 8 * 1024 * 1024
+        private val SB_STR = Mllp.SB.toString()
+        private val EB_STR = Mllp.EB.toString()
+
         private val ENTRY_OPEN = setOf(
             LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED,
         )
@@ -604,7 +679,8 @@ class InstrumentEngine(
             "LYMP%" to listOf("lymppct", "lympct", "lymphpct", "lymphocytespct", "lymphocytepct", "lym", "lymp", "lymph", "lymphocytes", "lymphocyte"),
             "MID%" to listOf("midpct", "mid", "mixedpct", "mxdpct", "mixed", "mxd"),
             "GRAN%" to listOf("granpct", "gran", "granulocytespct", "granulocytepct", "granulocytes", "grapct"),
-            "LYMP#" to listOf("lympabs", "lymabs", "lymphabs", "abslymphocytes", "lymphocytesabs"),
+            "LYMP#" to listOf("lympabs", "lymabs", "lymphabs", "abslymphocytes", "lymphocytesabs",
+                "absolutelymphocytes", "lymphocytesabsolute", "abslymph", "abslymp"),
             "MID#" to listOf("midabs", "mxdabs", "mixedabs"),
             "GRAN#" to listOf("granabs", "granulocytesabs", "absgranulocytes", "graabs"),
             "PCT" to listOf("plateletcrit"),

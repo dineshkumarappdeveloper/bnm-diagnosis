@@ -173,12 +173,12 @@ class MindrayBc5xTest {
         val pts = MindrayBc5x.decodeHistogram(Base64.Default.encode(bytes), 0)
         assertEquals(256, pts.size)
         assertEquals(200.0, pts[200])       // unsigned, not -56
-        // Odd remainder > 256 → byte-per-point.
-        val odd = MindrayBc5x.decodeHistogram(Base64.Default.encode(ByteArray(301) { 7 }), 0)
-        assertEquals(301, odd.size)
-        // Trailing zeros are kept.
-        val tail = MindrayBc5x.decodeHistogram(Base64.Default.encode(byteArrayOf(9, 0, 0, 0)), 0)
-        assertEquals(listOf(9.0, 0.0, 0.0, 0.0), tail)
+        // 301 channels is no histogram anyone draws → nothing, never noise.
+        assertTrue(MindrayBc5x.decodeHistogram(Base64.Default.encode(ByteArray(301) { 7 }), 0).isEmpty())
+        // Trailing zeros are kept — the x axis is the channel index.
+        val tail = MindrayBc5x.decodeHistogram(Base64.Default.encode(ByteArray(256).also { it[0] = 9 }), 0)
+        assertEquals(256, tail.size)
+        assertEquals(9.0, tail[0]); assertEquals(0.0, tail[255])
     }
 
     @Test

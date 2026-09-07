@@ -198,8 +198,14 @@ object MindrayBc5x {
 
         val histograms = LinkedHashMap<String, List<Double>>()
         for ((kind, b64) in histogramB64) {
-            val points = decodeHistogram(b64, metaLengths[kind] ?: 0)
+            val metaLength = metaLengths[kind] ?: 0
+            val points = decodeHistogram(b64, metaLength)
             if (points.isNotEmpty()) histograms[kind] = points
+            // A layout the decoder does not recognise goes on record with its
+            // raw size, so a commissioning engineer can see what the analyzer
+            // actually sends instead of a blank box.
+            else meta["${kind}_hist_error"] =
+                "unrecognised layout: ~${b64.filterNot { it.isWhitespace() }.length * 3 / 4} bytes, meta length $metaLength"
         }
 
         if (alerts.isNotEmpty()) meta["alerts"] = alerts.joinToString(";")
@@ -250,11 +256,19 @@ object MindrayBc5x {
      * Histogram ED payload → points. OBX-5 for ED is
      * `^Application^Octer-stream^Base64^<data>`; the caller passes the base64
      * (component 5) and the "Meta Length" the analyzer sent alongside (0 when
-     * absent). Base64 → bytes; drop [metaLength] leading bytes; if the remainder
-     * has an even length and more than 256 bytes → little-endian UInt16 per
-     * point, else one unsigned byte per point. Invalid base64 / nothing left →
-     * empty list. A trailing all-zero run is NOT trimmed — the x axis is the
-     * channel index.
+     * absent).
+     *
+     * The vendor protocol never says what "Meta Length" measures, so two
+     * readings are tried, in this order:
+     * 1. ELEMENT WIDTH — when the payload is exactly `metaLength × 256` bytes
+     *    (2..4), it is 256 little-endian integers of that width;
+     * 2. PREFIX — drop [metaLength] leading bytes; an even remainder longer
+     *    than 256 bytes is UInt16-LE per point, else one unsigned byte per
+     *    point.
+     * Only [ACCEPTED_CHANNELS] counts are believed; anything else is a layout
+     * this decoder has not seen, and an empty list (the caller records the raw
+     * size) beats a curve drawn from misaligned bytes. Invalid base64 → empty.
+     * A trailing all-zero run is NOT trimmed — the x axis is the channel index.
      */
     @OptIn(ExperimentalEncodingApi::class)
     fun decodeHistogram(base64: String, metaLength: Int): List<Double> {
@@ -264,16 +278,24 @@ object MindrayBc5x {
             Base64.Default.withPadding(Base64.PaddingOption.PRESENT_OPTIONAL).decode(cleaned)
         }.getOrNull() ?: return emptyList()
         val skip = metaLength.coerceAtLeast(0)
-        if (bytes.size <= skip) return emptyList()
-        val n = bytes.size - skip
-        return if (n % 2 == 0 && n > 256) {
-            List(n / 2) { i ->
-                val lo = bytes[skip + 2 * i].toInt() and 0xFF
-                val hi = bytes[skip + 2 * i + 1].toInt() and 0xFF
-                ((hi shl 8) or lo).toDouble()
-            }
-        } else {
-            List(n) { i -> (bytes[skip + i].toInt() and 0xFF).toDouble() }
+        val points = when {
+            skip in 2..4 && bytes.size == skip * 256 -> littleEndian(bytes, 0, skip)
+            bytes.size <= skip -> return emptyList()
+            (bytes.size - skip) % 2 == 0 && bytes.size - skip > 256 -> littleEndian(bytes, skip, 2)
+            else -> littleEndian(bytes, skip, 1)
+        }
+        return if (points.size in ACCEPTED_CHANNELS) points else emptyList()
+    }
+
+    /** Channel counts a hematology histogram can have (BC-5130: 256). */
+    private val ACCEPTED_CHANNELS = setOf(64, 128, 256, 512, 1024)
+
+    private fun littleEndian(bytes: ByteArray, from: Int, width: Int): List<Double> {
+        val n = (bytes.size - from) / width
+        return List(n) { i ->
+            var v = 0L
+            for (b in width - 1 downTo 0) v = (v shl 8) or (bytes[from + i * width + b].toLong() and 0xFF)
+            v.toDouble()
         }
     }
 }
@@ -281,7 +303,8 @@ object MindrayBc5x {
 /**
  * Analyzer unit → catalog unit. Indian labs report "cells/cumm" and
  * "lakhs/cumm" where the analyzer says 10*9/L; HGB in g/dL where it says g/L.
- * Unknown pairs pass the value through unchanged (the engine logs the mismatch).
+ * Unknown pairs pass the value through unchanged; [needsConversion] tells the
+ * engine, which logs the mismatch as an error.
  */
 object AnalyzerUnits {
 
@@ -292,16 +315,19 @@ object AnalyzerUnits {
      * unit on the other side.
      */
     private val FAMILIES: List<Map<String, Double>> = listOf(
-        // Base 10^9/l — WBC, PLT, differential absolutes.
+        // Base 10^9/l — WBC, PLT, differential absolutes. The Mindray unit
+        // menu also offers 10^2/µL and /nL; Sysmex prints 10^3/mm3.
         mapOf(
-            "10^9/l" to 1.0, "10^3/ul" to 1.0, "k/ul" to 1.0, "thou/cumm" to 1.0, "thou/ul" to 1.0,
+            "10^9/l" to 1.0, "10^3/ul" to 1.0, "10^3/cumm" to 1.0, "k/ul" to 1.0, "thou/cumm" to 1.0, "thou/ul" to 1.0,
+            "/nl" to 1.0, "10^2/ul" to 0.1, "10^2/cumm" to 0.1,
             "/cumm" to 0.001, "/ul" to 0.001,
             "lakhs/cumm" to 100.0, "lakh/cumm" to 100.0, "lakhs/ul" to 100.0, "lakh/ul" to 100.0,
         ),
-        // Base 10^12/l — RBC.
+        // Base 10^12/l — RBC. Mindray also offers 10^4/µL and /pL.
         mapOf(
-            "10^12/l" to 1.0, "10^6/ul" to 1.0, "m/ul" to 1.0,
+            "10^12/l" to 1.0, "10^6/ul" to 1.0, "10^6/cumm" to 1.0, "m/ul" to 1.0, "/pl" to 1.0,
             "million/cumm" to 1.0, "millions/cumm" to 1.0, "mill/cumm" to 1.0, "million/ul" to 1.0,
+            "10^4/ul" to 0.01, "10^4/cumm" to 0.01,
             "/cumm" to 0.000001, "/ul" to 0.000001,
         ),
         // Base g/dl — HGB, MCHC. mmol/l is the haemoglobin (Fe) convention.
@@ -310,9 +336,22 @@ object AnalyzerUnits {
         mapOf("%" to 1.0, "ml/l" to 0.1, "l/l" to 100.0),
         // Base fl — MCV, MPV.
         mapOf("fl" to 1.0, "um^3" to 1.0, "um3" to 1.0),
-        // pg — MCH.
-        mapOf("pg" to 1.0),
+        // Base pg — MCH. 1 fmol of haemoglobin (64 458 g/mol) is 64.458 pg.
+        mapOf("pg" to 1.0, "fmol" to 64.458, "amol" to 0.064458),
     )
+
+    /**
+     * True when [from] and [to] name different units that no family above can
+     * bridge — [convert] passed the value through and the engine must say so.
+     * Blank on either side is "no opinion", not a mismatch.
+     */
+    fun needsConversion(from: String?, to: String?): Boolean {
+        if (from.isNullOrBlank() || to.isNullOrBlank()) return false
+        val a = canonical(from)
+        val b = canonical(to)
+        if (a == b) return false
+        return FAMILIES.none { a in it && b in it }
+    }
 
     /**
      * [value] numeric text converted from [from] to [to]; either null/blank or

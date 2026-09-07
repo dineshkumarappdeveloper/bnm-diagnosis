@@ -30,7 +30,6 @@ class ReportGraphTest {
         val (images, text) = pages[0]
         assertEquals(3, images, "two signatures + the DIFF scattergram on the CBC sheet")
         for (t in listOf("WBC", "RBC", "PLT", "DIFF")) assertTrue(t in text, "$t title on the CBC sheet")
-        assertTrue("fL" in text, "the volume axis unit on the RBC/PLT boxes")
         // Sheets without graphs are untouched: signatures only, no panel titles.
         val (img2, text2) = pages[1]
         assertEquals(2, img2)
@@ -59,7 +58,7 @@ class ReportGraphTest {
         assertEquals(listOf("WBC", "RBC", "PLT", "DIFF"), g.map { it.title }, "junk row (no curve, undecodable image) is dropped")
         assertEquals(listOf(40.0, 100.0, 196.0), g[0].lines)
         assertTrue(g[3].hasImage && !g[3].hasCurve)
-        assertEquals("fL", g[1].xLabel); assertEquals("fL", g[2].xLabel); assertEquals(null, g[0].xLabel)
+        assertTrue(g.all { it.xLabel == null }, "raw channel axes carry no unit")
     }
 
     @Test

@@ -474,7 +474,10 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         val panel = section.graphs.filter { it.hasCurve || it.hasImage }
         cols = Cols(if (panel.isEmpty()) contentW else contentW - panelW - PANEL_GAP)
         val panelH = if (panel.isEmpty()) 0f else panelHeight(panel)
-        ensure(maxOf(52f, 20f + panelH))
+        // Panel + (when this section closes the group) the sign-off under it —
+        // see the desktop renderer.
+        val tail = if (closesGroup && panel.isNotEmpty()) 16f + signOff.need else 0f
+        ensure(maxOf(52f, 20f + panelH + tail))
         sectionTitle(section.title)
         val panelTop = y
         val panelPage = pageNo

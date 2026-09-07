@@ -268,7 +268,9 @@ fun toReportGraphs(rows: List<ResultGraph>): List<ReportGraph> {
                 lines = g.meta["${g.kind}_lines"]?.split(',')?.mapNotNull { it.trim().toDoubleOrNull() }.orEmpty(),
                 image = g.imageBase64?.trim()?.takeIf { it.isNotEmpty() }
                     ?.let { b -> runCatching { Base64.Default.decode(b.filterNot { c -> c.isWhitespace() }) }.getOrNull() },
-                xLabel = if (g.kind == "rbc" || g.kind == "plt") "fL" else null,
+                // No axis unit yet: the points are raw channels, and "fL" would claim
+                // a femtolitre scale nobody has calibrated against the analyzer.
+                xLabel = null,
             )
         }
         .filter { it.hasCurve || it.hasImage }
@@ -610,8 +612,8 @@ private fun sampleGraphs(): List<ReportGraph> {
     val png = PngWriter.grayscale1Bit(size, size) { x, y -> (y * size + x) in dots }
     return listOf(
         ReportGraph("wbc", "WBC", wbc, lines = listOf(38.0, 104.0, 196.0)),
-        ReportGraph("rbc", "RBC", rbc, lines = listOf(40.0, 165.0), xLabel = "fL"),
-        ReportGraph("plt", "PLT", plt, lines = listOf(4.0, 60.0), xLabel = "fL"),
+        ReportGraph("rbc", "RBC", rbc, lines = listOf(40.0, 165.0)),
+        ReportGraph("plt", "PLT", plt, lines = listOf(4.0, 60.0)),
         ReportGraph("diff", "DIFF", emptyList(), image = png.takeIf { it.isNotEmpty() }),
     )
 }

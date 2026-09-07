@@ -412,7 +412,11 @@ private fun InstrumentEditDialog(
                 INSTRUMENT_DRIVERS.forEach { d ->
                     FilterChip(
                         selected = driver == d.key,
-                        onClick = { driver = d.key; if (name.isBlank()) name = d.label },
+                        onClick = {
+                            driver = d.key
+                            if (name.isBlank()) name = d.label
+                            if (d.tcpOnly) transport = InstrumentTransport.TCP
+                        },
                         label = { Text(d.label) },
                     )
                 }
@@ -426,13 +430,18 @@ private fun InstrumentEditDialog(
                         selected = transport == InstrumentTransport.SERIAL,
                         onClick = { transport = InstrumentTransport.SERIAL },
                         label = { Text("Serial (RS-232)") },
-                        enabled = serialSupported(),
+                        enabled = serialSupported() && driverFor(driver)?.tcpOnly != true,
                     )
                     FilterChip(
                         selected = transport == InstrumentTransport.TCP,
                         onClick = { transport = InstrumentTransport.TCP },
                         label = { Text("Network (TCP)") },
                     )
+                }
+                if (driverFor(driver)?.tcpOnly == true) {
+                    Text("This analyzer talks HL7 over the network and waits for the app's acknowledgement — serial has no reply path.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (transport == InstrumentTransport.SERIAL) {
                     if (!serialSupported()) {
