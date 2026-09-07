@@ -14,7 +14,11 @@ import com.bnm.diagnosis.lab.LabTest
 import io.ktor.network.selector.SelectorManager
 import io.ktor.network.sockets.aSocket
 import io.ktor.network.sockets.openReadChannel
+import io.ktor.network.sockets.openWriteChannel
 import io.ktor.utils.io.readAvailable
+import io.ktor.utils.io.writeFully
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -183,7 +187,10 @@ class InstrumentEngine(
                     val socket = server.accept()
                     scope.launch {
                         // One assembler per connection: analyzers open, send, close.
-                        val assembler = FrameAssembler(cfg)
+                        // HL7 analyzers wait for an ACK on the same socket, so the
+                        // assembler gets a way to write back.
+                        val out = socket.openWriteChannel(autoFlush = true)
+                        val assembler = FrameAssembler(cfg) { bytes -> out.writeFully(bytes, 0, bytes.size) }
                         try {
                             val channel = socket.openReadChannel()
                             val buf = ByteArray(8 * 1024)
@@ -220,7 +227,12 @@ class InstrumentEngine(
      * [submit]; a single consumer coroutine processes them strictly in arrival
      * order (an unbounded channel, closed on [finish]/[abandon]).
      */
-    private inner class FrameAssembler(private val cfg: InstrumentConfig) {
+    private inner class FrameAssembler(
+        private val cfg: InstrumentConfig,
+        /** Writes bytes back to the analyzer (the ACK an HL7 device waits for);
+         *  null on one-way transports (serial has no write path today). */
+        private val reply: (suspend (ByteArray) -> Unit)? = null,
+    ) {
         private val buffer = StringBuilder()
         private val intake = Channel<ByteArray>(Channel.UNLIMITED)
         private val job: Job = scope.launch {
@@ -263,6 +275,12 @@ class InstrumentEngine(
                         if (frame == null) return
                         ingestMispa(cfg, frame)
                     }
+                    "mindray_hl7" -> {
+                        val (message, rest) = Mllp.extract(buffer.toString())
+                        buffer.setLength(0); buffer.append(rest)
+                        if (message == null) return
+                        ingestHl7(cfg, message, reply)
+                    }
                     else -> {
                         logRow(cfg, "error", "No parser for driver '${cfg.driver}'", null)
                         buffer.setLength(0)
@@ -294,12 +312,65 @@ class InstrumentEngine(
         logRow(cfg, "rx",
             "Result frame · specimen ${frame.specimenId ?: "—"} · ${frame.params.size} params · " +
                 "${frame.histograms.size} histograms", frame.raw)
+        routeFrame(cfg, stored)
+    }
 
-        val order = frame.specimenId?.let { findOrder(it) }
+    // ── ingestion (Mindray BC-5130 / 5000 / 5150 — HL7 v2.3.1 over MLLP) ──
+
+    /**
+     * One MLLP-framed HL7 message. The ACK goes FIRST and unconditionally:
+     * the analyzer blocks on it and marks the sample "transmission failed"
+     * (and may retransmit) without one — even for messages we then ignore.
+     */
+    private suspend fun ingestHl7(cfg: InstrumentConfig, text: String, reply: (suspend (ByteArray) -> Unit)?) {
+        val msg = Hl7Message.parse(text)
+        if (reply != null) {
+            val ack = Hl7Ack.forMessage(msg, "AA", ackControlId = ackControlId(), timestamp = hl7Timestamp())
+            runCatching { reply(ack) }
+                .onFailure { logRow(cfg, "error", "ACK could not be sent: ${it.message}", null) }
+        } else {
+            logRow(cfg, "info", "No reply path on this transport — analyzer will not get an ACK", null)
+        }
+        // Blobs (histograms, BMPs) are the bulk of a message; the log keeps the
+        // head, which is where every human-readable field lives.
+        val excerpt = text.take(4000)
+        val frame = MindrayBc5x.parse(msg, text)
+        if (frame == null) {
+            logRow(cfg, "rx", "${msg.messageType.ifBlank { "message" }} acknowledged and ignored (not a result)", excerpt)
+            return
+        }
+        if (frame.isQc) {
+            logRow(cfg, "rx", "QC result acknowledged and ignored (${frame.specimenId ?: "no id"})", excerpt)
+            return
+        }
+        setStatus(cfg.id, InstrumentStatus("listening",
+            _status.value[cfg.id]?.detail, lastFrameAt = nowIso()))
+        val stored = StoredInstrumentFrame(
+            driver = cfg.driver,
+            specimenId = frame.specimenId,
+            patientId = frame.patientId,
+            date = frame.date,
+            sequenceId = frame.sequenceId,
+            params = frame.params,
+            histograms = frame.histograms,
+            meta = frame.meta,
+            units = frame.units,
+            images = frame.images,
+        )
+        logRow(cfg, "rx",
+            "Result · specimen ${frame.specimenId ?: "—"} · ${frame.params.size} params · " +
+                "${frame.histograms.size} histograms · ${frame.images.size} images" +
+                (frame.meta["test_mode"]?.let { " · $it" } ?: ""), excerpt)
+        routeFrame(cfg, stored)
+    }
+
+    /** Match a parsed frame to an open order, else the claim queue. */
+    private suspend fun routeFrame(cfg: InstrumentConfig, stored: StoredInstrumentFrame) {
+        val order = stored.specimenId?.let { findOrder(it) }
         if (order == null) {
             queueUnmatched(cfg, stored,
-                if (frame.specimenId == null) "no specimen id keyed on the analyzer"
-                else "no order matches '${frame.specimenId}'")
+                if (stored.specimenId == null) "no specimen id keyed on the analyzer"
+                else "no order matches '${stored.specimenId}'")
             return
         }
         if (order.status !in ENTRY_OPEN) {
@@ -308,6 +379,16 @@ class InstrumentEngine(
         }
         val outcome = applyFrameToOrder(cfg, stored, order)
         if (!outcome.matched) queueUnmatched(cfg, stored, outcome.summary)
+    }
+
+    private var ackSeq = 0
+    private fun ackControlId(): String = "${hl7Timestamp()}${(++ackSeq % 1000).toString().padStart(3, '0')}"
+
+    /** yyyyMMddHHmmss in the device timezone — what MSH-7 wants. */
+    private fun hl7Timestamp(): String {
+        val dt = kotlin.time.Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())
+        val d = dt.date.toString().filter { it.isDigit() }
+        return d + dt.hour.toString().padStart(2, '0') + dt.minute.toString().padStart(2, '0') + dt.second.toString().padStart(2, '0')
     }
 
     /**
@@ -356,21 +437,28 @@ class InstrumentEngine(
         var applied = 0
         val failed = mutableListOf<String>()
         for ((analyzerKey, paramKey) in mapping) {
-            val value = stored.params[analyzerKey] ?: continue
+            val raw = stored.params[analyzerKey] ?: continue
+            // The analyzer's unit → the catalog's (10*9/L → cells/cumm, g/L → g/dL).
+            // An unknown pair passes through unchanged; the value still lands.
+            val target = test.parameters.firstOrNull { it.key == paramKey }?.unit
+            val value = AnalyzerUnits.convert(raw, stored.units[analyzerKey], target)
             labRepo.enterResult(order.id, test.id, paramKey, value, enteredBy = cfg.name)
                 .onSuccess { applied++ }
                 .onFailure { failed += "$analyzerKey: ${it.message}" }
         }
         val unmappedCount = stored.params.size - mapping.size
 
-        if (stored.histograms.isNotEmpty()) {
+        // One graph row per kind: measured points, the analyzer's bitmap, or both.
+        val graphKinds = stored.histograms.keys + stored.images.keys
+        if (graphKinds.isNotEmpty()) {
             val now = nowIso()
             val meta = stored.meta.takeIf { it.isNotEmpty() }
                 ?.let { m -> json.encodeToString(STRING_MAP, m) }
             withContext(Dispatchers.Default) {
-                for ((kind, points) in stored.histograms) {
+                for (kind in graphKinds) {
                     q.upsertGraph(order.id, test.id, kind,
-                        json.encodeToString(DOUBLE_LIST, points), meta, now)
+                        json.encodeToString(DOUBLE_LIST, stored.histograms[kind].orEmpty()), meta, now,
+                        stored.images[kind])
                 }
             }
         }
@@ -378,6 +466,7 @@ class InstrumentEngine(
         val summary = buildString {
             append("Applied $applied/${stored.params.size} params to ${order.accessionNo} · ${test.name}")
             if (stored.histograms.isNotEmpty()) append(" · ${stored.histograms.size} histograms")
+            if (stored.images.isNotEmpty()) append(" · ${stored.images.size} images")
             if (unmappedCount > 0) append(" · $unmappedCount unmapped")
             if (failed.isNotEmpty()) append(" · ${failed.size} failed (${failed.first()})")
         }
@@ -523,6 +612,24 @@ class InstrumentEngine(
             "LPCR" to listOf("lpcr", "plcr"),
         )
 
+        /** Mindray BC-5x names (5-part differential) — same conservatism. */
+        internal val MINDRAY_ALIASES: Map<String, List<String>> = mapOf(
+            "LYM%" to MISPA_ALIASES.getValue("LYMP%"),
+            "LYM#" to MISPA_ALIASES.getValue("LYMP#"),
+            "NEU%" to listOf("neupct", "neutpct", "neutrophilpct", "neutrophilspct", "neu", "neut", "neutrophil", "neutrophils"),
+            "NEU#" to listOf("neuabs", "neutabs", "neutrophilsabs", "absneutrophils", "absoluteneutrophils"),
+            "EOS%" to listOf("eospct", "eosinophilpct", "eosinophilspct", "eos", "eosinophil", "eosinophils"),
+            "EOS#" to listOf("eosabs", "eosinophilsabs", "abseosinophils", "absoluteeosinophils"),
+            "BAS%" to listOf("baspct", "basopct", "basophilpct", "basophilspct", "bas", "baso", "basophil", "basophils"),
+            "BAS#" to listOf("basabs", "basoabs", "basophilsabs", "absbasophils", "absolutebasophils"),
+            "MON%" to listOf("monpct", "monopct", "monocytepct", "monocytespct", "mon", "mono", "monocyte", "monocytes"),
+            "MON#" to listOf("monabs", "monoabs", "monocytesabs", "absmonocytes", "absolutemonocytes"),
+            "PLCC" to listOf("plcc", "plateletlargercellcount"),
+            "PLCR" to listOf("plcr", "lpcr", "plateletlargercellratio"),
+        )
+
+        private val ANALYZER_ALIASES: Map<String, List<String>> = MISPA_ALIASES + MINDRAY_ALIASES
+
         /**
          * analyzerKey → catalog parameter_key for one test. Explicit overrides
          * win. Then TWO passes: exact normalised key/name equality first, and
@@ -542,11 +649,19 @@ class InstrumentEngine(
             val catalogKeys = test.parameters.map { it.key }.toSet()
 
             fun taken(paramKey: String) = out.values.any { it == paramKey }
-            fun crossKindClash(analyzerKey: String, pKeyN: String, pNameN: String): Boolean {
+            // A percentage never binds an absolute-count parameter and vice
+            // versa. The NAME says so sometimes; the UNIT always does — and
+            // Mindray sends "LYM#" before "LYM%", so without the unit check the
+            // absolute count would grab a bare "Lymphocytes" (%) first.
+            fun crossKindClash(analyzerKey: String, pKeyN: String, pNameN: String, unit: String?): Boolean {
                 val n = pKeyN + pNameN
+                val u = unit?.let { AnalyzerUnits.canonical(it) }.orEmpty()
+                val unitIsPercent = u == "%"
+                val unitIsCount = u.isNotEmpty() && !unitIsPercent &&
+                    ("cumm" in u || u.endsWith("/l") || u.endsWith("/ul") || u.startsWith("10^"))
                 return when {
-                    analyzerKey.endsWith("%") -> "abs" in n || "absolute" in n
-                    analyzerKey.endsWith("#") -> "pct" in n || "percent" in n
+                    analyzerKey.endsWith("%") -> "abs" in n || "absolute" in n || unitIsCount
+                    analyzerKey.endsWith("#") -> "pct" in n || "percent" in n || unitIsPercent
                     else -> false
                 }
             }
@@ -564,11 +679,11 @@ class InstrumentEngine(
             // Pass 1: exact normalised key/name equality.
             val stillPending = mutableListOf<String>()
             for (ak in pending) {
-                val aliases = (MISPA_ALIASES[ak] ?: listOf(norm(ak))).toSet()
+                val aliases = (ANALYZER_ALIASES[ak] ?: listOf(norm(ak))).toSet()
                 val hit = test.parameters.firstOrNull { p ->
                     val keyN = norm(p.key); val nameN = norm(p.name)
                     (keyN in aliases || nameN in aliases) &&
-                        !crossKindClash(ak, keyN, nameN) && !taken(p.key)
+                        !crossKindClash(ak, keyN, nameN, p.unit) && !taken(p.key)
                 }
                 if (hit != null) out[ak] = hit.key else stillPending += ak
             }
@@ -576,13 +691,13 @@ class InstrumentEngine(
             // Pass 2: whole-word name tokens — only when exactly ONE parameter
             // qualifies, so "Lymphocytes" vs "Lymphocytes (manual)" maps neither.
             for (ak in stillPending) {
-                val aliases = (MISPA_ALIASES[ak] ?: listOf(norm(ak))).toSet()
+                val aliases = (ANALYZER_ALIASES[ak] ?: listOf(norm(ak))).toSet()
                 val candidates = test.parameters.filter { p ->
                     val keyN = norm(p.key); val nameN = norm(p.name)
                     val nameTokens = p.name.split(' ', '(', ')', '/', ',', '-')
                         .map { norm(it) }.filter { it.isNotEmpty() }.toSet()
                     nameTokens.any { it in aliases } &&
-                        !crossKindClash(ak, keyN, nameN) && !taken(p.key)
+                        !crossKindClash(ak, keyN, nameN, p.unit) && !taken(p.key)
                 }
                 if (candidates.size == 1) out[ak] = candidates[0].key
             }

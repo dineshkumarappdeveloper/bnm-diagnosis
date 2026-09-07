@@ -6,6 +6,8 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.DashPathEffect
+import android.graphics.Path
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
@@ -47,6 +49,12 @@ private const val QR_MM = 20f
 /** Accession barcode in the patient box — mirrors the desktop constants. */
 private const val BARCODE_MM = 8f
 private const val BARCODE_MODULE_MM = 0.3f
+/** Analyzer-graph panel — mirrors the desktop constants. */
+private const val PANEL_MM = 46f
+private const val PANEL_GAP = 8f
+private const val GRAPH_H = 36f
+private const val GRAPH_TITLE_H = 9f
+private const val GRAPH_GAP = 5f
 private const val PAGE_W = 595
 private const val PAGE_H = 842
 
@@ -159,16 +167,26 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
 
     private val accent = opaque(doc.accentRgb)
 
-    // Result table columns: Parameter | Result | Unit | Ref. range | Flag
-    private val wParam = contentW * 0.36f
-    private val wValue = contentW * 0.15f
-    private val wUnit = contentW * 0.11f
-    private val wRef = contentW * 0.24f
-    private val xParam = left + 4f
-    private val xValue = left + wParam
-    private val xUnit = xValue + wValue
-    private val xRef = xUnit + wUnit
-    private val xFlag = xRef + wRef
+    // Result table columns — sized per section (see the desktop renderer).
+    private inner class Cols(val tableW: Float) {
+        val wParam = tableW * 0.36f
+        val wRef = tableW * 0.24f
+        val xParam = left + 4f
+        val xValue = left + wParam
+        val xUnit = xValue + tableW * 0.15f
+        val xRef = xUnit + tableW * 0.11f
+        val xFlag = xRef + wRef
+        val right = left + tableW
+    }
+    private var cols = Cols(contentW)
+    private val wParam get() = cols.wParam
+    private val wRef get() = cols.wRef
+    private val xParam get() = cols.xParam
+    private val xValue get() = cols.xValue
+    private val xUnit get() = cols.xUnit
+    private val xRef get() = cols.xRef
+    private val xFlag get() = cols.xFlag
+    private val panelW = PANEL_MM * MM
 
     /** Column the QR + its caption own, left of "Verified by". */
     private val qrBlockW = 118f
@@ -442,7 +460,7 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
     private fun tableHeader() {
         val h = 15f
         ensure(h + 14f)
-        fillRect(left, y, contentW, h, HEAD_FILL)
+        fillRect(left, y, cols.tableW, h, HEAD_FILL)
         val by = y + h - 4.5f
         text(xParam, by, "Parameter", 8f, bold = true, INK)
         text(xValue, by, "Result", 8f, bold = true, INK)
@@ -453,8 +471,14 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
     }
 
     private fun drawSection(section: ReportSection, closesGroup: Boolean) {
-        ensure(52f)
+        val panel = section.graphs.filter { it.hasCurve || it.hasImage }
+        cols = Cols(if (panel.isEmpty()) contentW else contentW - panelW - PANEL_GAP)
+        val panelH = if (panel.isEmpty()) 0f else panelHeight(panel)
+        ensure(maxOf(52f, 20f + panelH))
         sectionTitle(section.title)
+        val panelTop = y
+        val panelPage = pageNo
+        if (panel.isNotEmpty()) drawPanel(panel, right - panelW, panelTop)
         tableHeader()
         section.rows.forEachIndexed { i, row ->
             // KEEP-WITH-NEXT — the group's final row travels with the sign-off;
@@ -463,6 +487,78 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
             drawRow(row, section, keepWith)
         }
         y += 10f
+        if (panel.isNotEmpty() && pageNo == panelPage) y = maxOf(y, panelTop + panelH + 6f)
+        cols = Cols(contentW)
+    }
+
+    private fun panelHeight(graphs: List<ReportGraph>): Float =
+        graphs.sumOf { g -> (GRAPH_TITLE_H + (if (g.hasCurve) GRAPH_H else panelW) + GRAPH_GAP).toDouble() }.toFloat()
+
+    /** Stacked graph boxes down the panel — mirror of the desktop renderer, y DOWN. */
+    private fun drawPanel(graphs: List<ReportGraph>, x: Float, top: Float) {
+        var gy = top
+        for (g in graphs) {
+            text(x + 2f, gy + 7f, g.title, 7f, bold = true, GRAY)
+            gy += GRAPH_TITLE_H
+            val boxH = if (g.hasCurve) GRAPH_H else panelW
+            strokeRect(x, gy, panelW, boxH, BOX_STROKE, 0.6f)
+            if (g.hasCurve) drawCurve(g, x, gy, panelW, boxH)
+            else g.image?.let { drawGraphImage(it, x, gy, panelW, boxH) }
+            g.xLabel?.let { textRight(x + panelW - 2f, gy + boxH - 2f, it, 5.5f, bold = false, GRAY) }
+            gy += boxH + GRAPH_GAP
+        }
+    }
+
+    private fun drawCurve(g: ReportGraph, x: Float, yTop: Float, w: Float, h: Float) {
+        val c = canvas ?: return   // measure pass draws nothing
+        val pts = g.points
+        val max = pts.maxOrNull()?.takeIf { it > 0.0 } ?: return
+        val pad = 3f
+        val innerW = w - 2 * pad
+        val innerH = h - 2 * pad - 4f
+        val n = pts.size
+        val span = (n - 1).coerceAtLeast(1)
+        val baseline = yTop + h - pad
+        fun px(i: Int) = x + pad + innerW * i / span
+        fun py(v: Double) = baseline - (innerH * (v / max)).toFloat()
+        val (stroke, fill) = graphColors(g.kind)
+        val area = Path().apply {
+            moveTo(px(0), baseline)
+            for (i in 0 until n) lineTo(px(i), py(pts[i]))
+            lineTo(px(n - 1), baseline); close()
+        }
+        c.drawPath(area, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = fill; style = Paint.Style.FILL })
+        val line = Path().apply { moveTo(px(0), py(pts[0])); for (i in 1 until n) lineTo(px(i), py(pts[i])) }
+        c.drawPath(line, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = stroke; style = Paint.Style.STROKE; strokeWidth = 0.7f })
+        if (g.lines.isNotEmpty()) {
+            val dash = Paint().apply { color = GRAY; style = Paint.Style.STROKE; strokeWidth = 0.5f; pathEffect = DashPathEffect(floatArrayOf(1.5f, 1.5f), 0f) }
+            for (l in g.lines) {
+                if (l < 0.0 || l > span) continue
+                val lx = x + pad + innerW * (l / span).toFloat()
+                c.drawLine(lx, yTop + pad, lx, baseline, dash)
+            }
+        }
+    }
+
+    private fun graphColors(kind: String): Pair<Int, Int> {
+        val base = when (kind) {
+            "rbc" -> opaque(ReportColors.HIGH_RED)
+            "plt" -> opaque(ReportPalette.GREEN)
+            else -> accent
+        }
+        fun ch(shift: Int) = (base shr shift) and 0xFF
+        val tint = 0xFF000000.toInt() or ((255 - (255 - ch(16)) * 22 / 100) shl 16) or ((255 - (255 - ch(8)) * 22 / 100) shl 8) or (255 - (255 - ch(0)) * 22 / 100)
+        return base to tint
+    }
+
+    private fun drawGraphImage(bytes: ByteArray, x: Float, yTop: Float, w: Float, h: Float) {
+        val c = canvas ?: return
+        val bmp = runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull() ?: return
+        if (bmp.width <= 0 || bmp.height <= 0) return
+        val scale = minOf((w - 4f) / bmp.width, (h - 4f) / bmp.height)
+        val dw = bmp.width * scale; val dh = bmp.height * scale
+        val l = x + (w - dw) / 2f; val t = yTop + (h - dh) / 2f
+        c.drawBitmap(bmp, null, RectF(l, t, l + dw, t + dh), Paint(Paint.FILTER_BITMAP_FLAG))
     }
 
     private fun sectionTitle(title: String) {
@@ -500,7 +596,7 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         refLines.forEachIndexed { i, l -> text(xRef, base + i * lineH, l, 8.5f, false, GRAY) }
         val fl = flagLabel(row.flag)
         if (fl.isNotEmpty()) text(xFlag, base, fl, 8f, vBold, if (vBold) vColor else GRAY)
-        hline(left, right, y + rowH, LIGHT_RULE, 0.4f)
+        hline(left, cols.right, y + rowH, LIGHT_RULE, 0.4f)
         y += rowH + 1.5f
     }
 

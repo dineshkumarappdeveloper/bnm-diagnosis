@@ -219,13 +219,15 @@ class ReportPdfTest {
             }
         val signed = imagesPerPage(sampleReportDoc(pagination = ReportPagination.PER_TEST))
         signed.forEachIndexed { i, (images, text) ->
-            assertEquals(2, images, "sheet ${i + 1}: verifier + approver signature images")
+            // Two signatures on every sheet; the CBC sheet (first) also carries
+            // the DIFF scattergram bitmap in its graph panel.
+            assertEquals(if (i == 0) 3 else 2, images, "sheet ${i + 1}: signature images (+ scattergram on the CBC sheet)")
             assertTrue("Verified by" in text && "DMLT, B.Sc. (MLT)" in text, "sheet ${i + 1} names the verifier's credentials")
             assertTrue("Tech. S. Kumar" in text && "Dr. A. Lakshmi" in text)
         }
         val approverOnly = imagesPerPage(sampleReportDoc(pagination = ReportPagination.PER_TEST).copy(verifierSignature = null))
         approverOnly.forEachIndexed { i, (images, text) ->
-            assertEquals(1, images, "sheet ${i + 1}: approver image only")
+            assertEquals(if (i == 0) 2 else 1, images, "sheet ${i + 1}: approver image only (+ scattergram on the CBC sheet)")
             assertTrue("Tech. S. Kumar" in text, "the verifier's name still prints without an image")
         }
     }

@@ -37,6 +37,7 @@ import kotlinx.datetime.plus
 import kotlinx.datetime.toLocalDateTime
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.json.Json
 
 /**
@@ -68,6 +69,7 @@ class LabRepository(
     private val emrQ get() = db.emrInboxQueries
     private val rrQ get() = db.referrerRatesQueries
     private val cQ get() = db.commissionQueries        // commission overrides + payouts + settings
+    private val gQ get() = db.instrumentsQueries       // lab_result_graphs (analyzer curves + bitmaps)
     private val setQ get() = db.commissionQueries      // lab_settings lives in Commission.sq
     private val repQ get() = db.labReportsQueries      // report share tokens (printed QR)
     private val wipeQ get() = db.tenantResetQueries    // tenant switch (see resetForNewTenant)
@@ -829,6 +831,23 @@ class LabRepository(
                 oQ.setStatus(LabStatus.APPROVED, now, orderId)
                 oQ.stampApproved(now, orderId)
             }
+        }
+    }
+
+    // ── Analyzer graphs (histograms / scattergram) ──────────────────────────
+
+    /** Every graph the analyzer left against [orderId], per test and kind. */
+    suspend fun graphsForOrder(orderId: String): List<ResultGraph> = withContext(Dispatchers.Default) {
+        gQ.graphsForOrder(orderId).executeAsList().map { g ->
+            ResultGraph(
+                orderId = g.order_id, testId = g.test_id, kind = g.kind,
+                points = runCatching { json.decodeFromString(ListSerializer(Double.serializer()), g.points_json) }
+                    .getOrDefault(emptyList()),
+                meta = g.meta_json?.let { m ->
+                    runCatching { json.decodeFromString(MapSerializer(String.serializer(), String.serializer()), m) }.getOrNull()
+                }.orEmpty(),
+                imageBase64 = g.image_base64,
+            )
         }
     }
 

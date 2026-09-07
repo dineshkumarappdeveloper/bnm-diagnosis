@@ -265,6 +265,21 @@ data class LabOrder(
     val reportedAt: String? = null,
 )
 
+/**
+ * One analyzer graph stored against an order's test: a measured curve
+ * (`points`, the histogram channels as sent), the analyzer's own bitmap
+ * (`imageBase64` — the Mindray DIFF scattergram), or both. `kind` is
+ * 'wbc' | 'rbc' | 'plt' | 'diff'.
+ */
+data class ResultGraph(
+    val orderId: String,
+    val testId: String,
+    val kind: String,
+    val points: List<Double>,
+    val meta: Map<String, String> = emptyMap(),
+    val imageBase64: String? = null,
+)
+
 @Serializable
 data class LabOrderTest(
     val id: String,

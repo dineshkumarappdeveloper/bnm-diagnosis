@@ -5,7 +5,10 @@ import com.bnm.diagnosis.lab.LabOrderTest
 import com.bnm.diagnosis.lab.LabRepository
 import com.bnm.diagnosis.lab.LabResult
 import com.bnm.diagnosis.lab.Patient
+import com.bnm.diagnosis.lab.ResultGraph
 import com.bnm.diagnosis.print.Code128
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 
@@ -223,14 +226,65 @@ data class ReportRow(
 )
 
 /**
+ * One analyzer graph printed beside a test's table — the histogram column the
+ * reference labs' CBC reports carry. A measured curve ([points]: the histogram
+ * channels exactly as the analyzer sent them) and/or the analyzer's OWN bitmap
+ * ([image]: the Mindray DIFF scattergram). Renderers draw the curve when
+ * there are points, else the image. [lines] are discriminator x positions in
+ * channel units, drawn dashed.
+ *
+ * Not a data class: [image] is a ByteArray (see [ReportSignature]).
+ */
+class ReportGraph(
+    val kind: String,
+    val title: String,
+    val points: List<Double>,
+    val lines: List<Double> = emptyList(),
+    val image: ByteArray? = null,
+    /** Axis unit printed in the box corner — "fL" for the RBC/PLT volume axes. */
+    val xLabel: String? = null,
+) {
+    val hasCurve: Boolean get() = points.size >= 2 && points.any { it > 0.0 }
+    val hasImage: Boolean get() = image != null && image.isNotEmpty()
+}
+
+/**
+ * Stored analyzer graphs → what the report draws, in the order a CBC sheet
+ * reads them: WBC, RBC, PLT, then the DIFF scattergram. Discriminator lines
+ * come from the Mindray "<kind>_lines" meta; other analyzers' meta is left
+ * alone (unknown units are not a drawable position). An image that will not
+ * base64-decode is dropped, never a crash.
+ */
+@OptIn(ExperimentalEncodingApi::class)
+fun toReportGraphs(rows: List<ResultGraph>): List<ReportGraph> {
+    val order = listOf("wbc", "rbc", "plt", "diff")
+    return rows
+        .sortedBy { order.indexOf(it.kind).let { i -> if (i < 0) order.size else i } }
+        .map { g ->
+            ReportGraph(
+                kind = g.kind,
+                title = when (g.kind) { "wbc" -> "WBC"; "rbc" -> "RBC"; "plt" -> "PLT"; "diff" -> "DIFF"; else -> g.kind.uppercase() },
+                points = g.points,
+                lines = g.meta["${g.kind}_lines"]?.split(',')?.mapNotNull { it.trim().toDoubleOrNull() }.orEmpty(),
+                image = g.imageBase64?.trim()?.takeIf { it.isNotEmpty() }
+                    ?.let { b -> runCatching { Base64.Default.decode(b.filterNot { c -> c.isWhitespace() }) }.getOrNull() },
+                xLabel = if (g.kind == "rbc" || g.kind == "plt") "fL" else null,
+            )
+        }
+        .filter { it.hasCurve || it.hasImage }
+}
+
+/**
  * One test = one titled section with a Parameter/Result/Unit/Ref/Flag table.
  * [department] is the catalog category (null when the test has none); only
- * [ReportPagination.PER_DEPARTMENT] reads it.
+ * [ReportPagination.PER_DEPARTMENT] reads it. [graphs] are the analyzer's
+ * curves/scattergram, drawn in a panel beside the table when present.
  */
 data class ReportSection(
     val title: String,
     val rows: List<ReportRow>,
     val department: String? = null,
+    val graphs: List<ReportGraph> = emptyList(),
 )
 
 /**
@@ -366,6 +420,9 @@ fun buildReportDoc(
     /** Department (catalog category) of an ordered test; only PER_DEPARTMENT
      *  reads it. The order line does not carry it, hence the lookup. */
     department: (LabOrderTest) -> String? = { null },
+    /** Analyzer graphs for an ordered test (the assembler reads them from the
+     *  graphs table); none by default. */
+    graphsFor: (LabOrderTest) -> List<ReportGraph> = { emptyList() },
 ): ReportDoc {
     val age = LabRepository.resolveAgeYears(patient.dob, patient.ageYears)
     val ageLabel = when {
@@ -387,6 +444,7 @@ fun buildReportDoc(
                 )
             },
             department = department(t),
+            graphs = graphsFor(t),
         )
     }
     return ReportDoc(
@@ -459,6 +517,7 @@ fun sampleReportDoc(
         ReportSection(
             "Complete Blood Count (CBC)",
             department = "Hematology",
+            graphs = sampleGraphs(),
             rows = listOf(
                 ReportRow("Haemoglobin", "10.2", "g/dL", "12.0 - 15.0", "L"),
                 ReportRow("Total leucocyte count", "11.8", "10^3/uL", "4.0 - 11.0", "H"),
@@ -518,6 +577,40 @@ fun sampleReportDoc(
     qr = ReportShare.qrFor(SAMPLE_QR_TOKEN),
     generatedAt = "2026-08-25 13:47",
 )
+
+/**
+ * Synthetic analyzer graphs for the sample: a bimodal WBC curve (lymphocyte
+ * peak, granulocyte hump), a single RBC peak, a right-skewed PLT curve, and a
+ * three-cluster DIFF scattergram as a tiny PNG — enough to check the panel
+ * layout; no attempt at physiology.
+ */
+private fun sampleGraphs(): List<ReportGraph> {
+    fun gauss(x: Int, mu: Double, sigma: Double): Double {
+        val d = (x - mu) / sigma
+        return kotlin.math.exp(-0.5 * d * d)
+    }
+    val wbc = List(256) { x -> 100.0 * gauss(x, 60.0, 12.0) + 55.0 * gauss(x, 150.0, 34.0) }
+    val rbc = List(256) { x -> 100.0 * gauss(x, 95.0, 18.0) }
+    val plt = List(256) { x -> 100.0 * gauss(x, 14.0, 7.0) + 18.0 * gauss(x, 40.0, 18.0) }
+    // Deterministic dots: three clusters, hashed positions — the same picture every preview.
+    val size = 96
+    val dots = HashSet<Int>()
+    var seed = 12345
+    fun next(): Int { seed = (seed * 1103515245 + 12345) and 0x7fffffff; return seed }
+    val clusters = listOf(Triple(30, 62, 9), Triple(58, 40, 12), Triple(48, 75, 7))
+    for ((cx, cy, r) in clusters) repeat(260) {
+        val dx = (next() % (2 * r + 1)) - r
+        val dy = (next() % (2 * r + 1)) - r
+        if (dx * dx + dy * dy <= r * r) dots += ((cy + dy).coerceIn(0, size - 1)) * size + (cx + dx).coerceIn(0, size - 1)
+    }
+    val png = PngWriter.grayscale1Bit(size, size) { x, y -> (y * size + x) in dots }
+    return listOf(
+        ReportGraph("wbc", "WBC", wbc, lines = listOf(38.0, 104.0, 196.0)),
+        ReportGraph("rbc", "RBC", rbc, lines = listOf(40.0, 165.0), xLabel = "fL"),
+        ReportGraph("plt", "PLT", plt, lines = listOf(4.0, 60.0), xLabel = "fL"),
+        ReportGraph("diff", "DIFF", emptyList(), image = png.takeIf { it.isNotEmpty() }),
+    )
+}
 
 /** Obviously-not-real token for [sampleReportDoc]; 64 hex chars so it is the
  *  same size on the page as a live one. */

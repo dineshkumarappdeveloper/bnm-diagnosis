@@ -203,7 +203,9 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
     driver.execute(null,
         "CREATE TABLE IF NOT EXISTS lab_result_graphs (order_id TEXT NOT NULL, test_id TEXT NOT NULL, " +
         "kind TEXT NOT NULL, points_json TEXT NOT NULL, meta_json TEXT, created_at TEXT NOT NULL, " +
-        "PRIMARY KEY (order_id, test_id, kind))", 0)
+        "image_base64 TEXT, PRIMARY KEY (order_id, test_id, kind))", 0)
+    // Analyzer bitmap on a graph row (2026-09-08) — appended last, like Instruments.sq.
+    driver.addColumn("lab_result_graphs", "image_base64", "TEXT")
 
     return AppDatabase(driver)
 }

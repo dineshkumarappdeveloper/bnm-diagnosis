@@ -9,6 +9,7 @@ import org.apache.pdfbox.pdmodel.font.PDFont
 import org.apache.pdfbox.pdmodel.font.PDType1Font
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject
 import org.apache.pdfbox.printing.PDFPageable
+import com.bnm.diagnosis.report.ReportGraph
 import java.awt.Color
 import java.awt.Desktop
 import java.awt.print.PrinterJob
@@ -36,6 +37,14 @@ private const val BARCODE_MM = 8f
 /** Code 128 module width, mm — 0.3 mm is the safe X-dimension for laser
  *  output; narrower only when a long accession would not fit the column. */
 private const val BARCODE_MODULE_MM = 0.3f
+
+/** The analyzer-graph panel beside a test's table: 46 mm wide, like the
+ *  HISTOGRAM column of the reference CBC sheets. */
+private const val PANEL_MM = 46f
+private const val PANEL_GAP = 8f
+private const val GRAPH_H = 36f          // a histogram box
+private const val GRAPH_TITLE_H = 9f
+private const val GRAPH_GAP = 5f
 
 actual fun writeLabReportPdf(doc: ReportDoc): String {
     val dir = File(System.getProperty("java.io.tmpdir"), "bnm-diagnosis-reports").apply { mkdirs() }
@@ -145,16 +154,29 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
     private val boxFill = Color(0xF6, 0xF7, 0xF9)
     private val boxStroke = Color(0xD5, 0xDA, 0xE0)
 
-    // Result table columns: Parameter | Result | Unit | Ref. range | Flag
-    private val wParam = contentW * 0.36f
-    private val wValue = contentW * 0.15f
-    private val wUnit = contentW * 0.11f
-    private val wRef = contentW * 0.24f
-    private val xParam = left + 4f
-    private val xValue = left + wParam
-    private val xUnit = xValue + wValue
-    private val xRef = xUnit + wUnit
-    private val xFlag = xRef + wRef
+    // Result table columns: Parameter | Result | Unit | Ref. range | Flag.
+    // Sized per section: a test with analyzer graphs gives the right-hand
+    // panel its width and the columns squeeze into what is left.
+    private inner class Cols(val tableW: Float) {
+        val wParam = tableW * 0.36f
+        val wRef = tableW * 0.24f
+        val xParam = left + 4f
+        val xValue = left + wParam
+        val xUnit = xValue + tableW * 0.15f
+        val xRef = xUnit + tableW * 0.11f
+        val xFlag = xRef + wRef
+        val right = left + tableW
+    }
+    private var cols = Cols(contentW)
+    private val wParam get() = cols.wParam
+    private val wRef get() = cols.wRef
+    private val xParam get() = cols.xParam
+    private val xValue get() = cols.xValue
+    private val xUnit get() = cols.xUnit
+    private val xRef get() = cols.xRef
+    private val xFlag get() = cols.xFlag
+    private val panelW = PANEL_MM * MM
+    private var pageIndex = 0
 
     private var cs: PDPageContentStream? = null
     private var y = 0f
@@ -188,6 +210,7 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         cs?.close()
         val page = PDPage(pageRect)
         pdf.addPage(page)
+        pageIndex++
         // compress=false: local temp artifacts; keeps the output trivially inspectable.
         cs = PDPageContentStream(pdf, page, AppendMode.OVERWRITE, false)
         if (doc.mode == LetterheadMode.PRINTED) drawLetterhead()
@@ -375,7 +398,7 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
     private fun tableHeader() {
         val h = 15f
         ensure(h + 14f)
-        fillRect(left, y - h, contentW, h, headFill)
+        fillRect(left, y - h, cols.tableW, h, headFill)
         val by = y - h + 4.5f
         text(xParam, by, "Parameter", fontB, 8f, ink)
         text(xValue, by, "Result", fontB, 8f, ink)
@@ -386,8 +409,16 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
     }
 
     private fun drawSection(section: ReportSection, closesGroup: Boolean) {
-        ensure(52f) // title + rule + header + first row
+        val panel = section.graphs.filter { it.hasCurve || it.hasImage }
+        cols = Cols(if (panel.isEmpty()) contentW else contentW - panelW - PANEL_GAP)
+        val panelH = if (panel.isEmpty()) 0f else panelHeight(panel)
+        // The graph panel never splits across sheets: it needs its full height
+        // under the title, or the whole section moves to a fresh sheet.
+        ensure(maxOf(52f, 20f + panelH))
         sectionTitle(section.title)
+        val panelTop = y
+        val panelPage = pageIndex
+        if (panel.isNotEmpty()) drawPanel(panel, right - panelW, panelTop)
         tableHeader()
         section.rows.forEachIndexed { i, row ->
             // KEEP-WITH-NEXT: the group's final row travels with the sign-off.
@@ -399,6 +430,95 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
             drawRow(row, section, keepWith)
         }
         y -= 10f
+        // A short table still clears the panel before whatever comes next —
+        // unless the rows already moved on to a later sheet.
+        if (panel.isNotEmpty() && pageIndex == panelPage) y = minOf(y, panelTop - panelH - 6f)
+        cols = Cols(contentW)
+    }
+
+    private fun panelHeight(graphs: List<ReportGraph>): Float =
+        graphs.sumOf { g -> (GRAPH_TITLE_H + (if (g.hasCurve) GRAPH_H else panelW) + GRAPH_GAP).toDouble() }.toFloat()
+
+    /** Stacked graph boxes down the panel: title, framed box, curve or bitmap. */
+    private fun drawPanel(graphs: List<ReportGraph>, x: Float, top: Float) {
+        var gy = top
+        for (g in graphs) {
+            text(x + 2f, gy - 7f, g.title, fontB, 7f, gray)
+            gy -= GRAPH_TITLE_H
+            val boxH = if (g.hasCurve) GRAPH_H else panelW
+            val boxBottom = gy - boxH
+            cs?.let { c ->
+                c.setStrokingColor(boxStroke); c.setLineWidth(0.6f)
+                c.addRect(x, boxBottom, panelW, boxH); c.stroke()
+            }
+            if (g.hasCurve) drawCurve(g, x, boxBottom, panelW, boxH)
+            else g.image?.let { drawGraphImage(it, x, boxBottom, panelW, boxH, g.kind) }
+            g.xLabel?.let { textRight(x + panelW - 2f, boxBottom + 2f, it, fontR, 5.5f, gray) }
+            gy = boxBottom - GRAPH_GAP
+        }
+    }
+
+    /**
+     * The histogram as the analyzer measured it: channels left to right,
+     * heights normalised to the tallest channel, a tinted fill under an
+     * outline, dashed discriminator lines where the analyzer put them.
+     */
+    private fun drawCurve(g: ReportGraph, x: Float, yBottom: Float, w: Float, h: Float) {
+        val c = cs ?: return
+        val pts = g.points
+        val max = pts.maxOrNull()?.takeIf { it > 0.0 } ?: return
+        val pad = 3f
+        val innerW = w - 2 * pad
+        val innerH = h - 2 * pad - 4f
+        val n = pts.size
+        val span = (n - 1).coerceAtLeast(1)
+        fun px(i: Int) = x + pad + innerW * i / span
+        fun py(v: Double) = yBottom + pad + (innerH * (v / max)).toFloat()
+        val (stroke, fill) = graphColors(g.kind)
+        c.setNonStrokingColor(fill)
+        c.moveTo(px(0), yBottom + pad)
+        for (i in 0 until n) c.lineTo(px(i), py(pts[i]))
+        c.lineTo(px(n - 1), yBottom + pad)
+        c.closePath(); c.fill()
+        c.setStrokingColor(stroke); c.setLineWidth(0.7f)
+        c.moveTo(px(0), py(pts[0]))
+        for (i in 1 until n) c.lineTo(px(i), py(pts[i]))
+        c.stroke()
+        if (g.lines.isNotEmpty()) {
+            c.setLineDashPattern(floatArrayOf(1.5f, 1.5f), 0f)
+            c.setStrokingColor(gray); c.setLineWidth(0.5f)
+            for (l in g.lines) {
+                if (l < 0.0 || l > span) continue
+                val lx = x + pad + innerW * (l / span).toFloat()
+                c.moveTo(lx, yBottom + pad); c.lineTo(lx, yBottom + h - pad); c.stroke()
+            }
+            c.setLineDashPattern(floatArrayOf(), 0f)
+        }
+    }
+
+    /** Outline colour and a light tint of it for the fill — WBC in the accent,
+     *  RBC red, PLT green, the convention every analyzer screen uses. */
+    private fun graphColors(kind: String): Pair<Color, Color> {
+        val base = when (kind) {
+            "rbc" -> awt(ReportColors.HIGH_RED)
+            "plt" -> awt(ReportPalette.GREEN)
+            else -> accent
+        }
+        val tint = Color(255 - (255 - base.red) * 22 / 100, 255 - (255 - base.green) * 22 / 100, 255 - (255 - base.blue) * 22 / 100)
+        return base to tint
+    }
+
+    /** The analyzer's bitmap (BMP/PNG), fitted inside the box. A bitmap that
+     *  will not decode leaves the framed box empty rather than failing the print. */
+    private fun drawGraphImage(bytes: ByteArray, x: Float, yBottom: Float, w: Float, h: Float, tag: String) {
+        val c = cs ?: return
+        runCatching {
+            val img = PDImageXObject.createFromByteArray(pdf, bytes, "graph-$tag")
+            if (img.width <= 0 || img.height <= 0) return
+            val scale = minOf((w - 4f) / img.width, (h - 4f) / img.height)
+            val dw = img.width * scale; val dh = img.height * scale
+            c.drawImage(img, x + (w - dw) / 2f, yBottom + (h - dh) / 2f, dw, dh)
+        }
     }
 
     private fun sectionTitle(title: String) {
@@ -442,7 +562,7 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         if (fl.isNotEmpty()) {
             text(xFlag, base, fl, if (emphasis != null) fontB else fontR, 8f, if (emphasis != null) vColor else gray)
         }
-        hline(left, right, y - rowH, lightRule, 0.4f)
+        hline(left, cols.right, y - rowH, lightRule, 0.4f)
         y -= rowH + 1.5f
     }
 

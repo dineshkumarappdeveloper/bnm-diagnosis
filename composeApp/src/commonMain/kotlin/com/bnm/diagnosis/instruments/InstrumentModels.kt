@@ -54,6 +54,13 @@ val INSTRUMENT_DRIVERS = listOf(
         defaultBaud = 115200,
         bidirectional = false,
     ),
+    InstrumentDriver(
+        key = "mindray_hl7",
+        label = "Mindray BC-5130 / BC-5000 / BC-5150",
+        detail = "5-part hematology · HL7 v2.3.1 over TCP (MLLP) · results, WBC/RBC/PLT histograms, DIFF scattergram",
+        defaultBaud = 115200,
+        bidirectional = false,
+    ),
     // I2: astm_serial (generic ASTM E1394 bidirectional, host query)
     // I3: hl7_tcp (Erba CXL Pro Plus — HL7 v2.3.1 over TCP, QRY/DSR)
 )
@@ -83,4 +90,9 @@ data class StoredInstrumentFrame(
     val params: Map<String, String> = emptyMap(),
     val histograms: Map<String, List<Double>> = emptyMap(),
     val meta: Map<String, String> = emptyMap(),
+    /** Analyzer unit per param ("10*9/L", "g/L") — converted to the catalog's
+     *  unit at apply time. Empty for analyzers that send none (Mispa). */
+    val units: Map<String, String> = emptyMap(),
+    /** Analyzer-rendered bitmaps, base64 as sent: "diff" (scattergram), "wbc". */
+    val images: Map<String, String> = emptyMap(),
 )

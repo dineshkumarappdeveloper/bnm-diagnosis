@@ -58,6 +58,8 @@ class ReportAssembler(
         val tests = repo.orderTests(orderId)
         val results = repo.resultsForOrder(orderId)
         val catalog = tests.mapNotNull { t -> repo.testById(t.testId)?.let { t.testId to it } }.toMap()
+        // Analyzer curves / scattergram, per test — the histogram panel.
+        val graphs = repo.graphsForOrder(orderId).groupBy { it.testId }
         val approvedBy = results.firstNotNullOfOrNull { it.approvedBy?.takeIf { n -> n.isNotBlank() } }
         val verifiedBy = results.firstNotNullOfOrNull { it.verifiedBy?.takeIf { n -> n.isNotBlank() } }
         val approvedById = results.firstNotNullOfOrNull { it.approvedById?.takeIf { n -> n.isNotBlank() } }
@@ -91,6 +93,7 @@ class ReportAssembler(
             // snapshots the test NAME, so it comes from the catalog lookup the
             // parameter names already use.
             department = { t -> catalog[t.testId]?.category },
+            graphsFor = { t -> toReportGraphs(graphs[t.testId].orEmpty()) },
         )
     }
 

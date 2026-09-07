@@ -53,10 +53,13 @@ CREATE INDEX IF NOT EXISTS instrument_results_open ON instrument_results(status,
 CREATE TABLE IF NOT EXISTS lab_result_graphs (
     order_id TEXT NOT NULL,
     test_id TEXT NOT NULL,
-    kind TEXT NOT NULL,                  -- 'wbc' | 'rbc' | 'plt'
-    points_json TEXT NOT NULL,           -- JSON array of numbers, as measured
+    kind TEXT NOT NULL,                  -- 'wbc' | 'rbc' | 'plt' | 'diff'
+    points_json TEXT NOT NULL,           -- JSON array of numbers, as measured ("[]" for an image-only graph)
     meta_json TEXT,                      -- discriminators/flags from the analyzer
     created_at TEXT NOT NULL,
+    -- The analyzer's OWN rendering when it sends one (Mindray BC-5x: the DIFF
+    -- scattergram as a BMP). Base64, appended last (positional migration).
+    image_base64 TEXT,
     PRIMARY KEY (order_id, test_id, kind)
 );
 
@@ -123,8 +126,8 @@ ORDER BY created_at DESC LIMIT 2;
 -- ── result graphs ──
 
 upsertGraph:
-INSERT OR REPLACE INTO lab_result_graphs(order_id, test_id, kind, points_json, meta_json, created_at)
-VALUES (?, ?, ?, ?, ?, ?);
+INSERT OR REPLACE INTO lab_result_graphs(order_id, test_id, kind, points_json, meta_json, created_at, image_base64)
+VALUES (?, ?, ?, ?, ?, ?, ?);
 
 graphsForOrder:
 SELECT * FROM lab_result_graphs WHERE order_id = ? ORDER BY kind;
