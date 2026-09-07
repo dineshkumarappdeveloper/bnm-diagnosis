@@ -97,6 +97,25 @@ class PrintProfile(private val kind: PrintKind) {
         get() = s.getInt(key("pref_sticker_gap_mm"), 2).coerceIn(0, 10)
         set(v) = s.putInt(key("pref_sticker_gap_mm"), v.coerceIn(0, 10))
 
+    /** 203 or 300 — the head's resolution; bitmap fonts and bars are in dots. */
+    var stickerDpi: Int
+        get() = if (s.getInt(key("pref_sticker_dpi"), 203) >= 300) 300 else 203
+        set(v) = s.putInt(key("pref_sticker_dpi"), if (v >= 300) 300 else 203)
+
+    /** Roll loaded the other way round → print the label upside down. */
+    var stickerRotate: Boolean
+        get() = s.getBoolean(key("pref_sticker_rotate"), false)
+        set(v) = s.putBoolean(key("pref_sticker_rotate"), v)
+
+    /** Print-position nudge, mm (±10, 0.5 steps): +x right, +y down. */
+    var stickerShiftXmm: Float
+        get() = s.getFloat(key("pref_sticker_shift_x"), 0f).coerceIn(-10f, 10f)
+        set(v) = s.putFloat(key("pref_sticker_shift_x"), v.coerceIn(-10f, 10f))
+
+    var stickerShiftYmm: Float
+        get() = s.getFloat(key("pref_sticker_shift_y"), 0f).coerceIn(-10f, 10f)
+        set(v) = s.putFloat(key("pref_sticker_shift_y"), v.coerceIn(-10f, 10f))
+
     /** For [connection] == "system" on the STICKER profile: the OS printer that
      *  receives RAW label bytes through the spooler (a USB label printer). The
      *  print DIALOG is useless for labels — it would rasterise a page. */

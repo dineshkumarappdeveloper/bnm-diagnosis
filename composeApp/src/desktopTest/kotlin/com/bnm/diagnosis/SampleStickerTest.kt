@@ -64,7 +64,9 @@ class SampleStickerTest {
     fun renderEmitsOneBlockPerSticker() {
         val two = listOf(sticker, sticker.copy(accession = "ACC-S1-00043", patientName = "Ravi Kumar"))
         val tspl = StickerRender.render(LabelLanguage.TSPL, two, spec, copies = 2).decodeToString()
-        assertEquals(2, tspl.lines().count { it.startsWith("SIZE ") }, tspl)
+        // ONE job header, then one CLS…PRINT block per sticker.
+        assertEquals(1, tspl.lines().count { it.startsWith("SIZE ") }, tspl)
+        assertEquals(2, tspl.lines().count { it == "CLS" }, tspl)
         assertEquals(2, tspl.lines().count { it == "PRINT 1,2" }, tspl)
         val zpl = StickerRender.render(LabelLanguage.ZPL, two, spec, copies = 2).decodeToString()
         assertEquals(2, zpl.lines().count { it == "^XA" }, zpl)

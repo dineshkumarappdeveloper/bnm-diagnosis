@@ -72,8 +72,11 @@ fun sampleTypeLabel(raw: String): String = when (raw.trim().lowercase()) {
     else -> raw.trim().uppercase()
 }
 
-/** The stock this profile is loaded with. */
-fun PrintProfile.stickerSpec(): StickerSpec = StickerSpec(stickerWidthMm, stickerHeightMm, stickerGapMm)
+/** The stock this profile is loaded with, plus the print-position tuning. */
+fun PrintProfile.stickerSpec(): StickerSpec = StickerSpec(
+    widthMm = stickerWidthMm, heightMm = stickerHeightMm, gapMm = stickerGapMm,
+    dpi = stickerDpi, rotate = stickerRotate, shiftXmm = stickerShiftXmm, shiftYmm = stickerShiftYmm,
+)
 
 /**
  * Send [stickers] to the sticker printer, one label each (the dialog has
@@ -96,15 +99,32 @@ suspend fun printSampleStickers(
         spec = profile.stickerSpec(),
         copies = 1,
     )
-    // Off the main thread: the spooler paths block (a process wait on CUPS).
-    return withContext(Dispatchers.Default) {
+    return sendToStickerPrinter(bytes, profile)
+}
+
+/**
+ * Ask the printer to learn the label gap (TSPL GAPDETECT / ZPL ~JC). It feeds
+ * a few labels doing so. The cure for a print that drifts a little further
+ * every sticker — run it after every roll change.
+ */
+suspend fun calibrateStickerPrinter(profile: PrintProfile = PrintProfiles.barcode): String {
+    if (!profile.enabled) return "Sticker printing is turned off in Settings ▸ Printing."
+    val bytes = StickerRender.calibrate(LabelLanguage.fromSlug(profile.labelLanguage), profile.stickerSpec())
+        ?: return "A receipt printer has no label gap to calibrate."
+    val r = sendToStickerPrinter(bytes, profile)
+    return if (r.startsWith("Sent to")) "Calibrating — the printer feeds a few labels while it learns the gap." else r
+}
+
+/** Raw bytes down the profile's transport. Off the main thread: the spooler
+ *  paths block (a process wait on CUPS). Success starts with "Sent to". */
+suspend fun sendToStickerPrinter(bytes: ByteArray, profile: PrintProfile): String =
+    withContext(Dispatchers.Default) {
         when (profile.connection) {
             "network" -> printToNetworkPrinter(profile.ip, profile.port, bytes)
             "bluetooth" -> BtPrinter.getInstance().printBytes(profile.btAddress, bytes)
             else -> printRaw(profile.printerName, bytes)
         }
     }
-}
 
 /** A deterministic label for Settings ▸ "Print a test sticker". */
 fun sampleSticker(labName: String): SampleSticker = SampleSticker(

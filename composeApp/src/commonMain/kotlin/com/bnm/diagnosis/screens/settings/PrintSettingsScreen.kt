@@ -75,6 +75,7 @@ import com.bnm.diagnosis.print.rawPrintSupported
 import com.bnm.diagnosis.print.sampleSticker
 import androidx.compose.runtime.LaunchedEffect
 import com.bnm.diagnosis.print.StickerRender
+import com.bnm.diagnosis.print.calibrateStickerPrinter
 
 /** Desktop is the primary target, so the two profiles sit side by side as soon
  *  as there is room. Same breakpoint the lab screens use (LabHomeScreen). */
@@ -729,13 +730,91 @@ private fun ColumnScope.StickerStockBlock(profile: PrintProfile) {
     // The accession barcode has a physical minimum: 2-dot bars plus quiet zones.
     // Narrower stock would print a code no scanner reads, so say so here rather
     // than let the desk find out at the bench.
-    val minW = StickerRender.minWidthMm(ACCESSION_CHARS)
+    var dpi by remember { mutableStateOf(profile.stickerDpi) }
+    val minW = StickerRender.minWidthMm(ACCESSION_CHARS, dpi)
     if ((w.toIntOrNull() ?: 0) < minW) {
         Caution(
             "Labels narrower than $minW mm cannot carry the accession barcode at a scannable size. " +
                 "Use $minW mm or wider stock.",
         )
     }
+
+    // ── Print position: the knobs for "it prints, but lands on the next sticker" ──
+    HorizontalDivider(color = c.border)
+    Text("Print position", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+    Text(
+        "If a line lands on the next sticker or labels drift: 1) Calibrate after loading a roll — the printer " +
+            "learns where each label starts. 2) Check the size and gap above against the label itself. " +
+            "3) Nudge the print with the shift controls. Print a test sticker after each change.",
+        style = MaterialTheme.typography.bodySmall,
+        color = c.textSecondary,
+    )
+    CalibrateButton(profile)
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        ChoiceChip("203 dpi", dpi == 203) { dpi = 203; profile.stickerDpi = 203 }
+        ChoiceChip("300 dpi", dpi == 300) { dpi = 300; profile.stickerDpi = 300 }
+    }
+    var rotate by remember { mutableStateOf(profile.stickerRotate) }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Rotate 180°", style = MaterialTheme.typography.bodyMedium)
+            Text("Labels come out upside down — the roll is loaded the other way round.",
+                style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
+        }
+        Switch(checked = rotate, onCheckedChange = { rotate = it; profile.stickerRotate = it })
+    }
+    var shiftY by remember { mutableStateOf(profile.stickerShiftYmm) }
+    var shiftX by remember { mutableStateOf(profile.stickerShiftXmm) }
+    ShiftRow("Shift down", shiftY, unitHint = "− moves the print up") { shiftY = it; profile.stickerShiftYmm = it }
+    ShiftRow("Shift right", shiftX, unitHint = "− moves the print left") { shiftX = it; profile.stickerShiftXmm = it }
+}
+
+/** ± 0.5 mm stepper for a print-position nudge. */
+@Composable
+private fun ShiftRow(label: String, value: Float, unitHint: String, onChange: (Float) -> Unit) {
+    val c = AppTheme.colors
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyMedium)
+            Text(unitHint, style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
+        }
+        OutlinedButton(onClick = { onChange((value - 0.5f).coerceAtLeast(-10f)) }, enabled = value > -10f) { Text("−") }
+        Text(
+            (if (value > 0f) "+" else "") + formatHalfMm(value) + " mm",
+            style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
+        )
+        OutlinedButton(onClick = { onChange((value + 0.5f).coerceAtMost(10f)) }, enabled = value < 10f) { Text("+") }
+    }
+}
+
+private fun formatHalfMm(v: Float): String {
+    val whole = v.toInt()
+    val half = kotlin.math.abs(v - whole) >= 0.25f
+    return if (half) "$whole.5" else "$whole"
+}
+
+/** Sends the printer's own gap calibration down the configured transport. */
+@Composable
+private fun ColumnScope.CalibrateButton(profile: PrintProfile) {
+    val scope = rememberCoroutineScope()
+    var msg by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    OutlinedButton(
+        onClick = {
+            if (busy) return@OutlinedButton
+            busy = true; msg = "Sending…"
+            scope.launch {
+                msg = runCatching { calibrateStickerPrinter(profile) }.getOrElse { "Failed: ${it.message}" }
+                busy = false
+            }
+        },
+        enabled = !busy,
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text("Calibrate label sensor") }
+    msg?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
 }
 
 /** "ACC-S12-00042" — the longest accession a normal seat series produces. */

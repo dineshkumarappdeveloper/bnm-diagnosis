@@ -31,7 +31,24 @@ data class SampleSticker(
 )
 
 /** Label stock in mm. */
-data class StickerSpec(val widthMm: Int, val heightMm: Int, val gapMm: Int = 2) {
+data class StickerSpec(
+    val widthMm: Int,
+    val heightMm: Int,
+    val gapMm: Int = 2,
+    /** 203 (8 dots/mm — nearly every desk label printer) or 300 (12 dots/mm). */
+    val dpi: Int = 203,
+    /** Print the label the other way up — the roll is loaded the other way round. */
+    val rotate: Boolean = false,
+    /** Nudge the whole print, in mm: +x = right, +y = down. The knob for a
+     *  printer whose sensor-to-head offset walks the last line onto the next
+     *  label; 0.5 mm steps are what a desk actually needs. */
+    val shiftXmm: Float = 0f,
+    val shiftYmm: Float = 0f,
+) {
+    val dotsPerMm: Int get() = if (dpi >= 300) 12 else 8
+    val shiftXDots: Int get() = (shiftXmm * dotsPerMm).toInt()
+    val shiftYDots: Int get() = (shiftYmm * dotsPerMm).toInt()
+
     companion object {
         /** 50 x 25 x gap 2 — the stock nearly every Indian lab already has on the shelf. */
         val DEFAULT: StickerSpec = StickerSpec(50, 25, 2)
@@ -61,7 +78,7 @@ enum class LabelLanguage(val slug: String, val title: String, val blurb: String)
     }
 }
 
-/** Dots per mm at 203 dpi. */
+/** Dots per mm at 203 dpi — the reference the layout constants were tuned at. */
 private const val DPMM = 8
 
 /** Left/right keep-out so print heads with a dead edge and slightly skewed stock still show every glyph. */
@@ -83,7 +100,12 @@ object StickerRender {
     private const val GS = 0x1D
     private const val LF = 0x0A
 
-    private const val TOP = 8          // top/bottom keep-out
+    private const val TOP = 8          // top keep-out
+    /** Bottom keep-out in mm. The gap sensor sits a little ahead of the print
+     *  head, so an uncalibrated printer starts each label a touch late — a line
+     *  drawn 1 mm from the bottom edge lands on the NEXT label. 2.5 mm absorbs
+     *  that. (Field report, 2026-09-08: footer rows spilling onto the next sticker.) */
+    private const val BOTTOM_MM = 2.5
     private const val GAP = 4          // between text rows
     private const val GAP_BAR = 6      // text → barcode
     private const val BAR_RATIO = 0.32 // barcode height as a share of label height
@@ -104,50 +126,82 @@ object StickerRender {
         }
 
     fun tspl(stickers: List<SampleSticker>, spec: StickerSpec, copies: Int = 1): String {
-        val w = spec.widthMm * DPMM
-        val h = spec.heightMm * DPMM
+        val dpmm = spec.dotsPerMm
+        val w = spec.widthMm * dpmm
+        val h = spec.heightMm * dpmm
         val cw = w - 2 * SIDE_MARGIN
         val n = copies.coerceAtLeast(1)
         val f = faces(h)
-        val r = rows(h, f.name.tsplH, f.sub.tsplH, f.foot.tsplH, f.readableH)
+        val r = rows(h, f.name.tsplH, f.sub.tsplH, f.foot.tsplH, f.readableH, bottom = (BOTTOM_MM * dpmm).toInt())
+        val sx = spec.shiftXDots
+        val sy = spec.shiftYDots
         val sb = StringBuilder()
+        // ONE header per job. Re-issuing SIZE/GAP for every label makes TSC /
+        // Xprinter firmware re-seek the gap mid-job — that is the skipped or
+        // half-fed sticker labs report. REFERENCE / OFFSET / SHIFT are reset so a
+        // value a driver utility stored earlier cannot walk the print off the label.
+        sb.append("SIZE ${spec.widthMm} mm,${spec.heightMm} mm\r\n")
+        sb.append("GAP ${spec.gapMm} mm,0 mm\r\n")
+        sb.append("DIRECTION ${if (spec.rotate) 0 else 1}\r\n")
+        sb.append("REFERENCE 0,0\r\n")
+        sb.append("OFFSET 0 mm\r\n")
+        sb.append("SHIFT 0\r\n")
         for (s in stickers) {
             val t = lines(s, cw / f.name.tsplW, cw / f.sub.tsplW, cw / f.foot.tsplW)
             val mod = BAR_MODULE_DOTS
-            val bx = barX(w, t.accession.length, mod)
-            sb.append("SIZE ${spec.widthMm} mm,${spec.heightMm} mm\r\n")
-            sb.append("GAP ${spec.gapMm} mm,0 mm\r\n")
-            sb.append("DIRECTION 1\r\n")
+            val bx = (barX(w, t.accession.length, mod) + sx).coerceAtLeast(0)
             sb.append("CLS\r\n")
-            tsplText(sb, r.nameY, f.name, t.name)
-            tsplText(sb, r.subY, f.sub, t.sub)
+            tsplText(sb, r.nameY + sy, f.name, t.name, sx)
+            tsplText(sb, r.subY + sy, f.sub, t.sub, sx)
             // readable=1 prints the accession under the bars; wide == narrow (Code 128 has no wide element).
-            sb.append("BARCODE $bx,${r.barY},\"128\",${r.barH},1,0,$mod,$mod,\"${t.accession}\"\r\n")
-            tsplText(sb, r.footY, f.foot, t.foot)
+            sb.append("BARCODE $bx,${(r.barY + sy).coerceAtLeast(0)},\"128\",${r.barH},1,0,$mod,$mod,\"${t.accession}\"\r\n")
+            tsplText(sb, r.footY + sy, f.foot, t.foot, sx)
             sb.append("PRINT 1,$n\r\n")
         }
         return sb.toString()
     }
 
+    /**
+     * The printer's own media calibration: it feeds a few labels and learns the
+     * gap, which is the cure for a print that drifts a little further every
+     * sticker. Null where the language has no such command (a receipt roll
+     * has no gaps to find).
+     */
+    fun calibrate(language: LabelLanguage, spec: StickerSpec): ByteArray? = when (language) {
+        LabelLanguage.TSPL -> (
+            "SIZE ${spec.widthMm} mm,${spec.heightMm} mm\r\n" +
+                "GAP ${spec.gapMm} mm,0 mm\r\n" +
+                "GAPDETECT\r\n"
+            ).encodeToByteArray()
+        LabelLanguage.ZPL -> "~JC\n".encodeToByteArray()
+        LabelLanguage.ESCPOS -> null
+    }
+
     fun zpl(stickers: List<SampleSticker>, spec: StickerSpec, copies: Int = 1): String {
-        val w = spec.widthMm * DPMM
-        val h = spec.heightMm * DPMM
+        val dpmm = spec.dotsPerMm
+        val w = spec.widthMm * dpmm
+        val h = spec.heightMm * dpmm
         val cw = w - 2 * SIDE_MARGIN
         val n = copies.coerceAtLeast(1)
         val f = faces(h)
-        val r = rows(h, f.name.zplH, f.sub.zplH, f.foot.zplH, f.readableH)
+        val r = rows(h, f.name.zplH, f.sub.zplH, f.foot.zplH, f.readableH, bottom = (BOTTOM_MM * dpmm).toInt())
+        val sx = spec.shiftXDots
+        val sy = spec.shiftYDots
         val sb = StringBuilder()
+        // ZPL is one ^XA…^XZ format per label by design; ^MNY says "gap media,
+        // web sensing" and ^PON/^POI set the orientation — both are restated so
+        // a setting saved into the printer by another tool does not win.
         for (s in stickers) {
             val t = lines(s, cw / zplGlyphWidth(f.name.zplW), cw / zplGlyphWidth(f.sub.zplW), cw / zplGlyphWidth(f.foot.zplW))
             val mod = BAR_MODULE_DOTS
-            val bx = barX(w, t.accession.length, mod)
+            val bx = (barX(w, t.accession.length, mod) + sx).coerceAtLeast(0)
             sb.append("^XA\n")
-            sb.append("^PW$w\n^LL$h\n^LH0,0\n")
-            zplText(sb, r.nameY, f.name, t.name)
-            zplText(sb, r.subY, f.sub, t.sub)
+            sb.append("^PW$w\n^LL$h\n^LH0,0\n^MNY\n${if (spec.rotate) "^POI" else "^PON"}\n")
+            zplText(sb, r.nameY + sy, f.name, t.name, sx)
+            zplText(sb, r.subY + sy, f.sub, t.sub, sx)
             // ^BY module,ratio,height ; ^BC orientation,height,interpretation-below,above,check
-            sb.append("^FO$bx,${r.barY}^BY$mod,2,${r.barH}^BCN,${r.barH},Y,N,N^FD${t.accession}^FS\n")
-            zplText(sb, r.footY, f.foot, t.foot)
+            sb.append("^FO$bx,${(r.barY + sy).coerceAtLeast(0)}^BY$mod,2,${r.barH}^BCN,${r.barH},Y,N,N^FD${t.accession}^FS\n")
+            zplText(sb, r.footY + sy, f.foot, t.foot, sx)
             sb.append("^PQ$n\n")
             sb.append("^XZ\n")
         }
@@ -166,7 +220,7 @@ object StickerRender {
         val cols = (cw / 12).coerceAtLeast(8)
         val n = copies.coerceAtLeast(1)
         val f = faces(h)
-        val barH = rows(h, f.name.tsplH, f.sub.tsplH, f.foot.tsplH, f.readableH).barH.coerceIn(1, 255)
+        val barH = rows(h, f.name.tsplH, f.sub.tsplH, f.foot.tsplH, f.readableH, bottom = TOP).barH.coerceIn(1, 255)
         val out = ArrayList<Byte>(stickers.size * n * 160)
         fun b(vararg v: Int) { for (x in v) out.add(x.toByte()) }
         fun str(s: String) { for (ch in s) out.add(ch.code.toByte()) }
@@ -255,8 +309,8 @@ object StickerRender {
      * above the footer so short and tall stocks both look balanced. On a stock
      * too short for the tiers the barcode shrinks first (floor [BAR_MIN_RATIO]).
      */
-    private fun rows(h: Int, nameH: Int, subH: Int, footH: Int, readableH: Int): Rows {
-        val fixed = TOP + nameH + GAP + subH + GAP_BAR + readableH + GAP + footH + TOP
+    private fun rows(h: Int, nameH: Int, subH: Int, footH: Int, readableH: Int, bottom: Int): Rows {
+        val fixed = TOP + nameH + GAP + subH + GAP_BAR + readableH + GAP + footH + bottom
         var barH = (h * BAR_RATIO).toInt()
         var spare = h - fixed - barH
         if (spare < 0) {
@@ -308,19 +362,22 @@ object StickerRender {
     const val QUIET_ZONE_DOTS = 10 * BAR_MODULE_DOTS
 
     /** Narrowest stock, in mm, that carries an accession of [accessionLength]
-     *  characters at 2-dot modules with both quiet zones (12 chars → 47 mm). */
-    fun minWidthMm(accessionLength: Int): Int =
-        (BAR_MODULE_DOTS * code128Modules(accessionLength) + 2 * QUIET_ZONE_DOTS + 7) / 8
+     *  characters at 2-dot modules with both quiet zones (12 chars → 47 mm at
+     *  203 dpi; a 300 dpi head packs the same bars into 32 mm). */
+    fun minWidthMm(accessionLength: Int, dpi: Int = 203): Int {
+        val dpmm = if (dpi >= 300) 12 else 8
+        return (BAR_MODULE_DOTS * code128Modules(accessionLength) + 2 * QUIET_ZONE_DOTS + dpmm - 1) / dpmm
+    }
 
     private fun barX(w: Int, dataLen: Int, mod: Int): Int =
         ((w - mod * code128Modules(dataLen)) / 2).coerceAtLeast(QUIET_ZONE_DOTS)
 
-    private fun tsplText(sb: StringBuilder, y: Int, face: Face, text: String) {
-        sb.append("TEXT $SIDE_MARGIN,$y,\"${face.tsplFont}\",0,1,1,\"$text\"\r\n")
+    private fun tsplText(sb: StringBuilder, y: Int, face: Face, text: String, sx: Int = 0) {
+        sb.append("TEXT ${(SIDE_MARGIN + sx).coerceAtLeast(0)},${y.coerceAtLeast(0)},\"${face.tsplFont}\",0,1,1,\"$text\"\r\n")
     }
 
-    private fun zplText(sb: StringBuilder, y: Int, face: Face, text: String) {
-        sb.append("^FO$SIDE_MARGIN,$y^A0N,${face.zplH},${face.zplW}^FD$text^FS\n")
+    private fun zplText(sb: StringBuilder, y: Int, face: Face, text: String, sx: Int = 0) {
+        sb.append("^FO${(SIDE_MARGIN + sx).coerceAtLeast(0)},${y.coerceAtLeast(0)}^A0N,${face.zplH},${face.zplW}^FD$text^FS\n")
     }
 
     // ---- sanitise tables ---------------------------------------------------
