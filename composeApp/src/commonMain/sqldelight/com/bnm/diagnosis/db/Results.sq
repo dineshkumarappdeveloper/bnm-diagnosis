@@ -68,6 +68,16 @@ UPDATE lab_results SET verified_by = ?, verified_at = ?, verified_by_id = ? WHER
 markApproved:
 UPDATE lab_results SET approved_by = ?, approved_at = ?, approved_by_id = ? WHERE order_id = ?;
 
+-- Signatory-id backfill: rows stamped before ids existed carry only the
+-- display name. Where that name is one staff member's, the id is filled in so
+-- a reprint follows the PERSON (current name, signature) rather than the name
+-- as it was typed then.
+backfillVerifiedById:
+UPDATE lab_results SET verified_by_id = ? WHERE verified_by_id IS NULL AND lower(trim(verified_by)) = lower(trim(?));
+
+backfillApprovedById:
+UPDATE lab_results SET approved_by_id = ? WHERE approved_by_id IS NULL AND lower(trim(approved_by)) = lower(trim(?));
+
 setNotes:
 UPDATE lab_results SET notes = ? WHERE order_id = ? AND test_id = ? AND parameter_key = ?;
 

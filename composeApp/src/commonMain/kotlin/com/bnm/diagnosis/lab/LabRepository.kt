@@ -834,6 +834,34 @@ class LabRepository(
         }
     }
 
+    // ── Signatory ids on old rows ───────────────────────────────────────────
+
+    /**
+     * Fill in signatory ids on result rows stamped before ids existed, by
+     * matching the stored display name to a staff row — only when that name
+     * belongs to exactly ONE staff member (retired included), so a namesake can
+     * never claim another's sign-off. The seeded "Lab Owner" placeholder is the
+     * usual case, and it is mapped to the default owner row by its STABLE id
+     * even after the owner has renamed themselves — that rename is exactly why
+     * the old reports read "Lab Owner". Idempotent; runs at every start and
+     * after every staff edit.
+     */
+    suspend fun backfillSignatoryIds(staff: List<com.bnm.diagnosis.staff.Staff>, defaultOwnerId: String) =
+        withContext(Dispatchers.Default) {
+            val unique = staff.groupBy { it.name.trim().lowercase() }.filterValues { it.size == 1 }
+            db.transaction {
+                for ((_, rows) in unique) {
+                    val s = rows.single()
+                    resQ.backfillVerifiedById(s.id, s.name)
+                    resQ.backfillApprovedById(s.id, s.name)
+                }
+                if (staff.any { it.id == defaultOwnerId }) {
+                    resQ.backfillVerifiedById(defaultOwnerId, "Lab Owner")
+                    resQ.backfillApprovedById(defaultOwnerId, "Lab Owner")
+                }
+            }
+        }
+
     // ── Analyzer graphs (histograms / scattergram) ──────────────────────────
 
     /** Every graph the analyzer left against [orderId], per test and kind. */

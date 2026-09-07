@@ -128,6 +128,11 @@ fun App() {
 
     // First-run seed: ~40 standard tests + panels, only when the catalog is empty.
     LaunchedEffect(Unit) { runCatching { SeedCatalog.seedIfEmpty(labRepo) } }
+    // Old result rows carry only the signatory's NAME; give them the person's
+    // id so a reprint follows a rename (the seeded "Lab Owner" above all).
+    LaunchedEffect(Unit) {
+        runCatching { labRepo.backfillSignatoryIds(staffRepo.listAll(), StaffRepository.DEFAULT_OWNER_ID) }
+    }
     val syncEngine = remember {
         SyncEngine().apply {
             register("customer", "Customers")     { repo.syncCustomerDirectory(it) }

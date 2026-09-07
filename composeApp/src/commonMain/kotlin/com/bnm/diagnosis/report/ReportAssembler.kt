@@ -82,6 +82,11 @@ class ReportAssembler(
                 catalog[r.testId]?.parameters?.firstOrNull { it.key == r.parameterKey }?.name
                     ?: r.parameterKey
             },
+            // The NAME follows the person too: someone who corrected their name
+            // (the seeded "Lab Owner" placeholder above all) reprints under the
+            // current one. Rows without an id keep their snapshot.
+            verifiedByName = currentName(verifiedBy, verifiedById),
+            approvedByName = currentName(approvedBy, approvedById),
             signature = signatureFor(approvedBy, approvedById),
             // Same lookup for the technician who verified: whoever was signed
             // in when Verify was pressed is the name (and id) on the row, and
@@ -96,6 +101,10 @@ class ReportAssembler(
             graphsFor = { t -> toReportGraphs(graphs[t.testId].orEmpty()) },
         )
     }
+
+    /** The current staff name for a stamped id, else the stored snapshot. */
+    internal suspend fun currentName(stored: String?, staffId: String?): String? =
+        staffId?.takeIf { it.isNotBlank() }?.let { staff.byId(it)?.name?.trim()?.takeIf { n -> n.isNotEmpty() } } ?: stored
 
     /**
      * A signatory's signature block (approver or verifier), or null when the

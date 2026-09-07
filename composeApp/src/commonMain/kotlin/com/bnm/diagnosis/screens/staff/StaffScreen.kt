@@ -53,6 +53,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.bnm.diagnosis.staff.LocalStaffRepository
 import com.bnm.diagnosis.staff.LocalStaffSession
+import com.bnm.diagnosis.lab.LocalLabRepository
 import com.bnm.diagnosis.staff.Staff
 import com.bnm.diagnosis.staff.StaffCredential
 import com.bnm.diagnosis.staff.StaffRepository
@@ -77,6 +78,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun StaffScreen(onBack: () -> Unit) {
     val repo = LocalStaffRepository.current
+    val labRepo = LocalLabRepository.current
     val session = LocalStaffSession.current
     val signedIn by session.current.collectAsState()
     val scope = rememberCoroutineScope()
@@ -194,6 +196,8 @@ fun StaffScreen(onBack: () -> Unit) {
                         target?.copy(name = name, role = role, username = username)
                             ?: Staff(id = "", name = name, role = role, username = username)
                     ).getOrElse { message = it.message; return@launch }
+                    // A rename is exactly when old rows need their ids filled in.
+                    runCatching { labRepo.backfillSignatoryIds(repo.listAll(), StaffRepository.DEFAULT_OWNER_ID) }
 
                     val credResult = when (credential) {
                         is CredentialAction.Keep -> Result.success(Unit)

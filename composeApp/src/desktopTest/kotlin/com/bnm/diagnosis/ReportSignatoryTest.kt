@@ -105,5 +105,43 @@ class ReportSignatoryTest {
         assertEquals("S. Kumar", doc.verifiedBy)
         assertEquals("DMLT", doc.verifierSignature?.qualifications, "the retired namesake's ink — by id")
         assertEquals("MD (Path)", doc.signature?.qualifications)
+
+        // The NAME follows the person: a rename reprints under the current name.
+        staff.upsert(retired.copy(name = "S. Kumaravel"))
+        assertEquals("S. Kumaravel", assembler.assemble(order.id, "Sig Lab", stampReportedNow = false)!!.verifiedBy)
+    }
+
+    @Test
+    fun `rows stamped Lab Owner before ids existed follow the owner's rename after the backfill`() = runBlocking {
+        val db = freshDb()
+        val repo = LabRepository(db, ApiClient.json)
+        val staff = StaffRepository(db, ApiClient.json)
+        val owner = staff.upsert(Staff(id = StaffRepository.DEFAULT_OWNER_ID, name = "Lab Owner", role = StaffRole.OWNER))
+        // Two technicians who share a name: neither may be backfilled from that name.
+        staff.upsert(Staff(id = "", name = "A. Raj", role = StaffRole.TECHNICIAN))
+        staff.upsert(Staff(id = "", name = "a. raj", role = StaffRole.TECHNICIAN))
+        repo.upsertTest(LabTest(id = "t-bf", code = "BF", name = "Glucose", price = 10.0,
+            parameters = listOf(TestParameter(key = "glu", name = "Glucose", unit = "mg/dL", decimals = 0,
+                ranges = listOf(RefRange(low = 70.0, high = 100.0))))))
+        val patient = repo.upsertPatient(Patient(id = "pat-bf", name = "BF", sex = "M", ageYears = 30))
+        val o1 = repo.createLabOrder(patient.id, testIds = listOf("t-bf")).getOrThrow()
+        repo.enterResult(o1.id, "t-bf", "glu", "90").getOrThrow()
+        repo.verifyOrder(o1.id, "Lab Owner").getOrThrow()          // name only — the pre-id world
+        repo.approveOrder(o1.id, "Lab Owner").getOrThrow()
+        val o2 = repo.createLabOrder(patient.id, testIds = listOf("t-bf")).getOrThrow()
+        repo.enterResult(o2.id, "t-bf", "glu", "90").getOrThrow()
+        repo.verifyOrder(o2.id, "A. Raj").getOrThrow()
+
+        // The owner renames themselves — the very thing that left "Lab Owner" on old reports.
+        staff.upsert(owner.copy(name = "Dr. Meena Iyer"))
+        repo.backfillSignatoryIds(staff.listAll(), StaffRepository.DEFAULT_OWNER_ID)
+
+        val rows1 = repo.resultsForOrder(o1.id)
+        assertEquals(StaffRepository.DEFAULT_OWNER_ID, rows1.single().verifiedById)
+        assertEquals(StaffRepository.DEFAULT_OWNER_ID, rows1.single().approvedById)
+        val doc = ReportAssembler(repo, staff).assemble(o1.id, "Lab", stampReportedNow = false)!!
+        assertEquals("Dr. Meena Iyer", doc.verifiedBy, "an old report now names the person, not the placeholder")
+        assertEquals("Dr. Meena Iyer", doc.approvedBy)
+        assertNull(repo.resultsForOrder(o2.id).single().verifiedById, "a namesake pair is never backfilled")
     }
 }

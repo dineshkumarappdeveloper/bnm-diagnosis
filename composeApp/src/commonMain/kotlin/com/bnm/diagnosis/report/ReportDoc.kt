@@ -423,6 +423,10 @@ fun buildReportDoc(
     /** Analyzer graphs for an ordered test (the assembler reads them from the
      *  graphs table); none by default. */
     graphsFor: (LabOrderTest) -> List<ReportGraph> = { emptyList() },
+    /** The signatories' CURRENT names, resolved by the assembler from the staff
+     *  ids stamped on the rows; null keeps the name snapshot the rows carry. */
+    verifiedByName: String? = null,
+    approvedByName: String? = null,
 ): ReportDoc {
     val age = LabRepository.resolveAgeYears(patient.dob, patient.ageYears)
     val ageLabel = when {
@@ -464,8 +468,8 @@ fun buildReportDoc(
         priority = order.priority.takeIf { !it.equals("routine", ignoreCase = true) }?.uppercase(),
         sections = sections,
         pagination = pagination,
-        verifiedBy = results.firstNotNullOfOrNull { it.verifiedBy?.takeIf { v -> v.isNotBlank() } },
-        approvedBy = results.firstNotNullOfOrNull { it.approvedBy?.takeIf { v -> v.isNotBlank() } },
+        verifiedBy = verifiedByName ?: results.firstNotNullOfOrNull { it.verifiedBy?.takeIf { v -> v.isNotBlank() } },
+        approvedBy = approvedByName ?: results.firstNotNullOfOrNull { it.approvedBy?.takeIf { v -> v.isNotBlank() } },
         // Results carry the sign-off stamp; the order's own approved_at is the
         // fallback for rows written before results were stamped individually.
         approvedOn = (results.firstNotNullOfOrNull { it.approvedAt?.takeIf { a -> a.isNotBlank() } }
