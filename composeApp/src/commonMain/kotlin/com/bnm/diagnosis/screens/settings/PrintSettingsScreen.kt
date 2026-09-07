@@ -748,14 +748,27 @@ private fun ColumnScope.StickerStockBlock(profile: PrintProfile) {
     // ── Print position: the knobs for "it prints, but lands on the next sticker" ──
     HorizontalDivider(color = c.border)
     Text("Print position", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-    Text(
-        "If a line lands on the next sticker or labels drift: 1) Calibrate after loading a roll — the printer " +
-            "learns where each label starts. 2) Check the size and gap above against the label itself. " +
-            "3) Nudge the print with the shift controls. Print a test sticker after each change.",
-        style = MaterialTheme.typography.bodySmall,
-        color = c.textSecondary,
-    )
-    CalibrateButton(profile)
+    if (LabelLanguage.fromSlug(profile.labelLanguage) == LabelLanguage.ESCPOS) {
+        Text(
+            "A receipt printer has no label sensor — it cannot see where a sticker starts. The app feeds " +
+                "each label by exactly its pitch, so once the FIRST label is aligned every later one is too. " +
+                "To align: print a test sticker; if the print starts N mm below the label's top edge, set " +
+                "Shift down to −N (above the edge: +N); print again. One blank label is fed out after each " +
+                "job so the printed ones can be peeled. Pressing FEED or pulling the paper loses the " +
+                "alignment — re-tune once. A label printer (TSPL) avoids all of this.",
+            style = MaterialTheme.typography.bodySmall,
+            color = c.textSecondary,
+        )
+    } else {
+        Text(
+            "If a line lands on the next sticker or labels drift: 1) Calibrate after loading a roll — the printer " +
+                "learns where each label starts. 2) Check the size and gap above against the label itself. " +
+                "3) Nudge the print with the shift controls. Print a test sticker after each change.",
+            style = MaterialTheme.typography.bodySmall,
+            color = c.textSecondary,
+        )
+        CalibrateButton(profile)
+    }
     FlowRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -787,12 +800,12 @@ private fun ShiftRow(label: String, value: Float, unitHint: String, onChange: (F
             Text(label, style = MaterialTheme.typography.bodyMedium)
             Text(unitHint, style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
         }
-        OutlinedButton(onClick = { onChange((value - 0.5f).coerceAtLeast(-10f)) }, enabled = value > -10f) { Text("−") }
+        OutlinedButton(onClick = { onChange((value - 0.5f).coerceAtLeast(-30f)) }, enabled = value > -30f) { Text("−") }
         Text(
             (if (value > 0f) "+" else "") + formatHalfMm(value) + " mm",
             style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
         )
-        OutlinedButton(onClick = { onChange((value + 0.5f).coerceAtMost(10f)) }, enabled = value < 10f) { Text("+") }
+        OutlinedButton(onClick = { onChange((value + 0.5f).coerceAtMost(30f)) }, enabled = value < 30f) { Text("+") }
     }
 }
 

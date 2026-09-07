@@ -32,8 +32,14 @@ class StickerFitTest {
         val fifty = StickerRender.tspl(s, StickerSpec(50, 25)).lines().first { it.startsWith("BARCODE") }
         assertTrue(fifty.startsWith("BARCODE 33,"), "centred on 50 mm stock: $fifty")
         assertTrue("^BY2," in StickerRender.zpl(s, StickerSpec(38, 25)))
-        val esc = StickerRender.escPos(s, StickerSpec(38, 25))
-        val gsW = esc.indices.firstOrNull { i -> esc[i] == 0x1D.toByte() && esc[i + 1] == 'w'.code.toByte() }
-        assertTrue(gsW != null && esc[gsW + 2] == 2.toByte(), "ESC/POS module width must be 2")
+        // ESC/POS draws the bars itself at 2 dots per module, centred in the label.
+        val raster = StickerRender.barcodeRaster("ACC-S1-00042", 400, 40)
+        val bytesPerRow = raster[4].toInt() and 0xFF
+        assertEquals(50, bytesPerRow)
+        val firstRow = raster.copyOfRange(8, 8 + bytesPerRow)
+        val bits = firstRow.flatMap { byte -> (7 downTo 0).map { (byte.toInt() shr it) and 1 } }
+        val first = bits.indexOf(1); val last = bits.lastIndexOf(1)
+        assertEquals(33, first, "bars start at the quiet-zone-centred x of 50 mm stock")
+        assertTrue(last - first + 1 == 167 * 2, "167 modules x 2 dots wide: ${last - first + 1}")
     }
 }

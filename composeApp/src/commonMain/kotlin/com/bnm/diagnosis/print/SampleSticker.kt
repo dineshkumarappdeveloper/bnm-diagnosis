@@ -218,46 +218,107 @@ object StickerRender {
     }
 
     /**
-     * A receipt printer pressed into label duty: centred text, bold double-height
-     * name, Code 128 (Code B) with the HRI below, then feed + partial cut per copy.
-     * Font A is 12 dots wide, so the column budget comes from the label width.
+     * A RECEIPT printer (TVS RP 3200, Epson TM-T…) loaded with a LABEL roll —
+     * the lab's actual setup (2026-09-08). It has no label sensor: it cannot
+     * see where a sticker starts, so alignment is arithmetic and nothing else:
+     *
+     *  • every label block advances the paper by EXACTLY one pitch (label
+     *    height + gap): `ESC J n` feeds in dots (`GS P 203 203` pins the motion
+     *    unit) and a RASTER barcode whose advance is its row count — `GS k`
+     *    feeds an undocumented extra amount after the code, so it is not used;
+     *  • the job ends on a label boundary: the vertical shift is fed BEFORE the
+     *    first label and un-fed AFTER the last, so it moves the print within
+     *    the label without moving the roll's phase — which is what makes the
+     *    shift knob a one-time alignment instead of a per-job drift;
+     *  • one blank pitch is fed after the last label so the printed ones clear
+     *    the exit slot — one label per job is the price of having no sensor;
+     *  • never a cut: the feed to the cutter would move the paper by the
+     *    head-to-cutter distance and lose the phase. Labels peel off the liner.
+     *
+     * Once the FIRST label is aligned (Shift up/down until the test sticker
+     * sits on the label) every later one is too — until someone presses FEED
+     * or pulls the paper, after which the shift is re-tuned once. A TSPL/ZPL
+     * label printer has a gap sensor and none of this.
      */
     fun escPos(stickers: List<SampleSticker>, spec: StickerSpec, copies: Int = 1): ByteArray {
-        val w = spec.widthMm * DPMM
-        val h = spec.heightMm * DPMM
+        val dpmm = DPMM // receipt heads are 203 dpi; GS P below makes ESC J n = n dots
+        val w = spec.widthMm * dpmm
+        val h = spec.heightMm * dpmm
+        val pitch = h + spec.gapMm * dpmm
         val cw = w - 2 * SIDE_MARGIN
-        val cols = (cw / 12).coerceAtLeast(8)
+        val cols = (cw / 12).coerceAtLeast(8) // Font A is 12 dots wide
         val n = copies.coerceAtLeast(1)
         val f = faces(h)
-        val barH = rows(h, f, f.name.tsplH, f.sub.tsplH, f.foot.tsplH, bottom = TOP).barH.coerceIn(1, 255)
-        val out = ArrayList<Byte>(stickers.size * n * 160)
+        val nameH = if (h >= 200) 48 else 24   // double height only where the stock has room
+        val r = rows(h, f, nameH, 24, 24, bottom = (BOTTOM_MM * dpmm).toInt())
+        val left = spec.shiftXDots.coerceAtLeast(0)
+        val phase = ((spec.shiftYDots % pitch) + pitch) % pitch
+
+        val out = ArrayList<Byte>(stickers.size * n * 3000)
         fun b(vararg v: Int) { for (x in v) out.add(x.toByte()) }
-        fun str(s: String) { for (ch in s) out.add(ch.code.toByte()) }
+        fun str(t: String) { for (ch in t) out.add(ch.code.toByte()) }
+        /** ESC J n — print the buffered line (if any) and feed EXACTLY [dots]. */
+        fun feed(dots: Int) {
+            var d = dots.coerceAtLeast(0)
+            do { val step = minOf(d, 255); b(ESC, 0x4A, step); d -= step } while (d > 0)
+        }
+
+        b(ESC, 0x40)                                            // ESC @  reset
+        b(GS, 0x50, 203, 203)                                   // GS P   motion unit = 1/203" = 1 dot
+        b(GS, 0x4C, left and 0xFF, (left shr 8) and 0xFF)       // GS L   left margin = the "shift right" knob
+        b(GS, 0x57, w and 0xFF, (w shr 8) and 0xFF)             // GS W   print width = the label (printer clamps)
+        feed(phase)
 
         for (s in stickers) {
             val t = lines(s, cols, cols, cols)
-            // '{' is the function-code escape inside Code B data; a literal one is sent doubled.
-            val data = ("{B" + t.accession.replace("{", "{{")).take(255)
-            val mod = BAR_MODULE_DOTS
+            val raster = barcodeRaster(t.accession, w, r.barH)
             repeat(n) {
-                b(ESC, 0x40)                       // ESC @   initialise
-                b(ESC, 0x61, 1)                    // ESC a 1 centre
-                b(ESC, 0x45, 1); b(GS, 0x21, 0x10) // bold + double height
-                str(t.name); b(LF)
+                feed(r.nameY)
+                b(ESC, 0x61, 1)                                 // centre
+                b(ESC, 0x45, 1)                                 // bold
+                if (nameH == 48) b(GS, 0x21, 0x10)              // double height
+                str(t.name); feed(r.subY - r.nameY)
                 b(GS, 0x21, 0x00); b(ESC, 0x45, 0)
-                str(t.sub); b(LF)
-                b(GS, 0x68, barH)                  // GS h  barcode height
-                b(GS, 0x77, mod)                   // GS w  module width
-                b(GS, 0x48, 2)                     // GS H  HRI below
-                b(GS, 0x66, 0)                     // GS f  HRI font A
-                b(GS, 0x6B, 73, data.length)       // GS k 73 len  (Code 128, function B)
-                str(data)
-                str(t.foot); b(LF)
-                b(LF, LF)
-                b(GS, 0x56, 66, 0)                 // GS V 66 0  feed + partial cut
+                str(t.sub); feed(r.barY - r.subY)
+                b(ESC, 0x61, 0)                                 // the raster is pre-padded: left-aligned
+                for (x in raster) out.add(x)                    // advances by exactly barH rows
+                b(ESC, 0x61, 1)
+                str(t.accession); feed(r.footY - (r.barY + r.barH))
+                str(t.foot); feed(pitch - r.footY)              // → the next label's top edge
             }
         }
+        feed(pitch - phase)                                     // boundary, and the last label clears the slot
         return out.toByteArray()
+    }
+
+    /**
+     * `GS v 0` raster of the Code 128 for [accession]: [widthDots] wide with the
+     * bars centred, [rows] tall — so the paper advance is exactly [rows], which
+     * the pitch arithmetic in [escPos] depends on. An accession that will not
+     * encode still yields a blank raster of the same height: the phase must
+     * hold even when a code cannot print.
+     */
+    internal fun barcodeRaster(accession: String, widthDots: Int, rows: Int): ByteArray {
+        val bytesPerRow = (widthDots + 7) / 8
+        val row = ByteArray(bytesPerRow)
+        if (Code128.isEncodable(accession)) {
+            val modules = Code128.modules(accession)
+            val barW = modules.size * BAR_MODULE_DOTS
+            val left = ((widthDots - barW) / 2).coerceAtLeast(0)
+            for (i in modules.indices) {
+                if (!modules[i]) continue
+                for (d in 0 until BAR_MODULE_DOTS) {
+                    val x = left + i * BAR_MODULE_DOTS + d
+                    if (x < widthDots) row[x / 8] = (row[x / 8].toInt() or (0x80 ushr (x % 8))).toByte()
+                }
+            }
+        }
+        val out = ByteArray(8 + bytesPerRow * rows)
+        out[0] = GS.toByte(); out[1] = 'v'.code.toByte(); out[2] = '0'.code.toByte(); out[3] = 0
+        out[4] = (bytesPerRow and 0xFF).toByte(); out[5] = ((bytesPerRow shr 8) and 0xFF).toByte()
+        out[6] = (rows and 0xFF).toByte(); out[7] = ((rows shr 8) and 0xFF).toByte()
+        for (y in 0 until rows) row.copyInto(out, 8 + y * bytesPerRow)
+        return out
     }
 
     /**

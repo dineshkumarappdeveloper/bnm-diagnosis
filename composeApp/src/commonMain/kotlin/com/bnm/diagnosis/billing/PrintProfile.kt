@@ -107,14 +107,16 @@ class PrintProfile(private val kind: PrintKind) {
         get() = s.getBoolean(key("pref_sticker_rotate"), false)
         set(v) = s.putBoolean(key("pref_sticker_rotate"), v)
 
-    /** Print-position nudge, mm (±10, 0.5 steps): +x right, +y down. */
+    /** Print-position nudge, mm (±30, 0.5 steps): +x right, +y down. Wide
+     *  enough to reach any phase of a label pitch on a sensorless receipt
+     *  printer, where the vertical shift IS the alignment. */
     var stickerShiftXmm: Float
-        get() = s.getFloat(key("pref_sticker_shift_x"), 0f).coerceIn(-10f, 10f)
-        set(v) = s.putFloat(key("pref_sticker_shift_x"), v.coerceIn(-10f, 10f))
+        get() = s.getFloat(key("pref_sticker_shift_x"), 0f).coerceIn(-30f, 30f)
+        set(v) = s.putFloat(key("pref_sticker_shift_x"), v.coerceIn(-30f, 30f))
 
     var stickerShiftYmm: Float
-        get() = s.getFloat(key("pref_sticker_shift_y"), 0f).coerceIn(-10f, 10f)
-        set(v) = s.putFloat(key("pref_sticker_shift_y"), v.coerceIn(-10f, 10f))
+        get() = s.getFloat(key("pref_sticker_shift_y"), 0f).coerceIn(-30f, 30f)
+        set(v) = s.putFloat(key("pref_sticker_shift_y"), v.coerceIn(-30f, 30f))
 
     /** For [connection] == "system" on the STICKER profile: the OS printer that
      *  receives RAW label bytes through the spooler (a USB label printer). The

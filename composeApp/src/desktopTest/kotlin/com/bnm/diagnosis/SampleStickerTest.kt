@@ -53,11 +53,31 @@ class SampleStickerTest {
     @Test
     fun escPosCarriesCode128AccessionAndName() {
         val bytes = StickerRender.escPos(listOf(sticker), spec)
-        assertTrue(bytes.indexOf(byteArrayOf(0x1D, 'k'.code.toByte(), 73)) >= 0, "GS k 73 missing")
-        assertTrue(bytes.indexOf("{BACC-S1-00042".encodeToByteArray()) >= 0, "accession missing")
+        // The barcode is a GS v 0 raster (its advance is its row count — the
+        // pitch arithmetic depends on that); GS k is deliberately not used.
+        assertTrue(bytes.indexOf(byteArrayOf(0x1D, 'v'.code.toByte(), '0'.code.toByte(), 0)) >= 0, "GS v 0 raster missing")
+        assertTrue(bytes.indexOf(byteArrayOf(0x1D, 'k'.code.toByte())) < 0, "GS k must not be used")
+        assertTrue(bytes.indexOf("ACC-S1-00042".encodeToByteArray()) >= 0, "accession missing (printed as text under the raster)")
         assertTrue(bytes.indexOf("Kavitha Subramanian".encodeToByteArray()) >= 0, "name missing")
-        assertTrue(bytes.indexOf(byteArrayOf(0x1D, 'V'.code.toByte(), 66, 0)) >= 0, "partial cut missing")
-        assertTrue(bytes.all { it >= 0 }, "non-ASCII byte in ESC/POS stream")
+        assertTrue(bytes.indexOf(byteArrayOf(0x1D, 'V'.code.toByte())) < 0, "a label roll is never cut")
+        // Text stays ASCII; the raster bitmap and the GS P motion-unit
+        // arguments are binary by nature and are skipped here.
+        var i = 0
+        while (i < bytes.size) {
+            val b = bytes[i].toInt() and 0xFF
+            when {
+                b == 0x1D && i + 7 < bytes.size && bytes[i + 1] == 'v'.code.toByte() -> {
+                    val bpr = (bytes[i + 4].toInt() and 0xFF) or ((bytes[i + 5].toInt() and 0xFF) shl 8)
+                    val rows = (bytes[i + 6].toInt() and 0xFF) or ((bytes[i + 7].toInt() and 0xFF) shl 8)
+                    i += 8 + bpr * rows
+                }
+                // ESC J n: a feed of up to 255 dots — binary by nature.
+                b == 0x1B && i + 2 < bytes.size && bytes[i + 1] == 'J'.code.toByte() -> i += 3
+                // GS P (motion units), GS L (left margin), GS W (print width): two binary args each.
+                b == 0x1D && i + 3 < bytes.size && bytes[i + 1].toInt().toChar() in "PLW" -> i += 4
+                else -> { assertTrue(b < 0x80, "non-ASCII byte $b at $i in ESC/POS text"); i++ }
+            }
+        }
     }
 
     @Test
@@ -71,9 +91,9 @@ class SampleStickerTest {
         val zpl = StickerRender.render(LabelLanguage.ZPL, two, spec, copies = 2).decodeToString()
         assertEquals(2, zpl.lines().count { it == "^XA" }, zpl)
         assertEquals(2, zpl.lines().count { it == "^PQ2" }, zpl)
-        // ESC/POS has no quantity command: 2 stickers x 2 copies = 4 cuts.
+        // ESC/POS has no quantity command: 2 stickers x 2 copies = 4 label blocks (4 rasters).
         val esc = StickerRender.render(LabelLanguage.ESCPOS, two, spec, copies = 2)
-        assertEquals(4, esc.countOf(byteArrayOf(0x1D, 'V'.code.toByte(), 66, 0)))
+        assertEquals(4, esc.countOf(byteArrayOf(0x1D, 'v'.code.toByte(), '0'.code.toByte(), 0)))
     }
 
     @Test
