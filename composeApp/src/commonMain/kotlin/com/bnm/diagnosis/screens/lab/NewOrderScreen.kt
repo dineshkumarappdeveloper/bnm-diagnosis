@@ -87,6 +87,9 @@ import com.bnm.diagnosis.staff.LocalStaffSession
 import com.bnm.diagnosis.staff.LabPermission
 import com.bnm.diagnosis.staff.allows
 import com.bnm.diagnosis.screens.billing.PartPayment
+import com.bnm.diagnosis.billing.PrintProfiles
+import com.bnm.diagnosis.print.buildSampleStickers
+import com.bnm.diagnosis.print.printSampleStickers
 
 /**
  * Registration desk: pick/create the patient → pick tests & panels → referrer +
@@ -214,6 +217,11 @@ fun NewOrderScreen(
     var saving by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var savedOrder by remember { mutableStateOf<LabOrder?>(null) }       // order registered, sheet pending
+    var showStickers by remember { mutableStateOf(false) }               // "Print sample stickers" dialog
+    // The offer has to be SEEN: with the receipt printer on auto-print the
+    // result dialog would otherwise print and close itself in 1.2 s.
+    val stickerOfferPending = remember { PrintProfiles.barcode.let { it.enabled && !it.autoPrint } }
+    var stickerNote by remember { mutableStateOf<String?>(null) }        // auto-print outcome, shown on the result dialog
     var billLines by remember { mutableStateOf<List<GstLine>>(emptyList()) }
     var savedInvoice by remember { mutableStateOf<Invoice?>(null) }      // → SaveResultDialog
     var linkInvoice by remember { mutableStateOf<Invoice?>(null) }       // → PaymentLinkDialog
@@ -250,6 +258,18 @@ fun NewOrderScreen(
                         // fires the consumables-BOM stock deduction + margin/COGS.
                         productId = runCatching { labRepo.testById(it.testId)?.platformProductId }.getOrNull(),
                     )
+                }
+                // Sample stickers, if the desk asked for them unprompted (Settings ▸
+                // Printing ▸ Barcode sticker ▸ auto-print). Fire and forget: a label
+                // printer that is off must never hold up the payment sheet.
+                val bp = PrintProfiles.barcode
+                if (bp.enabled && bp.autoPrint && bp.isDirectlyConnected) {
+                    val labels = buildSampleStickers(order, p, expandedIds.mapNotNull { testById[it] }, labName)
+                    scope.launch {
+                        val r = runCatching { printSampleStickers(labels.flatMap { s -> List(bp.copies) { s } }, bp) }
+                            .getOrElse { "Print failed: ${it.message}" }
+                        stickerNote = if (r.startsWith("Sent to")) "Sample stickers printed (${labels.size})" else "Stickers: $r"
+                    }
                 }
                 savedOrder = order   // → PaymentSheet
                 saving = false
@@ -471,6 +491,16 @@ fun NewOrderScreen(
                 invoice = inv,
                 onView = { onFinished(order.accessionNo, inv.id) },
                 onDone = { onFinished(order.accessionNo, null) },
+                autoCloseAfterPrint = !stickerOfferPending,
+                // The user's rule: once registered, offer to print the barcode only.
+                extra = {
+                    OutlinedButton(onClick = { showStickers = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Print sample stickers")
+                    }
+                    stickerNote?.let {
+                        Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    }
+                },
             )
         }
 
@@ -487,7 +517,21 @@ fun NewOrderScreen(
                 confirmButton = {
                     TextButton(onClick = { onFinished(order.accessionNo, null) }) { Text("OK") }
                 },
+                // Stickers are the order's, not the bill's — still offered here.
+                dismissButton = {
+                    TextButton(onClick = { showStickers = true }) { Text("Sample stickers") }
+                },
             )
+        }
+
+        if (showStickers) {
+            patient?.let { p ->
+                StickerPrintDialog(
+                    accession = order.accessionNo,
+                    stickers = buildSampleStickers(order, p, expandedIds.mapNotNull { testById[it] }, labName),
+                    onDismiss = { showStickers = false },
+                )
+            }
         }
     }
 }

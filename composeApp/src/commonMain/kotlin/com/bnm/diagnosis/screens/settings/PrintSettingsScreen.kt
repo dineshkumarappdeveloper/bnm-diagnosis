@@ -52,6 +52,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.bnm.diagnosis.billing.PrintKind
+import com.bnm.diagnosis.billing.PrintProfile
 import com.bnm.diagnosis.billing.PrintProfiles
 import com.bnm.diagnosis.print.BtPrinter
 import com.bnm.diagnosis.report.ReportPagination
@@ -64,10 +65,22 @@ import com.bnm.diagnosis.ui.theme.AppTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.compose.material.icons.outlined.QrCode
+import androidx.compose.material3.TextButton
+import com.bnm.diagnosis.print.LabelLanguage
+import com.bnm.diagnosis.print.StickerSpec
+import com.bnm.diagnosis.print.listRawPrinters
+import com.bnm.diagnosis.print.printSampleStickers
+import com.bnm.diagnosis.print.rawPrintSupported
+import com.bnm.diagnosis.print.sampleSticker
+import androidx.compose.runtime.LaunchedEffect
+import com.bnm.diagnosis.print.StickerRender
 
 /** Desktop is the primary target, so the two profiles sit side by side as soon
  *  as there is room. Same breakpoint the lab screens use (LabHomeScreen). */
 private val WIDE_BREAKPOINT = 900.dp
+/** Three profile cards side by side — a lab PC's full-width window. */
+private val THREE_UP_BREAKPOINT = 1320.dp
 
 /**
  * **Print settings — one printer per document kind.**
@@ -111,19 +124,30 @@ fun PrintSettingsScreen(
     ) { inner ->
         BoxWithConstraints(Modifier.fillMaxSize().padding(inner)) {
             val wide = maxWidth >= WIDE_BREAKPOINT
+            val threeUp = maxWidth >= THREE_UP_BREAKPOINT
             Column(
                 Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 Text(
-                    "Bills and reports print on separate printers, configured separately. " +
-                        "These settings live on THIS device only — every counter and every " +
-                        "back-office PC keeps its own.",
+                    "Bills, reports and sample stickers print on separate printers, configured " +
+                        "separately. These settings live on THIS device only — every counter and " +
+                        "every back-office PC keeps its own.",
                     style = MaterialTheme.typography.bodySmall,
                     color = AppTheme.colors.textSecondary,
                 )
 
-                if (wide) {
+                if (threeUp) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        PrinterProfileCard(PrintKind.INVOICE, onPickBluetooth, Modifier.weight(1f))
+                        PrinterProfileCard(PrintKind.REPORT, onPickBluetooth, Modifier.weight(1f)) {
+                            LetterheadBlock(labName)
+                            PageLayoutBlock()
+                            ReportPreviewButton(labName)
+                        }
+                        PrinterProfileCard(PrintKind.BARCODE, onPickBluetooth, Modifier.weight(1f), labName = labName)
+                    }
+                } else if (wide) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         PrinterProfileCard(PrintKind.INVOICE, onPickBluetooth, Modifier.weight(1f))
                         PrinterProfileCard(PrintKind.REPORT, onPickBluetooth, Modifier.weight(1f)) {
@@ -132,6 +156,7 @@ fun PrintSettingsScreen(
                             ReportPreviewButton(labName)
                         }
                     }
+                    PrinterProfileCard(PrintKind.BARCODE, onPickBluetooth, Modifier.fillMaxWidth(), labName = labName)
                 } else {
                     PrinterProfileCard(PrintKind.INVOICE, onPickBluetooth, Modifier.fillMaxWidth())
                     PrinterProfileCard(PrintKind.REPORT, onPickBluetooth, Modifier.fillMaxWidth()) {
@@ -139,6 +164,7 @@ fun PrintSettingsScreen(
                         PageLayoutBlock()
                         ReportPreviewButton(labName)
                     }
+                    PrinterProfileCard(PrintKind.BARCODE, onPickBluetooth, Modifier.fillMaxWidth(), labName = labName)
                 }
             }
         }
@@ -160,6 +186,8 @@ private fun PrinterProfileCard(
     kind: PrintKind,
     onPickBluetooth: ((PrintKind) -> Unit)?,
     modifier: Modifier = Modifier,
+    /** Only the sticker card needs it — for the test sticker's lab line. */
+    labName: String? = null,
     extra: @Composable ColumnScope.() -> Unit = {},
 ) {
     val c = AppTheme.colors
@@ -195,7 +223,13 @@ private fun PrinterProfileCard(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             // ── Which printer is this? ──
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                ProfileBadge(if (kind == PrintKind.INVOICE) Icons.AutoMirrored.Outlined.ReceiptLong else Icons.Outlined.Biotech)
+                ProfileBadge(
+                    when (kind) {
+                        PrintKind.INVOICE -> Icons.AutoMirrored.Outlined.ReceiptLong
+                        PrintKind.REPORT -> Icons.Outlined.Biotech
+                        PrintKind.BARCODE -> Icons.Outlined.QrCode
+                    }
+                )
                 Column(Modifier.weight(1f)) {
                     Text(kind.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(kind.blurb, style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
@@ -229,7 +263,13 @@ private fun PrinterProfileCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                ChoiceChip("System print dialog", conn == "system") { conn = "system"; profile.connection = "system" }
+                // A label printer on USB installs as an OS printer but wants RAW
+                // commands, so for stickers "system" means a named printer fed
+                // directly — never the dialog.
+                ChoiceChip(
+                    if (kind == PrintKind.BARCODE) "USB / installed printer" else "System print dialog",
+                    conn == "system",
+                ) { conn = "system"; profile.connection = "system" }
                 ChoiceChip("LAN", conn == "network") { conn = "network"; profile.connection = "network" }
                 ChoiceChip("Bluetooth", conn == "bluetooth") { conn = "bluetooth"; profile.connection = "bluetooth" }
             }
@@ -257,8 +297,10 @@ private fun PrinterProfileCard(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Text(
-                        "Raw ESC/POS over the network. Plug the printer into the router and print its " +
-                            "self-test (hold FEED while powering on) to find the IP — it must be on this device's network.",
+                        (if (kind == PrintKind.BARCODE) "Raw label commands (TSPL / ZPL) over the network. "
+                        else "Raw ESC/POS over the network. ") +
+                            "Plug the printer into the router and print its self-test (hold FEED while " +
+                            "powering on) to find the IP — it must be on this device's network.",
                         style = MaterialTheme.typography.bodySmall,
                         color = c.textSecondary,
                     )
@@ -284,6 +326,8 @@ private fun PrinterProfileCard(
                         if (btAddress.isBlank()) Caution("No printer chosen yet — nothing will print over Bluetooth.")
                     }
                 }
+
+                "system" -> if (kind == PrintKind.BARCODE) RawPrinterPicker(profile)
             }
 
             HorizontalDivider(color = c.border)
@@ -309,7 +353,9 @@ private fun PrinterProfileCard(
                     )
                 }
             }
-            if (kind != PrintKind.INVOICE || format == "thermal") {
+            if (kind == PrintKind.BARCODE) {
+                StickerStockBlock(profile)
+            } else if (kind != PrintKind.INVOICE || format == "thermal") {
                 Text("Paper", style = MaterialTheme.typography.labelLarge)
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -345,15 +391,21 @@ private fun PrinterProfileCard(
                 Column(Modifier.weight(1f)) {
                     Text("Auto-print", style = MaterialTheme.typography.bodyMedium)
                     Text(
-                        if (kind == PrintKind.INVOICE) "Print as soon as a bill is saved."
-                        else "Print as soon as a report is released.",
+                        when (kind) {
+                            PrintKind.INVOICE -> "Print as soon as a bill is saved."
+                            PrintKind.REPORT -> "Print as soon as a report is released."
+                            PrintKind.BARCODE -> "Print the tube stickers the moment an order is registered, without asking."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = c.textSecondary,
                     )
                 }
                 Switch(checked = autoPrint, onCheckedChange = { autoPrint = it; profile.autoPrint = it })
             }
-            Text("Copies", style = MaterialTheme.typography.labelLarge)
+            Text(
+                if (kind == PrintKind.BARCODE) "Stickers per sample" else "Copies",
+                style = MaterialTheme.typography.labelLarge,
+            )
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -362,10 +414,19 @@ private fun PrinterProfileCard(
                     ChoiceChip(n.toString(), copies == n) { copies = n; profile.copies = n }
                 }
             }
-            // NOTE: no "Test print" button. There is no shared test-page helper in
-            // print/ — the only sample page is a private fun inside
-            // BillingSettingsScreen — and minting a second private copy here is
-            // exactly the duplication this page exists to remove.
+            if (kind == PrintKind.BARCODE) {
+                Text(
+                    "The starting count for every tube in the print dialog — 2 when one label goes on the " +
+                        "requisition form. The desk can change it per order.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = c.textSecondary,
+                )
+                TestStickerButton(profile, labName)
+            }
+            // NOTE (bill / report): no "Test print" button. There is no shared
+            // test-page helper in print/ — the only sample page is a private fun
+            // inside BillingSettingsScreen — and minting a second private copy
+            // here is exactly the duplication this page exists to remove.
 
             extra()
         }
@@ -555,6 +616,152 @@ private fun ColumnScope.ReportPreviewButton(labName: String?) {
     msg?.let {
         Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
     }
+}
+
+/**
+ * The sticker printer's OS-installed (USB) target. RAW label commands go to it
+ * through the spooler; the print dialog would rasterise a page a label
+ * printer cannot use, so it is never offered here.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ColumnScope.RawPrinterPicker(profile: PrintProfile) {
+    val c = AppTheme.colors
+    if (!rawPrintSupported) {
+        Caution("USB sticker printing isn't available on this device — use LAN or Bluetooth.")
+        return
+    }
+    // Enumerating the spooler can take a second on Windows — never on the
+    // composition thread. Null = still looking.
+    var printers by remember { mutableStateOf<List<String>?>(null) }
+    var reload by remember { mutableStateOf(0) }
+    LaunchedEffect(reload) {
+        printers = null
+        printers = withContext(Dispatchers.Default) { listRawPrinters() }
+    }
+    var chosen by remember { mutableStateOf(profile.printerName) }
+    Text("Installed printers", style = MaterialTheme.typography.labelLarge)
+    val list = printers
+    when {
+        list == null -> Text("Looking for printers…", style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
+        list.isEmpty() -> Caution("No printers installed. Install the label printer's own driver (or \"Generic / Text Only\") and refresh.")
+    }
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        list.orEmpty().forEach { name ->
+            ChoiceChip(name, chosen == name) { chosen = name; profile.printerName = name }
+        }
+    }
+    TextButton(onClick = { reload++ }, enabled = list != null) { Text("Refresh list") }
+    Text(
+        "Label commands are spooled to the printer as a RAW job — no print dialog, no page scaling. " +
+            "Install the label printer's own driver, or \"Generic / Text Only\".",
+        style = MaterialTheme.typography.bodySmall,
+        color = c.textSecondary,
+    )
+    if (chosen.isBlank()) Caution("No printer chosen yet — nothing will print.")
+}
+
+/**
+ * The only thing that varies between sticker printers: what language they
+ * speak and what stock is loaded. A wrong size prints half a label; a wrong
+ * language prints the commands as text.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ColumnScope.StickerStockBlock(profile: PrintProfile) {
+    val c = AppTheme.colors
+    var language by remember { mutableStateOf(profile.labelLanguage) }
+    var w by remember { mutableStateOf(profile.stickerWidthMm.toString()) }
+    var h by remember { mutableStateOf(profile.stickerHeightMm.toString()) }
+    var gap by remember { mutableStateOf(profile.stickerGapMm.toString()) }
+
+    Text("Printer language", style = MaterialTheme.typography.labelLarge)
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        LabelLanguage.entries.forEach { l ->
+            ChoiceChip(l.title, language == l.slug) { language = l.slug; profile.labelLanguage = l.slug }
+        }
+    }
+    Text(LabelLanguage.fromSlug(language).blurb, style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
+
+    Text("Sticker size", style = MaterialTheme.typography.labelLarge)
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        StickerSpec.PRESETS.forEach { p ->
+            val selected = w == p.widthMm.toString() && h == p.heightMm.toString()
+            ChoiceChip("${p.widthMm} × ${p.heightMm} mm", selected) {
+                w = p.widthMm.toString(); h = p.heightMm.toString(); gap = p.gapMm.toString()
+                profile.stickerWidthMm = p.widthMm; profile.stickerHeightMm = p.heightMm; profile.stickerGapMm = p.gapMm
+            }
+        }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Only a parseable value is stored — mid-edit the field can be empty.
+        OutlinedTextField(
+            value = w,
+            onValueChange = { v -> w = v.filter { it.isDigit() }.take(3); w.toIntOrNull()?.let { profile.stickerWidthMm = it } },
+            label = { Text("Width (mm)") }, singleLine = true, modifier = Modifier.weight(1f),
+        )
+        OutlinedTextField(
+            value = h,
+            onValueChange = { v -> h = v.filter { it.isDigit() }.take(3); h.toIntOrNull()?.let { profile.stickerHeightMm = it } },
+            label = { Text("Height (mm)") }, singleLine = true, modifier = Modifier.weight(1f),
+        )
+        OutlinedTextField(
+            value = gap,
+            onValueChange = { v -> gap = v.filter { it.isDigit() }.take(2); gap.toIntOrNull()?.let { profile.stickerGapMm = it } },
+            label = { Text("Gap (mm)") }, singleLine = true, modifier = Modifier.weight(1f),
+        )
+    }
+    Text(
+        "Measure the label itself, not the backing roll; the gap is the space between two labels. " +
+            "Layouts assume a 203 dpi printer (8 dots per mm) — the common desk model.",
+        style = MaterialTheme.typography.bodySmall,
+        color = c.textSecondary,
+    )
+    // The accession barcode has a physical minimum: 2-dot bars plus quiet zones.
+    // Narrower stock would print a code no scanner reads, so say so here rather
+    // than let the desk find out at the bench.
+    val minW = StickerRender.minWidthMm(ACCESSION_CHARS)
+    if ((w.toIntOrNull() ?: 0) < minW) {
+        Caution(
+            "Labels narrower than $minW mm cannot carry the accession barcode at a scannable size. " +
+                "Use $minW mm or wider stock.",
+        )
+    }
+}
+
+/** "ACC-S12-00042" — the longest accession a normal seat series produces. */
+private const val ACCESSION_CHARS = 13
+
+/** One deterministic sticker through the real transport — the only way to see
+ *  the stock size and language are right before a patient's tube depends on it. */
+@Composable
+private fun ColumnScope.TestStickerButton(profile: PrintProfile, labName: String?) {
+    val scope = rememberCoroutineScope()
+    var msg by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    OutlinedButton(
+        onClick = {
+            if (busy) return@OutlinedButton
+            busy = true; msg = "Printing…"
+            scope.launch {
+                msg = runCatching { printSampleStickers(listOf(sampleSticker(labName ?: "BNM Diagnosis")), profile) }
+                    .getOrElse { "Print failed: ${it.message}" }
+                busy = false
+            }
+        },
+        enabled = !busy,
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text("Print a test sticker") }
+    msg?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
 }
 
 /** Rounded tinted square behind a section's icon — the lab-screen card idiom. */

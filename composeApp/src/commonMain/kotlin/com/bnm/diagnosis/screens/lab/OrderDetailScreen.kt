@@ -112,6 +112,7 @@ import com.bnm.diagnosis.util.formatDecimal2
 import com.bnm.diagnosis.screens.billing.CollectPaymentDialog
 import com.bnm.diagnosis.chat.InvoiceBalance
 import com.bnm.diagnosis.billing.PrintProfiles
+import com.bnm.diagnosis.print.buildSampleStickers
 
 /** Statuses in which result entry is still open (mirrors the repo's guard). */
 private val ENTRY_OPEN = setOf(LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED)
@@ -184,6 +185,7 @@ fun OrderDetailScreen(
     var patient by remember { mutableStateOf<Patient?>(null) }
     var referrer by remember { mutableStateOf<Referrer?>(null) }
     var tests by remember { mutableStateOf<List<LabOrderTest>>(emptyList()) }
+    var showStickers by remember { mutableStateOf(false) }   // sample-tube labels (reprint / extra tube)
     var results by remember { mutableStateOf<Map<String, LabResult>>(emptyMap()) } // "testId|paramKey"
     var catalog by remember { mutableStateOf<Map<String, LabTest>>(emptyMap()) }
     var reloadTick by remember { mutableStateOf(0) }
@@ -407,6 +409,11 @@ fun OrderDetailScreen(
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
                 },
                 actions = {
+                    // Tube labels are needed from registration until the sample is
+                    // on the bench — a torn label or a second tube means a reprint.
+                    if (o != null && o.status != LabStatus.CANCELLED && tests.isNotEmpty()) {
+                        TextButton(onClick = { showStickers = true }) { Text("Stickers") }
+                    }
                     o?.invoiceId?.let { inv -> TextButton(onClick = { onOpenInvoice(inv) }) { Text("Bill") } }
                     if (o != null && o.invoiceId == null && o.status != LabStatus.CANCELLED && tests.isNotEmpty()) {
                         TextButton(enabled = !billBusy, onClick = { createBillNow() }) { Text("Create bill") }
@@ -599,6 +606,26 @@ fun OrderDetailScreen(
     // "approved by" any more. The old typed-name field survives only as the
     // fallback for a somehow-null session (never expected once the sign-in gate
     // is in front of the app, but approval must never become unreachable). ──
+    if (showStickers) {
+        val o0 = order
+        val p0 = patient
+        if (o0 != null && p0 != null) {
+            StickerPrintDialog(
+                accession = o0.accessionNo,
+                // A test since removed from the catalog still had a tube; it gets
+                // a plain "SAMPLE" label rather than no label.
+                stickers = buildSampleStickers(
+                    o0, p0,
+                    tests.map { catalog[it.testId] ?: LabTest(id = it.testId, code = "", name = it.testName, sampleType = "other") },
+                    labName,
+                ),
+                onDismiss = { showStickers = false },
+            )
+        } else {
+            showStickers = false
+        }
+    }
+
     if (showApprove && o != null && canApprove) {
         val signer = me
         var name by remember(signer) { mutableStateOf(signer?.name ?: prefs.approvedBy) }

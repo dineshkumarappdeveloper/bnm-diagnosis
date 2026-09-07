@@ -167,6 +167,7 @@ fun BillingSettingsScreen(
         // The page split is as much "how a report comes out" as the printer is.
         if (p.enabled) p.summary + " · " + ReportPrefs().pagination().label.lowercase() else p.summary
     }
+    val stickerPrinter = PrintProfiles.barcode.summary
 
     Scaffold(
         topBar = {
@@ -221,8 +222,8 @@ fun BillingSettingsScreen(
                         title = "Printing",
                         // Both profiles at a glance — the counter roll and the
                         // back-office A4 are genuinely different machines.
-                        subtitle = "Invoice — $invoicePrinter\nReport — $reportPrinter",
-                        subtitleMaxLines = 2,
+                        subtitle = "Invoice — $invoicePrinter\nReport — $reportPrinter\nStickers — $stickerPrinter",
+                        subtitleMaxLines = 3,
                         onClick = onOpenPrintSettings,
                     )
                     RowDivider()

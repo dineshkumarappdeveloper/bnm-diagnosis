@@ -76,6 +76,14 @@ fun SaveResultDialog(
     onDone: () -> Unit,
     changeDue: Double? = null,
     partPaid: Double? = null,
+    /** Extra actions under the print button — the lab uses it for the
+     *  sample-sticker print, which belongs to the ORDER, not the bill. */
+    extra: @Composable () -> Unit = {},
+    /** After a successful print, close straight into a new sale (the counter's
+     *  habit). False keeps the dialog open so [extra] can still be used — the
+     *  lab passes false while a sticker offer is pending, otherwise the
+     *  auto-print + auto-close would sweep the offer away unseen. */
+    autoCloseAfterPrint: Boolean = true,
 ) {
     val scope = rememberCoroutineScope()
     val prefs = remember { BillingPrefs() }
@@ -203,8 +211,10 @@ fun SaveResultDialog(
                 // plain "Printed" confirmation before closing into a new sale.
                 val tokenIssue = printMsg?.startsWith("Token") == true
                 if (!tokenIssue) printMsg = "Printed"
-                delay(if (tokenIssue) 3000 else 1200)
-                onDone()
+                if (autoCloseAfterPrint) {
+                    delay(if (tokenIssue) 3000 else 1200)
+                    onDone()
+                }
             }
         }
     }
@@ -255,7 +265,7 @@ fun SaveResultDialog(
                                 printing = false
                             }
                             // Give a token-failure notice a beat before closing.
-                            if (ok) { if (printMsg?.startsWith("Token") == true) delay(2500); onDone() }
+                            if (ok && autoCloseAfterPrint) { if (printMsg?.startsWith("Token") == true) delay(2500); onDone() }
                         }
                     },
                     modifier = Modifier.fillMaxWidth().padding(top = 6.dp), enabled = !printing && !printed,
@@ -263,6 +273,7 @@ fun SaveResultDialog(
                     if (printing) CircularProgressIndicator(Modifier.padding(end = 8.dp).size(16.dp), strokeWidth = 2.dp)
                     Text(if (printed) "Printed ✓" else "Print receipt")
                 }
+                extra()
                 OutlinedButton(onClick = onView, modifier = Modifier.fillMaxWidth()) { Text("View details") }
                 TextButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) { Text("New sale") }
             }

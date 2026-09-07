@@ -5,10 +5,11 @@ import com.russhwolf.settings.Settings
 /**
  * Printer configuration PER DOCUMENT KIND.
  *
- * A lab genuinely prints the two things on different hardware: the invoice on an
- * 80mm thermal roll at the counter, the test report on an A4 laser in the back
- * office. Until now both read one shared [BillingPrefs] block, so configuring one
- * silently reconfigured the other.
+ * A lab genuinely prints its three things on different hardware: the invoice on
+ * an 80mm thermal roll at the counter, the test report on an A4 laser in the
+ * back office, and the sample-tube STICKERS on a small thermal label printer at
+ * the phlebotomy desk. Until now the first two read one shared [BillingPrefs]
+ * block, so configuring one silently reconfigured the other.
  *
  * MIGRATION MATTERS HERE. The old shared keys are still the INVOICE profile's
  * keys, so a counter that was already set up keeps working untouched. The REPORT
@@ -68,21 +69,53 @@ class PrintProfile(private val kind: PrintKind) {
         get() = s.getInt(key(BillingPrefs.K_PAPER), if (kind == PrintKind.REPORT) 64 else 32)
         set(v) = s.putInt(key(BillingPrefs.K_PAPER), v)
 
-    /** Print without asking when a printer is configured and reachable. */
+    /** Print without asking when a printer is configured and reachable.
+     *  Stickers default to OFF: the user asked for an OPTION after registration,
+     *  and a phlebotomy desk that is not this counter should not start a label
+     *  printer unasked. */
     var autoPrint: Boolean
         get() = s.getBoolean(key(BillingPrefs.K_AUTOPRINT), kind == PrintKind.INVOICE)
         set(v) = s.putBoolean(key(BillingPrefs.K_AUTOPRINT), v)
+
+    // ── STICKER-only settings (harmless on the other kinds; never read there) ──
+
+    /** Printer command language — see [com.bnm.diagnosis.print.LabelLanguage]. */
+    var labelLanguage: String
+        get() = s.getString(key("pref_label_language"), "tspl")
+        set(v) = s.putString(key("pref_label_language"), v)
+
+    /** Label stock, mm. 50 x 25 with a 2 mm gap is the common Indian lab roll. */
+    var stickerWidthMm: Int
+        get() = s.getInt(key("pref_sticker_w_mm"), 50).coerceIn(20, 120)
+        set(v) = s.putInt(key("pref_sticker_w_mm"), v.coerceIn(20, 120))
+
+    var stickerHeightMm: Int
+        get() = s.getInt(key("pref_sticker_h_mm"), 25).coerceIn(10, 120)
+        set(v) = s.putInt(key("pref_sticker_h_mm"), v.coerceIn(10, 120))
+
+    var stickerGapMm: Int
+        get() = s.getInt(key("pref_sticker_gap_mm"), 2).coerceIn(0, 10)
+        set(v) = s.putInt(key("pref_sticker_gap_mm"), v.coerceIn(0, 10))
+
+    /** For [connection] == "system" on the STICKER profile: the OS printer that
+     *  receives RAW label bytes through the spooler (a USB label printer). The
+     *  print DIALOG is useless for labels — it would rasterise a page. */
+    var printerName: String
+        get() = s.getString(key("pref_printer_name"), "")
+        set(v) = s.putString(key("pref_printer_name"), v.trim())
 
     /** How many copies to send. Labs often want two invoice copies (lab + patient). */
     var copies: Int
         get() = s.getInt(key("pref_print_copies"), 1).coerceIn(1, 5)
         set(v) = s.putInt(key("pref_print_copies"), v.coerceIn(1, 5))
 
-    /** True when this profile can actually reach a printer without a dialog. */
+    /** True when this profile can actually reach a printer without a dialog.
+     *  For stickers a named OS printer counts: raw bytes go straight to it. */
     val isDirectlyConnected: Boolean
         get() = when (connection) {
             "network" -> ip.isNotBlank()
             "bluetooth" -> btAddress.isNotBlank()
+            "system" -> kind == PrintKind.BARCODE && printerName.isNotBlank()
             else -> false
         }
 
@@ -94,7 +127,11 @@ class PrintProfile(private val kind: PrintKind) {
             val where = when (connection) {
                 "network" -> if (ip.isBlank()) "LAN (no IP set)" else "LAN $ip:$port"
                 "bluetooth" -> btName.ifBlank { btAddress }.ifBlank { "Bluetooth (none selected)" }
-                else -> "System print dialog"
+                else -> if (kind == PrintKind.BARCODE) printerName.ifBlank { "USB (no printer chosen)" }
+                        else "System print dialog"
+            }
+            if (kind == PrintKind.BARCODE) {
+                return "$where · ${labelLanguage.uppercase()} · ${stickerWidthMm}x${stickerHeightMm} mm"
             }
             val paper = when (paperWidth) {
                 32 -> "58mm"
@@ -108,11 +145,15 @@ class PrintProfile(private val kind: PrintKind) {
 enum class PrintKind(val slug: String, val title: String, val blurb: String) {
     INVOICE("invoice", "Invoice / bill", "Receipts and GST bills printed at the counter"),
     REPORT("report", "Test report", "Patient reports handed over or posted"),
+    /** Sample-tube labels: accession barcode + patient, one per tube. Always a
+     *  thermal LABEL printer; what varies is the sticker stock. */
+    BARCODE("barcode", "Barcode sticker", "Accession barcodes stuck on every sample tube"),
 }
 
 object PrintProfiles {
     val invoice get() = PrintProfile(PrintKind.INVOICE)
     val report get() = PrintProfile(PrintKind.REPORT)
+    val barcode get() = PrintProfile(PrintKind.BARCODE)
 
     fun of(kind: PrintKind) = PrintProfile(kind)
 
