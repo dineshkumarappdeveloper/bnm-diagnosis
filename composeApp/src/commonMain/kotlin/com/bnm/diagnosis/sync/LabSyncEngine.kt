@@ -412,7 +412,7 @@ class LabSyncEngine(
                         resQ.upsertFull(res.id, res.orderId, res.testId, res.parameterKey,
                             res.value, res.unit, res.flag, res.refDisplay, res.notes,
                             res.enteredBy, res.enteredAt, res.verifiedBy, res.verifiedAt,
-                            res.approvedBy, res.approvedAt)
+                            res.approvedBy, res.approvedAt, res.verifiedById, res.approvedById)
                     }
                 }
             }
@@ -568,18 +568,13 @@ class LabSyncEngine(
         tatHours = tat_hours, platformJson = platform_json,
     )
 
-    private fun com.bnm.diagnosis.db.Staff.toStaff() = Staff(
-        id = id, name = name, role = role, pinHash = pin_hash, active = active == 1L,
-        createdAt = created_at, updatedAt = updated_at, deletedAt = deleted_at,
-    )
-
     private fun Lab_orders.toOrder() = LabOrder(id, accession_no, patient_id, referrer_id,
         invoice_id, status, priority, notes, created_at, updated_at, collected_at,
         approved_at, reported_at)
 
     private fun Lab_results.toResult() = LabResult(id, order_id, test_id, parameter_key,
         value_, unit, flag, ref_display, notes, entered_by, entered_at, verified_by,
-        verified_at, approved_by, approved_at)
+        verified_at, approved_by, approved_at, verified_by_id, approved_by_id)
 
     private fun LabResult.stampMs(): Long = maxOf(ms(enteredAt), ms(verifiedAt), ms(approvedAt))
 
@@ -631,3 +626,20 @@ class LabSyncEngine(
         fun nowIso(): String = kotlin.time.Clock.System.now().toString()
     }
 }
+
+/**
+ * The staff PUSH doc — EVERY column the row carries, because the apply side
+ * ([LabSyncEngine] `E_STAFF`) upserts the whole row with INSERT OR REPLACE.
+ *
+ * Top-level and internal so a test can hold it to that. The four trailing
+ * columns were added after this mapper was written and were silently left at
+ * null in the push doc: a signature or a LOGIN recorded on one seat never
+ * reached another, and any staff edit made elsewhere wiped it on the seat that
+ * created it. Found by review, 2026-09-07.
+ */
+internal fun com.bnm.diagnosis.db.Staff.toStaff(): Staff = Staff(
+    id = id, name = name, role = role, pinHash = pin_hash, active = active == 1L,
+    createdAt = created_at, updatedAt = updated_at, deletedAt = deleted_at,
+    username = username, signaturePng = signature_png,
+    qualifications = qualifications, registrationNo = registration_no,
+)

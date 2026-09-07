@@ -435,16 +435,6 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         /** The gap is where a pen would go; an image needs a little more room.
          *  One gap for both columns, so the two rules stay level. */
         val gap = if (sigImage != null || verifierImage != null) 48f else 34f
-        val credentialLines = listOfNotNull(
-            doc.signature?.qualifications?.takeIf { it.isNotBlank() },
-            doc.signature?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
-            doc.approvedOn?.takeIf { it.isNotBlank() }?.let { "Approved on $it" },
-        )
-        val verifierLines = listOfNotNull(
-            doc.verifierSignature?.qualifications?.takeIf { it.isNotBlank() },
-            doc.verifierSignature?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
-        )
-        val signOffH = gap + 25f + maxOf(credentialLines.size, verifierLines.size) * 10f
 
         val qr = doc.qr?.takeIf { it.matrix.size > 0 }
         val qrSide = QR_MM * MM
@@ -457,9 +447,33 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         val qrH = if (qr == null) 0f else qrSide + quiet * 2f + 4f +
             qrCaption.size * 9f + qrNote.size * 8f
 
-        /** 40pt under the taller column: the 40pt drop below the rule, then
-         *  the flag key and the end-of-report line (12pt each) still land
-         *  above the footer band. */
+        /** Each outer column stops 8pt short of the QR's quiet zone (or splits
+         *  the width when there is no code), so a long name or degree string
+         *  WRAPS instead of running under the code and blinding the scanner. */
+        val colW = if (qr != null) pageW / 2f - qrSide / 2f - quiet - 8f - left else contentW / 2f - 8f
+        val verifierName = wrapText(doc.verifiedBy ?: "-", fontB, 10.5f, colW)
+        val approverName = wrapText(doc.approvedBy ?: "Authorised Signatory", fontB, 10.5f, colW)
+        val credentialLines = listOfNotNull(
+            doc.signature?.qualifications?.takeIf { it.isNotBlank() },
+            doc.signature?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
+            doc.approvedOn?.takeIf { it.isNotBlank() }?.let { "Approved on $it" },
+        ).flatMap { wrapText(it, fontR, 8f, colW) }
+        val verifierLines = listOfNotNull(
+            doc.verifierSignature?.qualifications?.takeIf { it.isNotBlank() },
+            doc.verifierSignature?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
+        ).flatMap { wrapText(it, fontR, 8f, colW) }
+        /** Ink below a rule: name lines at a 12pt pitch (first baseline 13pt
+         *  down), the role label, then credentials at 10pt. The taller column
+         *  sets the block. */
+        val belowRule = maxOf(
+            13f + (verifierName.size - 1) * 12f + 12f + verifierLines.size * 10f,
+            13f + (approverName.size - 1) * 12f + 12f + credentialLines.size * 10f,
+        )
+        val signOffH = gap + belowRule
+
+        /** 40pt under the taller column: the 15pt drop below its last line,
+         *  then the flag key and the end-of-report line (12pt each) still
+         *  land above the footer band. */
         val need = maxOf(signOffH, qrH) + 40f
     }
 
@@ -506,22 +520,17 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         hline(left, left + sigW, lineY, ruleColor, 0.8f)
         hline(right - sigW, right, lineY, ruleColor, 0.8f)
 
-        text(left, lineY - 13f, doc.verifiedBy ?: "-", fontB, 10.5f, ink)
-        text(left, lineY - 25f, "Verified by", fontR, 8f, gray)
-        var vy = lineY - 35f
-        for (line in verifierLines) {
-            text(left, vy, line, fontR, 8f, gray)
-            vy -= 10f
-        }
+        var vy = lineY - 1f
+        for (line in m.verifierName) { vy -= 12f; text(left, vy, line, fontB, 10.5f, ink) }
+        vy -= 12f
+        text(left, vy, "Verified by", fontR, 8f, gray)
+        for (line in verifierLines) { vy -= 10f; text(left, vy, line, fontR, 8f, gray) }
 
-        val approved = doc.approvedBy ?: "Authorised Signatory"
-        textRight(right, lineY - 13f, approved, fontB, 10.5f, ink)
-        textRight(right, lineY - 25f, "Approved by (Pathologist)", fontR, 8f, gray)
-        var cy = lineY - 35f
-        for (line in credentialLines) {
-            textRight(right, cy, line, fontR, 8f, gray)
-            cy -= 10f
-        }
+        var cy = lineY - 1f
+        for (line in m.approverName) { cy -= 12f; textRight(right, cy, line, fontB, 10.5f, ink) }
+        cy -= 12f
+        textRight(right, cy, "Approved by (Pathologist)", fontR, 8f, gray)
+        for (line in credentialLines) { cy -= 10f; textRight(right, cy, line, fontR, 8f, gray) }
 
         var qrBottom = blockTop
         if (qr != null) {
@@ -532,7 +541,7 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
             qrBottom = ty
         }
 
-        y = minOf(lineY - 40f - maxOf(credentialLines.size, verifierLines.size) * 10f, qrBottom - 6f)
+        y = minOf(lineY - m.belowRule - 15f, qrBottom - 6f)
         // Flag key. Only present when something on this report is actually
         // abnormal — a legend explaining marks that aren't there is noise on a
         // patient's paper. Already WinAnsi-safe (ASCII + U+00B7), which matters

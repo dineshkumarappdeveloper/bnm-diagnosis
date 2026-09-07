@@ -101,10 +101,14 @@ class StaffRepositoryTest {
         assertTrue(owner.canApprove); assertTrue(path.canApprove)
         assertFalse(tech.canApprove); assertFalse(recep.canApprove)
 
-        // canVerify was deleted in round 1 — it was declared but never called,
-        // so it was a permission that lied. The money gate replaces it as the
-        // role distinction that actually does something: the lab owner's ask was
-        // that an employee cannot see commission.
+        // canVerify (back since 2026-09-07, and this time CALLED): whose name may
+        // land under "Verified by" — the Verify button and the signature pad
+        // agree on it. Receptionists register and bill; they do not verify.
+        assertTrue(owner.canVerify); assertTrue(path.canVerify); assertTrue(tech.canVerify)
+        assertFalse(recep.canVerify)
+
+        // The money gate is the role distinction the lab owner asked for: an
+        // employee cannot see commission.
         assertTrue(owner.canSeeMoney)
         assertFalse(path.canSeeMoney); assertFalse(tech.canSeeMoney); assertFalse(recep.canSeeMoney)
         assertTrue(owner.canEditCatalog); assertFalse(recep.canEditCatalog)

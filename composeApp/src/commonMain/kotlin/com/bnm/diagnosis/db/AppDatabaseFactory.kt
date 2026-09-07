@@ -86,6 +86,9 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
     driver.addColumn("lab_tests", "outsource_partner", "TEXT")
     driver.addColumn("lab_tests", "outsource_cost", "REAL")
     driver.addColumn("lab_tests", "tat_hours", "REAL")
+    // Signatory ids on results (2026-09-07) — same order as Results.sq appends them.
+    driver.addColumn("lab_results", "verified_by_id", "TEXT")
+    driver.addColumn("lab_results", "approved_by_id", "TEXT")
     driver.addColumn("lab_tests", "platform_json", "TEXT")
     driver.execute(null,
         "CREATE TABLE IF NOT EXISTS lab_order_tests (id TEXT NOT NULL PRIMARY KEY, order_id TEXT NOT NULL, " +
@@ -96,7 +99,7 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
         "CREATE TABLE IF NOT EXISTS lab_results (id TEXT NOT NULL PRIMARY KEY, order_id TEXT NOT NULL, " +
         "test_id TEXT NOT NULL, parameter_key TEXT NOT NULL, value TEXT, unit TEXT, flag TEXT, " +
         "ref_display TEXT, notes TEXT, entered_by TEXT, entered_at TEXT, verified_by TEXT, verified_at TEXT, " +
-        "approved_by TEXT, approved_at TEXT)", 0)
+        "approved_by TEXT, approved_at TEXT, verified_by_id TEXT, approved_by_id TEXT)", 0)
     driver.execute(null,
         "CREATE UNIQUE INDEX IF NOT EXISTS lab_results_key ON lab_results(order_id, test_id, parameter_key)", 0)
     driver.execute(null, "CREATE INDEX IF NOT EXISTS lab_results_order ON lab_results(order_id)", 0)

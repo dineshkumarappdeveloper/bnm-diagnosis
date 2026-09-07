@@ -231,6 +231,22 @@ class ReportPdfTest {
     }
 
     @Test
+    fun `a long signatory name wraps inside its column instead of running under the QR`() {
+        // Free-typed approver names carry degrees; the verifier can fall back
+        // to a station name. Either could run 250pt+ at 10.5pt bold — straight
+        // across the centred QR — unless the column wraps them.
+        val longApprover = "Dr. Venkatasubramaniam Krishnamoorthy, MD (Pathology)"
+        val longVerifier = "Reception Desk Workstation (Lab Reception Counter 2)"
+        val doc = sampleReportDoc(pagination = ReportPagination.PER_TEST)
+            .copy(approvedBy = longApprover, verifiedBy = longVerifier)
+        val text = pageTexts(doc)[0]
+        assertTrue(text.lines().none { longApprover in it }, "the approver name must be wrapped onto more than one line")
+        assertTrue(text.lines().none { longVerifier in it }, "the verifier name must be wrapped onto more than one line")
+        assertTrue("Krishnamoorthy" in text && "Counter 2" in text, "no part of either name may be dropped")
+        assertTrue("Scan to download" in text, "the QR caption still prints between them")
+    }
+
+    @Test
     fun `preprinted letterpads paginate the same way`() {
         // The blank header band must not change WHICH sheet a test lands on.
         val printed = pageTexts(ReportPagination.PER_TEST, LetterheadMode.PRINTED)

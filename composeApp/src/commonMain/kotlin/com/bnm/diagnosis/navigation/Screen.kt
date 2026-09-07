@@ -14,6 +14,9 @@ sealed class Screen(val route: String) {
     data object StaffSignIn : Screen("staff_sign_in")
     /** Staff & roles management (owner only; reached from Settings). */
     data object Staff : Screen("staff")
+    /** The signed-in person's own signature pad (reached from Settings) — a
+     *  technician or pathologist is not an owner and cannot reach Staff & roles. */
+    data object MySignature : Screen("my_signature")
 
     // ── LIMS (P1b) — the app's main surface ──
     /** LIMS home: counters + New order + THE status-tabbed worklist panel

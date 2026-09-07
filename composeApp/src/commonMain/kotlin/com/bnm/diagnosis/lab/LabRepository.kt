@@ -801,20 +801,22 @@ class LabRepository(
     }
 
     /** Technologist sign-off: requires the order to be fully `entered`. */
-    suspend fun verifyOrder(orderId: String, by: String): Result<Unit> = withContext(Dispatchers.Default) {
+    /** [byId]: the signed-in staff's id — what the report uses to fetch THAT
+     *  person's signature. Null keeps the name-only stamp older rows have. */
+    suspend fun verifyOrder(orderId: String, by: String, byId: String? = null): Result<Unit> = withContext(Dispatchers.Default) {
         runCatching {
             val order = oQ.byId(orderId).executeAsOneOrNull()?.toModel() ?: error("Order not found: $orderId")
             require(order.status == LabStatus.ENTERED) { "Only a fully-entered order can be verified (is ${order.status})" }
             val now = nowIso()
             db.transaction {
-                resQ.markVerified(by, now, orderId)
+                resQ.markVerified(by, now, byId, orderId)
                 oQ.setStatus(LabStatus.VERIFIED, now, orderId)
             }
         }
     }
 
     /** Pathologist sign-off: requires `verified` + every result entered. */
-    suspend fun approveOrder(orderId: String, by: String): Result<Unit> = withContext(Dispatchers.Default) {
+    suspend fun approveOrder(orderId: String, by: String, byId: String? = null): Result<Unit> = withContext(Dispatchers.Default) {
         runCatching {
             val order = oQ.byId(orderId).executeAsOneOrNull()?.toModel() ?: error("Order not found: $orderId")
             require(order.status == LabStatus.VERIFIED) { "Only a verified order can be approved (is ${order.status})" }
@@ -823,7 +825,7 @@ class LabRepository(
             }
             val now = nowIso()
             db.transaction {
-                resQ.markApproved(by, now, orderId)
+                resQ.markApproved(by, now, byId, orderId)
                 oQ.setStatus(LabStatus.APPROVED, now, orderId)
                 oQ.stampApproved(now, orderId)
             }
@@ -937,7 +939,8 @@ class LabRepository(
             sent_to_partner_at)
 
     private fun Lab_results.toModel() = LabResult(id, order_id, test_id, parameter_key, value_, unit,
-        flag, ref_display, notes, entered_by, entered_at, verified_by, verified_at, approved_by, approved_at)
+        flag, ref_display, notes, entered_by, entered_at, verified_by, verified_at, approved_by, approved_at,
+        verified_by_id, approved_by_id)
 
     private fun Lab_reports.toModel() = LabReportShare(
         orderId = order_id, token = token, accessionNo = accession_no, state = state,

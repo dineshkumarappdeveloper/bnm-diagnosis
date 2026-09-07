@@ -513,16 +513,6 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         val sigBmp: Bitmap? = signatureBitmap?.takeIf { it.width > 0 && it.height > 0 }
         val verifierBmp: Bitmap? = verifierBitmap?.takeIf { it.width > 0 && it.height > 0 }
         val gap = if (sigBmp != null || verifierBmp != null) 48f else 34f
-        val credentialLines = listOfNotNull(
-            doc.signature?.qualifications?.takeIf { it.isNotBlank() },
-            doc.signature?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
-            doc.approvedOn?.takeIf { it.isNotBlank() }?.let { "Approved on $it" },
-        )
-        val verifierLines = listOfNotNull(
-            doc.verifierSignature?.qualifications?.takeIf { it.isNotBlank() },
-            doc.verifierSignature?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
-        )
-        val signOffH = gap + 25f + maxOf(credentialLines.size, verifierLines.size) * 10f
 
         val qr = doc.qr?.takeIf { it.matrix.size > 0 }
         val qrSide = QR_MM * MM
@@ -531,6 +521,25 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         val quiet = if (qr == null) 0f else qrSide / qr.matrix.size * 4f
         val qrH = if (qr == null) 0f else qrSide + quiet * 2f + 4f +
             qrCaption.size * 9f + qrNote.size * 8f
+
+        // Outer columns stop short of the QR — mirror of the desktop metrics.
+        val colW = if (qr != null) pageW / 2f - qrSide / 2f - quiet - 8f - left else contentW / 2f - 8f
+        val verifierName = wrapText(doc.verifiedBy ?: "-", 10.5f, true, colW)
+        val approverName = wrapText(doc.approvedBy ?: "Authorised Signatory", 10.5f, true, colW)
+        val credentialLines = listOfNotNull(
+            doc.signature?.qualifications?.takeIf { it.isNotBlank() },
+            doc.signature?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
+            doc.approvedOn?.takeIf { it.isNotBlank() }?.let { "Approved on $it" },
+        ).flatMap { wrapText(it, 8f, false, colW) }
+        val verifierLines = listOfNotNull(
+            doc.verifierSignature?.qualifications?.takeIf { it.isNotBlank() },
+            doc.verifierSignature?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
+        ).flatMap { wrapText(it, 8f, false, colW) }
+        val belowRule = maxOf(
+            13f + (verifierName.size - 1) * 12f + 12f + verifierLines.size * 10f,
+            13f + (approverName.size - 1) * 12f + 12f + credentialLines.size * 10f,
+        )
+        val signOffH = gap + belowRule
         val need = maxOf(signOffH, qrH) + 40f
     }
 
@@ -576,22 +585,17 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         hline(left, left + sigW, lineY, SIG_LINE, 0.8f)
         hline(right - sigW, right, lineY, SIG_LINE, 0.8f)
 
-        text(left, lineY + 13f, doc.verifiedBy ?: "-", 10.5f, bold = true, INK)
-        text(left, lineY + 25f, "Verified by", 8f, bold = false, GRAY)
-        var vy = lineY + 35f
-        for (line in verifierLines) {
-            text(left, vy, line, 8f, bold = false, GRAY)
-            vy += 10f
-        }
+        var vy = lineY + 1f
+        for (line in m.verifierName) { vy += 12f; text(left, vy, line, 10.5f, bold = true, INK) }
+        vy += 12f
+        text(left, vy, "Verified by", 8f, bold = false, GRAY)
+        for (line in verifierLines) { vy += 10f; text(left, vy, line, 8f, bold = false, GRAY) }
 
-        val approved = doc.approvedBy ?: "Authorised Signatory"
-        textRight(right, lineY + 13f, approved, 10.5f, bold = true, INK)
-        textRight(right, lineY + 25f, "Approved by (Pathologist)", 8f, bold = false, GRAY)
-        var cy = lineY + 35f
-        for (line in credentialLines) {
-            textRight(right, cy, line, 8f, bold = false, GRAY)
-            cy += 10f
-        }
+        var cy = lineY + 1f
+        for (line in m.approverName) { cy += 12f; textRight(right, cy, line, 10.5f, bold = true, INK) }
+        cy += 12f
+        textRight(right, cy, "Approved by (Pathologist)", 8f, bold = false, GRAY)
+        for (line in credentialLines) { cy += 10f; textRight(right, cy, line, 8f, bold = false, GRAY) }
 
         var qrBottom = blockTop
         if (qr != null) {
@@ -602,7 +606,7 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
             qrBottom = ty
         }
 
-        y = maxOf(lineY + 40f + maxOf(credentialLines.size, verifierLines.size) * 10f, qrBottom + 6f)
+        y = maxOf(lineY + m.belowRule + 15f, qrBottom + 6f)
         // Flag key — mirror of the desktop renderer (note: y grows DOWNWARD here).
         if (flagLegendLine.isNotEmpty()) {
             text(left, y, flagLegendLine, 7.5f, bold = false, GRAY)

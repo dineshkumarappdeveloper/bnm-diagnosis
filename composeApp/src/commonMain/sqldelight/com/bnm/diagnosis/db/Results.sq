@@ -20,7 +20,14 @@ CREATE TABLE IF NOT EXISTS lab_results (
     verified_by TEXT,
     verified_at TEXT,
     approved_by TEXT,
-    approved_at TEXT
+    approved_at TEXT,
+    -- staff.id of the signatories, stamped at verify/approve (2026-09-07). The
+    -- NAME above is what prints; the id is what the report uses to fetch THAT
+    -- person's signature, so a namesake hired later never lends their ink.
+    -- NULL on rows written before then (name-matched, as before). Appended
+    -- last: AppDatabaseFactory adds them positionally on existing DBs.
+    verified_by_id TEXT,
+    approved_by_id TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS lab_results_key ON lab_results(order_id, test_id, parameter_key);
@@ -56,10 +63,10 @@ countEmptyForTest:
 SELECT count(*) FROM lab_results WHERE order_id = ? AND test_id = ? AND (value IS NULL OR value = '');
 
 markVerified:
-UPDATE lab_results SET verified_by = ?, verified_at = ? WHERE order_id = ?;
+UPDATE lab_results SET verified_by = ?, verified_at = ?, verified_by_id = ? WHERE order_id = ?;
 
 markApproved:
-UPDATE lab_results SET approved_by = ?, approved_at = ? WHERE order_id = ?;
+UPDATE lab_results SET approved_by = ?, approved_at = ?, approved_by_id = ? WHERE order_id = ?;
 
 setNotes:
 UPDATE lab_results SET notes = ? WHERE order_id = ? AND test_id = ? AND parameter_key = ?;
@@ -106,5 +113,5 @@ WHERE (entered_at IS NOT NULL AND entered_at > :since)
 -- resolves a (order,test,param) unique-index clash against a locally-minted
 -- empty row (the remote row id wins; ids are internal).
 upsertFull:
-INSERT OR REPLACE INTO lab_results(id, order_id, test_id, parameter_key, value, unit, flag, ref_display, notes, entered_by, entered_at, verified_by, verified_at, approved_by, approved_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+INSERT OR REPLACE INTO lab_results(id, order_id, test_id, parameter_key, value, unit, flag, ref_display, notes, entered_by, entered_at, verified_by, verified_at, approved_by, approved_at, verified_by_id, approved_by_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);

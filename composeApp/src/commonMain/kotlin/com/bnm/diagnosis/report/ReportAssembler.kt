@@ -60,6 +60,8 @@ class ReportAssembler(
         val catalog = tests.mapNotNull { t -> repo.testById(t.testId)?.let { t.testId to it } }.toMap()
         val approvedBy = results.firstNotNullOfOrNull { it.approvedBy?.takeIf { n -> n.isNotBlank() } }
         val verifiedBy = results.firstNotNullOfOrNull { it.verifiedBy?.takeIf { n -> n.isNotBlank() } }
+        val approvedById = results.firstNotNullOfOrNull { it.approvedById?.takeIf { n -> n.isNotBlank() } }
+        val verifiedById = results.firstNotNullOfOrNull { it.verifiedById?.takeIf { n -> n.isNotBlank() } }
 
         buildReportDoc(
             labName = labName?.takeIf { it.isNotBlank() }
@@ -78,11 +80,11 @@ class ReportAssembler(
                 catalog[r.testId]?.parameters?.firstOrNull { it.key == r.parameterKey }?.name
                     ?: r.parameterKey
             },
-            signature = signatureFor(approvedBy),
+            signature = signatureFor(approvedBy, approvedById),
             // Same lookup for the technician who verified: whoever was signed
-            // in when Verify was pressed is the name on the row, and their
-            // stored signature is what prints on the left.
-            verifierSignature = signatureFor(verifiedBy),
+            // in when Verify was pressed is the name (and id) on the row, and
+            // their stored signature is what prints on the left.
+            verifierSignature = signatureFor(verifiedBy, verifiedById),
             qr = qrFor(order.id, order.accessionNo, order.status),
             pagination = prefs.pagination(),
             // The department is the catalog category; the order line only
@@ -97,16 +99,21 @@ class ReportAssembler(
      * lab has nothing on file for that person (in which case that side of the
      * sign-off prints as name only, exactly as it always did).
      *
-     * MATCHED BY NAME, because a name is all the result row stores —
-     * `lab_results.approved_by` / `verified_by` is the display name the action stamped.
-     * That is also what the report prints, so a mismatch here can only ever mean
-     * "no image", never "the wrong doctor's signature": the name under the image
-     * and the name we looked up are the same string.
+     * MATCHED BY STAFF ID when the row carries one — stamped at verify/approve
+     * since 2026-09-07 — so the ink is that PERSON's even after a namesake is
+     * hired or the original retires; an id that resolves to someone with no
+     * signature is final (name only), never a fall-through to a namesake. Rows
+     * from before ids were stamped carry only the display name, which falls
+     * back to the case-insensitive name match (active rows first) — for those
+     * a mismatch can only ever mean "no image", since the name under the
+     * image and the name looked up are the same string.
      */
-    private suspend fun signatureFor(signatory: String?): ReportSignature? {
-        val name = signatory?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-        val person = staff.listAll().firstOrNull { it.name.trim().equals(name, ignoreCase = true) }
-            ?: return null
+    internal suspend fun signatureFor(signatory: String?, staffId: String? = null): ReportSignature? {
+        val byId = staffId?.takeIf { it.isNotBlank() }?.let { staff.byId(it) }
+        val person = byId ?: run {
+            val name = signatory?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            staff.listAll().firstOrNull { it.name.trim().equals(name, ignoreCase = true) } ?: return null
+        }
         val png = decodeSignaturePng(person)
         val quals = person.qualifications?.takeIf { it.isNotBlank() }
         val reg = person.registrationNo?.takeIf { it.isNotBlank() }
@@ -172,6 +179,8 @@ class ReportAssembler(
  * Re-renders the PDF from the (frozen) results rather than keeping the printed
  * file around: the temp file is long gone by the time connectivity returns, and
  * results are immutable after approval, so the bytes carry the same content.
+ * The signatories are resolved again by the staff ID stamped on the rows, so it
+ * is the same PEOPLE — with whatever signature they have on file at upload.
  */
 class ReportUploader(
     private val repo: LabRepository,

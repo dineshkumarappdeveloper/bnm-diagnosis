@@ -74,6 +74,7 @@ import com.bnm.diagnosis.sync.LabSyncEngine
 import com.bnm.diagnosis.screens.license.ActivationScreen
 import com.bnm.diagnosis.screens.license.LicenseDevicesScreen
 import com.bnm.diagnosis.screens.login.LoginScreen
+import com.bnm.diagnosis.screens.staff.MySignatureScreen
 import com.bnm.diagnosis.screens.staff.StaffScreen
 import com.bnm.diagnosis.screens.staff.StaffSignInScreen
 import com.bnm.diagnosis.staff.LocalStaffRepository
@@ -334,6 +335,10 @@ fun App() {
                             onBack = { navController.popBackStack() }) {
                             StaffScreen(onBack = { navController.popBackStack() })
                         }
+                    }
+                    // Self-service: the screen itself asks for a sign-in when there is none.
+                    composable(Screen.MySignature.route) {
+                        MySignatureScreen(onBack = { navController.popBackStack() })
                     }
 
                     composable(Screen.Activation.route) {
@@ -655,6 +660,7 @@ fun App() {
                             onOpenLicense = { navController.navigate(Screen.LicenseDevices.route) },
                             onOpenPrintSettings = { navController.navigate(Screen.PrintSettings.route) },
                             onOpenStaff = { navController.navigate(Screen.Staff.route) },
+                            onOpenMySignature = { navController.navigate(Screen.MySignature.route) },
                             staffManageAllowed = signedInStaff?.canManageStaff == true,
                             labSync = labSync,
                             labName = licState.labName ?: authRepository.getSelectedBusinessName() ?: "BNM Diagnosis",

@@ -175,6 +175,10 @@ fun OrderDetailScreen(
     // Approval is the pathologist's signature — technicians verify, they don't
     // approve. A null session falls back to the old free-text dialog.
     val canApprove = (me?.canApprove == true)  // null session ⇒ DENIED (matches Staff?.allows)
+    // Verification is attributed AND printed under "Verified by", so it takes a
+    // role that verifies (technician / pathologist / owner). A receptionist's
+    // name must not land there with no way to ever carry a signature.
+    val canVerify = (me?.canVerify == true)
 
     var order by remember { mutableStateOf<LabOrder?>(null) }
     var patient by remember { mutableStateOf<Patient?>(null) }
@@ -454,12 +458,13 @@ fun OrderDetailScreen(
                                 if (busy) return@ActionBar
                                 busy = true; message = null; session.touch()
                                 scope.launch {
-                                    repo.verifyOrder(o.id, actor)
+                                    repo.verifyOrder(o.id, actor, me?.id)
                                         .onSuccess { message = "Verified by $actor"; reloadTick++ }
                                         .onFailure { message = it.message }
                                     busy = false
                                 }
                             },
+                            canVerify = canVerify,
                             canApprove = canApprove,
                             onApprove = { session.touch(); showApprove = true },
                             onPrint = {
@@ -654,7 +659,7 @@ fun OrderDetailScreen(
                     showApprove = false
                     busy = true; message = null; session.touch()
                     scope.launch {
-                        repo.approveOrder(o.id, n)
+                        repo.approveOrder(o.id, n, signer?.id)
                             .onSuccess { message = "Approved by $n"; reloadTick++ }
                             .onFailure { message = it.message }
                         busy = false
@@ -1263,6 +1268,8 @@ private fun ResultField(
 private fun ActionBar(
     status: String,
     busy: Boolean,
+    /** P4 RBAC: verifying is for roles that verify (not the front desk). */
+    canVerify: Boolean,
     /** P4 RBAC: only a pathologist (or the owner) may sign results off. */
     canApprove: Boolean,
     onForward: (String) -> Unit,
@@ -1277,7 +1284,7 @@ private fun ActionBar(
             LabStatus.COLLECTED ->
                 Button(onClick = { onForward(LabStatus.IN_PROGRESS) }, enabled = !busy) { Text("Start processing") }
             LabStatus.ENTERED ->
-                Button(onClick = onVerify, enabled = !busy) { Text("Verify results") }
+                Button(onClick = onVerify, enabled = !busy && canVerify) { Text("Verify results") }
             LabStatus.VERIFIED ->
                 Button(onClick = onApprove, enabled = !busy && canApprove) { Text("Approve") }
             LabStatus.APPROVED ->

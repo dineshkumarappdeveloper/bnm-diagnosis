@@ -111,9 +111,13 @@ fun MySignatureScreen(onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                "Your signature is printed above \"Approved by (Pathologist)\" on every " +
-                    "report you approve, together with the approval date. Leave it empty and " +
-                    "reports print your name only, exactly as before.",
+                if (person.canApprove)
+                    "Your signature is printed above \"Approved by (Pathologist)\" on every " +
+                        "report you approve, together with the approval date. Leave it empty and " +
+                        "reports print your name only, exactly as before."
+                else
+                    "Your signature is printed above \"Verified by\" on every report you " +
+                        "verify. Leave it empty and reports print your name only, exactly as before.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -252,9 +256,16 @@ fun SignatureDialog(
                 OutlinedTextField(
                     value = registrationNo,
                     onValueChange = { registrationNo = it },
-                    label = { Text("Council registration no. (optional)") },
+                    // A pathologist's report is expected to carry the medical-council
+                    // number; a technician may have a paramedical one or none.
+                    label = {
+                        Text(if (person.canApprove) "Medical council registration no." else "Council registration no. (optional)")
+                    },
                     supportingText = {
-                        Text("Printed under the signature — an Indian lab report is expected to carry it.")
+                        Text(
+                            if (person.canApprove) "Printed under the signature — expected on every approved report."
+                            else "Printed under the signature if you have one (paramedical council).",
+                        )
                     },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),

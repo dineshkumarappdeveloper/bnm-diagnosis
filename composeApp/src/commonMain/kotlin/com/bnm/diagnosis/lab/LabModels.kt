@@ -296,6 +296,10 @@ data class LabResult(
     val verifiedAt: String? = null,
     val approvedBy: String? = null,
     val approvedAt: String? = null,
+    /** `staff.id` of the signatories, stamped at verify/approve; null on rows
+     *  from before ids were stamped. The NAME prints, the id fetches the ink. */
+    val verifiedById: String? = null,
+    val approvedById: String? = null,
 ) {
     val isEntered: Boolean get() = !value.isNullOrBlank()
 }

@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.Biotech
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Cable
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.CloudSync
@@ -68,6 +69,7 @@ import com.bnm.diagnosis.auth.AuthRepository
 import com.bnm.diagnosis.billing.BillingPrefs
 import com.bnm.diagnosis.billing.PrintProfiles
 import com.bnm.diagnosis.report.ReportPrefs
+import com.bnm.diagnosis.screens.staff.signatureSummary
 import com.bnm.diagnosis.chat.LocalBillingRepository
 import com.bnm.diagnosis.chat.LocalSyncEngine
 import com.bnm.diagnosis.chat.currentFy
@@ -104,6 +106,9 @@ fun BillingSettingsScreen(
     onQuitForUpdate: () -> Unit = {},
     /** P4: opens Staff & roles. Null hides the row entirely. */
     onOpenStaff: (() -> Unit)? = null,
+    /** The signed-in person's own signature pad. Shown only to roles whose
+     *  name lands on a report (verifiers/approvers); null hides it. */
+    onOpenMySignature: (() -> Unit)? = null,
     /** P4: only the OWNER may manage staff — others see the row, disabled. */
     staffManageAllowed: Boolean = false,
     /** Opens the printer page (invoice + report profiles, letterhead). Defaults to
@@ -272,9 +277,22 @@ fun BillingSettingsScreen(
             }
 
             // ── People & licence ──
-            if (onOpenStaff != null || onOpenLicense != null) {
+            val mySignature = signedInStaff?.takeIf { it.canVerify && onOpenMySignature != null }
+            if (onOpenStaff != null || onOpenLicense != null || mySignature != null) {
                 item {
                     SettingsGroup("Lab & licence", Modifier.settingsWidth()) {
+                        if (mySignature != null) {
+                            SettingsRow(
+                                icon = Icons.Outlined.Edit,
+                                tint = MaterialTheme.colorScheme.secondary,
+                                title = "My signature",
+                                subtitle = signatureSummary(mySignature) + " · printed on reports you " +
+                                    (if (mySignature.canApprove) "approve" else "verify"),
+                                subtitleMaxLines = 2,
+                                onClick = onOpenMySignature,
+                            )
+                            if (onOpenStaff != null || onOpenLicense != null) RowDivider()
+                        }
                         if (onOpenStaff != null) {
                             SettingsRow(
                                 icon = Icons.Outlined.People,
