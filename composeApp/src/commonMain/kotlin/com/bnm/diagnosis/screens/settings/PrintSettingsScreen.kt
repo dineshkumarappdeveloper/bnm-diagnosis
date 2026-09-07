@@ -738,6 +738,12 @@ private fun ColumnScope.StickerStockBlock(profile: PrintProfile) {
                 "Use $minW mm or wider stock.",
         )
     }
+    if ((h.toIntOrNull() ?: 0) < StickerRender.MIN_HEIGHT_MM) {
+        Caution(
+            "Labels shorter than ${StickerRender.MIN_HEIGHT_MM} mm cannot fit the name, sample type, barcode and " +
+                "time — the last line would land on the next sticker.",
+        )
+    }
 
     // ── Print position: the knobs for "it prints, but lands on the next sticker" ──
     HorizontalDivider(color = c.border)

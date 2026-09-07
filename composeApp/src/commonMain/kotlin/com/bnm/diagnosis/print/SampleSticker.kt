@@ -59,6 +59,7 @@ data class StickerSpec(
          *  not offered (it would print an unscannable code). */
         val PRESETS: List<StickerSpec> = listOf(
             DEFAULT,
+            StickerSpec(50, 20),
             StickerSpec(50, 30),
             StickerSpec(60, 40),
             StickerSpec(75, 50),
@@ -93,14 +94,22 @@ private class Face(val tsplFont: String, val tsplW: Int, val tsplH: Int, val zpl
 /** Vertical rows for one label, in dots from the top edge. */
 private class Rows(val nameY: Int, val subY: Int, val barY: Int, val barH: Int, val footY: Int)
 
-private class Faces(val name: Face, val sub: Face, val foot: Face, val readableH: Int)
+/** Type sizes AND the breathing room between rows — a 20 mm label gets the
+ *  same faces as a 25 mm one but tighter pads, so everything still fits. */
+private class Faces(
+    val name: Face, val sub: Face, val foot: Face, val readableH: Int,
+    val top: Int, val gap: Int, val gapBar: Int,
+)
 
 object StickerRender {
     private const val ESC = 0x1B
     private const val GS = 0x1D
     private const val LF = 0x0A
 
-    private const val TOP = 8          // top keep-out
+    private const val TOP = 8          // top keep-out (regular tiers)
+    /** Shortest stock the four rows (name, type, barcode + readable, time)
+     *  fit on; the desk is told rather than handed a label missing its time. */
+    const val MIN_HEIGHT_MM = 20
     /** Bottom keep-out in mm. The gap sensor sits a little ahead of the print
      *  head, so an uncalibrated printer starts each label a touch late — a line
      *  drawn 1 mm from the bottom edge lands on the NEXT label. 2.5 mm absorbs
@@ -132,7 +141,7 @@ object StickerRender {
         val cw = w - 2 * SIDE_MARGIN
         val n = copies.coerceAtLeast(1)
         val f = faces(h)
-        val r = rows(h, f.name.tsplH, f.sub.tsplH, f.foot.tsplH, f.readableH, bottom = (BOTTOM_MM * dpmm).toInt())
+        val r = rows(h, f, f.name.tsplH, f.sub.tsplH, f.foot.tsplH, bottom = (BOTTOM_MM * dpmm).toInt())
         val sx = spec.shiftXDots
         val sy = spec.shiftYDots
         val sb = StringBuilder()
@@ -184,7 +193,7 @@ object StickerRender {
         val cw = w - 2 * SIDE_MARGIN
         val n = copies.coerceAtLeast(1)
         val f = faces(h)
-        val r = rows(h, f.name.zplH, f.sub.zplH, f.foot.zplH, f.readableH, bottom = (BOTTOM_MM * dpmm).toInt())
+        val r = rows(h, f, f.name.zplH, f.sub.zplH, f.foot.zplH, bottom = (BOTTOM_MM * dpmm).toInt())
         val sx = spec.shiftXDots
         val sy = spec.shiftYDots
         val sb = StringBuilder()
@@ -220,7 +229,7 @@ object StickerRender {
         val cols = (cw / 12).coerceAtLeast(8)
         val n = copies.coerceAtLeast(1)
         val f = faces(h)
-        val barH = rows(h, f.name.tsplH, f.sub.tsplH, f.foot.tsplH, f.readableH, bottom = TOP).barH.coerceIn(1, 255)
+        val barH = rows(h, f, f.name.tsplH, f.sub.tsplH, f.foot.tsplH, bottom = TOP).barH.coerceIn(1, 255)
         val out = ArrayList<Byte>(stickers.size * n * 160)
         fun b(vararg v: Int) { for (x in v) out.add(x.toByte()) }
         fun str(s: String) { for (ch in s) out.add(ch.code.toByte()) }
@@ -299,9 +308,13 @@ object StickerRender {
     // ---- layout -----------------------------------------------------------
 
     /** Type tiers by label height: 25/30 mm stocks get the small set, 40 mm+ the large. */
-    private fun faces(h: Int): Faces =
-        if (h >= 280) Faces(name = FACE_L, sub = FACE_M, foot = FACE_S, readableH = 28)
-        else Faces(name = FACE_M, sub = FACE_S, foot = FACE_S, readableH = 24)
+    private fun faces(h: Int): Faces = when {
+        h >= 280 -> Faces(FACE_L, FACE_M, FACE_S, readableH = 28, top = TOP, gap = GAP, gapBar = GAP_BAR)
+        h >= 200 -> Faces(FACE_M, FACE_S, FACE_S, readableH = 24, top = TOP, gap = GAP, gapBar = GAP_BAR)
+        // 20 mm stock (field, 2026-09-08): 160 dots — the regular pads alone
+        // overrun it. Same faces, pads halved: 4+24+2+20+4+40+24+2+20+20 = 160.
+        else -> Faces(FACE_M, FACE_S, FACE_S, readableH = 24, top = 4, gap = 2, gapBar = 4)
+    }
 
     /**
      * Stack the rows top-down, barcode at [BAR_RATIO] of the label; spare height
@@ -309,8 +322,8 @@ object StickerRender {
      * above the footer so short and tall stocks both look balanced. On a stock
      * too short for the tiers the barcode shrinks first (floor [BAR_MIN_RATIO]).
      */
-    private fun rows(h: Int, nameH: Int, subH: Int, footH: Int, readableH: Int, bottom: Int): Rows {
-        val fixed = TOP + nameH + GAP + subH + GAP_BAR + readableH + GAP + footH + bottom
+    private fun rows(h: Int, f: Faces, nameH: Int, subH: Int, footH: Int, bottom: Int): Rows {
+        val fixed = f.top + nameH + f.gap + subH + f.gapBar + f.readableH + f.gap + footH + bottom
         var barH = (h * BAR_RATIO).toInt()
         var spare = h - fixed - barH
         if (spare < 0) {
@@ -318,10 +331,10 @@ object StickerRender {
             spare = 0
         }
         val pad = spare / 3
-        val nameY = TOP + pad
-        val subY = nameY + nameH + GAP
-        val barY = subY + subH + GAP_BAR + pad
-        val footY = barY + barH + readableH + GAP + pad
+        val nameY = f.top + pad
+        val subY = nameY + nameH + f.gap
+        val barY = subY + subH + f.gapBar + pad
+        val footY = barY + barH + f.readableH + f.gap + pad
         return Rows(nameY, subY, barY, barH, footY)
     }
 

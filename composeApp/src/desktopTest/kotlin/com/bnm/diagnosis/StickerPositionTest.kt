@@ -46,6 +46,22 @@ class StickerPositionTest {
     }
 
     @Test
+    fun `50x20 stock carries all four rows inside 160 dots`() {
+        // The lab's actual roll (field photo, 2026-09-08). Laid out for 25 mm the
+        // time line fell onto the next sticker; the compact tier must fit it.
+        val job = StickerRender.tspl(one, StickerSpec(50, 20))
+        val lines = job.lines()
+        assertEquals(3, lines.count { it.startsWith("TEXT ") }, job)
+        val bar = lines.first { it.startsWith("BARCODE ") }
+        val barH = bar.split(",")[3].toInt()
+        assertTrue(barH >= 35, "barcode must stay tall enough to scan: $barH")
+        val footer = lines.filter { it.startsWith("TEXT ") }.last()
+        assertTrue(tsplY(footer) + 20 <= 160 - 20, "footer must clear the 2.5 mm keep-out: $footer")
+        assertTrue(tsplY(lines.first { it.startsWith("TEXT ") }) >= 4)
+        assertTrue(StickerSpec(50, 20) in StickerSpec.PRESETS)
+    }
+
+    @Test
     fun `shift moves every coordinate and never goes negative`() {
         val base = StickerRender.tspl(one, StickerSpec(50, 25))
         val down = StickerRender.tspl(one, StickerSpec(50, 25, shiftYmm = 1.5f, shiftXmm = -0.5f))
