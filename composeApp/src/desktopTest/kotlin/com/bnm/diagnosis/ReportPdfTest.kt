@@ -205,6 +205,32 @@ class ReportPdfTest {
     }
 
     @Test
+    fun `both signatories' signatures are drawn on every signed sheet`() {
+        // The verifier's ink on the left, the approver's on the right: two image
+        // objects per sheet, and the technician's credentials in the text. With
+        // no verifier signature on file the sheet still prints, approver only.
+        fun imagesPerPage(doc: ReportDoc): List<Pair<Int, String>> =
+            PDDocument.load(File(writeLabReportPdf(doc))).use { pdf ->
+                (0 until pdf.numberOfPages).map { i ->
+                    val res = pdf.getPage(i).resources
+                    val images = res.xObjectNames.count { res.isImageXObject(it) }
+                    images to PDFTextStripper().apply { startPage = i + 1; endPage = i + 1 }.getText(pdf)
+                }
+            }
+        val signed = imagesPerPage(sampleReportDoc(pagination = ReportPagination.PER_TEST))
+        signed.forEachIndexed { i, (images, text) ->
+            assertEquals(2, images, "sheet ${i + 1}: verifier + approver signature images")
+            assertTrue("Verified by" in text && "DMLT, B.Sc. (MLT)" in text, "sheet ${i + 1} names the verifier's credentials")
+            assertTrue("Tech. S. Kumar" in text && "Dr. A. Lakshmi" in text)
+        }
+        val approverOnly = imagesPerPage(sampleReportDoc(pagination = ReportPagination.PER_TEST).copy(verifierSignature = null))
+        approverOnly.forEachIndexed { i, (images, text) ->
+            assertEquals(1, images, "sheet ${i + 1}: approver image only")
+            assertTrue("Tech. S. Kumar" in text, "the verifier's name still prints without an image")
+        }
+    }
+
+    @Test
     fun `preprinted letterpads paginate the same way`() {
         // The blank header band must not change WHICH sheet a test lands on.
         val printed = pageTexts(ReportPagination.PER_TEST, LetterheadMode.PRINTED)

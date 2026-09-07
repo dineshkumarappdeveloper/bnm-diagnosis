@@ -252,9 +252,10 @@ private fun StaffRow(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                // Only for people who can actually sign off a report — a
-                // receptionist's signature would never be printed anywhere.
-                if (staff.canApprove) {
+                // Only for people whose name lands on a report — verifiers and
+                // approvers both. A receptionist's signature would never be
+                // printed anywhere.
+                if (staff.canVerify) {
                     Text(
                         signatureSummary(staff),
                         style = MaterialTheme.typography.labelSmall,
@@ -262,7 +263,7 @@ private fun StaffRow(
                     )
                 }
             }
-            if (staff.canApprove) TextButton(onClick = onSignature) { Text("Signature") }
+            if (staff.canVerify) TextButton(onClick = onSignature) { Text("Signature") }
             TextButton(onClick = onEdit) { Text("Edit") }
             OutlinedButton(onClick = onToggleActive) {
                 Text(if (staff.active) "Deactivate" else "Reactivate")

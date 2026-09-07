@@ -182,6 +182,13 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         }
     }
 
+    /** The verifier's, same rules. */
+    private val verifierBitmap: Bitmap? by lazy {
+        doc.verifierSignature?.imagePng?.takeIf { it.isNotEmpty() }?.let { bytes ->
+            runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull()
+        }
+    }
+
     private var pdf: PdfDocument? = null
     private var page: PdfDocument.Page? = null
     private var canvas: Canvas? = null
@@ -504,13 +511,18 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
      *  SignOffMetrics; [need] is what keep-with-next reserves. */
     private inner class SignOffMetrics {
         val sigBmp: Bitmap? = signatureBitmap?.takeIf { it.width > 0 && it.height > 0 }
-        val gap = if (sigBmp != null) 48f else 34f
+        val verifierBmp: Bitmap? = verifierBitmap?.takeIf { it.width > 0 && it.height > 0 }
+        val gap = if (sigBmp != null || verifierBmp != null) 48f else 34f
         val credentialLines = listOfNotNull(
             doc.signature?.qualifications?.takeIf { it.isNotBlank() },
             doc.signature?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
             doc.approvedOn?.takeIf { it.isNotBlank() }?.let { "Approved on $it" },
         )
-        val signOffH = gap + 25f + credentialLines.size * 10f
+        val verifierLines = listOfNotNull(
+            doc.verifierSignature?.qualifications?.takeIf { it.isNotBlank() },
+            doc.verifierSignature?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
+        )
+        val signOffH = gap + 25f + maxOf(credentialLines.size, verifierLines.size) * 10f
 
         val qr = doc.qr?.takeIf { it.matrix.size > 0 }
         val qrSide = QR_MM * MM
@@ -527,8 +539,10 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
     private fun drawSignatures(flagLegendLine: String, lastSection: ReportSection?) {
         val m = signOff
         val sigBmp = m.sigBmp
+        val verifierBmp = m.verifierBmp
         val gap = m.gap
         val credentialLines = m.credentialLines
+        val verifierLines = m.verifierLines
         val qr = m.qr
         val qrSide = m.qrSide
         val qrCaption = m.qrCaption
@@ -546,23 +560,30 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         val lineY = blockTop + gap
         val sigW = 150f
 
-        if (sigBmp != null) {
-            // Sits ON the rule, like an inked signature would.
+        // Verifier left, approver right, QR centred — mirror of the desktop
+        // three-column sign-off. Each image sits ON its rule.
+        fun drawInk(bmp: Bitmap, rightAligned: Boolean) {
             val maxH = gap - 8f
-            val scale = minOf(maxH / sigBmp.height, sigW / sigBmp.width)
-            val w = sigBmp.width * scale
-            val h = sigBmp.height * scale
-            canvas?.drawBitmap(
-                sigBmp, null,
-                RectF(right - w, lineY - 2f - h, right, lineY - 2f),
-                Paint(Paint.FILTER_BITMAP_FLAG),
-            )
+            val scale = minOf(maxH / bmp.height, sigW / bmp.width)
+            val w = bmp.width * scale
+            val h = bmp.height * scale
+            val x0 = if (rightAligned) right - w else left
+            canvas?.drawBitmap(bmp, null, RectF(x0, lineY - 2f - h, x0 + w, lineY - 2f), Paint(Paint.FILTER_BITMAP_FLAG))
+        }
+        if (verifierBmp != null) drawInk(verifierBmp, rightAligned = false)
+        if (sigBmp != null) drawInk(sigBmp, rightAligned = true)
+
+        hline(left, left + sigW, lineY, SIG_LINE, 0.8f)
+        hline(right - sigW, right, lineY, SIG_LINE, 0.8f)
+
+        text(left, lineY + 13f, doc.verifiedBy ?: "-", 10.5f, bold = true, INK)
+        text(left, lineY + 25f, "Verified by", 8f, bold = false, GRAY)
+        var vy = lineY + 35f
+        for (line in verifierLines) {
+            text(left, vy, line, 8f, bold = false, GRAY)
+            vy += 10f
         }
 
-        val verifiedX = if (qr != null) left + qrBlockW + 14f else left
-        hline(verifiedX, verifiedX + sigW, lineY, SIG_LINE, 0.8f)
-        hline(right - sigW, right, lineY, SIG_LINE, 0.8f)
-        text(verifiedX, lineY + 12f, "Verified by: ${doc.verifiedBy ?: "-"}", 9f, bold = false, INK)
         val approved = doc.approvedBy ?: "Authorised Signatory"
         textRight(right, lineY + 13f, approved, 10.5f, bold = true, INK)
         textRight(right, lineY + 25f, "Approved by (Pathologist)", 8f, bold = false, GRAY)
@@ -574,14 +595,14 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
 
         var qrBottom = blockTop
         if (qr != null) {
-            drawQrMatrix(qr.matrix, left + quiet, blockTop + quiet, qrSide)
+            drawQrMatrix(qr.matrix, pageW / 2f - qrSide / 2f, blockTop + quiet, qrSide)
             var ty = blockTop + quiet * 2f + qrSide + 4f
-            qrCaption.forEach { text(left, ty, it, 7f, bold = true, INK); ty += 9f }
-            qrNote.forEach { text(left, ty, it, 6.2f, bold = false, GRAY); ty += 8f }
+            qrCaption.forEach { textCenter(ty, it, 7f, bold = true, INK); ty += 9f }
+            qrNote.forEach { textCenter(ty, it, 6.2f, bold = false, GRAY); ty += 8f }
             qrBottom = ty
         }
 
-        y = maxOf(lineY + 40f + credentialLines.size * 10f, qrBottom + 6f)
+        y = maxOf(lineY + 40f + maxOf(credentialLines.size, verifierLines.size) * 10f, qrBottom + 6f)
         // Flag key — mirror of the desktop renderer (note: y grows DOWNWARD here).
         if (flagLegendLine.isNotEmpty()) {
             text(left, y, flagLegendLine, 7.5f, bold = false, GRAY)

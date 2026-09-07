@@ -59,6 +59,7 @@ class ReportAssembler(
         val results = repo.resultsForOrder(orderId)
         val catalog = tests.mapNotNull { t -> repo.testById(t.testId)?.let { t.testId to it } }.toMap()
         val approvedBy = results.firstNotNullOfOrNull { it.approvedBy?.takeIf { n -> n.isNotBlank() } }
+        val verifiedBy = results.firstNotNullOfOrNull { it.verifiedBy?.takeIf { n -> n.isNotBlank() } }
 
         buildReportDoc(
             labName = labName?.takeIf { it.isNotBlank() }
@@ -78,6 +79,10 @@ class ReportAssembler(
                     ?: r.parameterKey
             },
             signature = signatureFor(approvedBy),
+            // Same lookup for the technician who verified: whoever was signed
+            // in when Verify was pressed is the name on the row, and their
+            // stored signature is what prints on the left.
+            verifierSignature = signatureFor(verifiedBy),
             qr = qrFor(order.id, order.accessionNo, order.status),
             pagination = prefs.pagination(),
             // The department is the catalog category; the order line only
@@ -88,17 +93,18 @@ class ReportAssembler(
     }
 
     /**
-     * The approver's signature block, or null when the lab has nothing on file
-     * (in which case the report prints exactly as it always did).
+     * A signatory's signature block (approver or verifier), or null when the
+     * lab has nothing on file for that person (in which case that side of the
+     * sign-off prints as name only, exactly as it always did).
      *
      * MATCHED BY NAME, because a name is all the result row stores —
-     * `lab_results.approved_by` is the display name the sign-off dialog stamped.
+     * `lab_results.approved_by` / `verified_by` is the display name the action stamped.
      * That is also what the report prints, so a mismatch here can only ever mean
      * "no image", never "the wrong doctor's signature": the name under the image
      * and the name we looked up are the same string.
      */
-    private suspend fun signatureFor(approvedBy: String?): ReportSignature? {
-        val name = approvedBy?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    private suspend fun signatureFor(signatory: String?): ReportSignature? {
+        val name = signatory?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         val person = staff.listAll().firstOrNull { it.name.trim().equals(name, ignoreCase = true) }
             ?: return null
         val png = decodeSignaturePng(person)

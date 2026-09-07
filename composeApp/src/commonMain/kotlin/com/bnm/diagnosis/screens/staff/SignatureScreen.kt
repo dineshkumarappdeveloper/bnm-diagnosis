@@ -52,13 +52,14 @@ import com.bnm.diagnosis.staff.Staff
 import kotlinx.coroutines.launch
 
 /**
- * Approver signature capture — round-1 feedback item 5, "digital signature for
- * the approver side".
+ * Signatory signature capture — round-1 feedback item 5, "digital signature for
+ * the approver side", extended to the VERIFIER: both names on the sign-off now
+ * carry the person's stored signature.
  *
  * What it produces is one base64 PNG in `staff.signature_png`, plus the two
- * text fields an Indian lab report is expected to carry next to a pathologist's
- * name: qualifications ("MD (Pathology)") and the state medical-council
- * registration number. All three ride the normal staff row, so a signature set
+ * text fields an Indian lab report is expected to carry next to a signatory's
+ * name: qualifications ("MD (Pathology)", "DMLT") and the council registration
+ * number (medical council for a pathologist; optional for a technician). All three ride the normal staff row, so a signature set
  * at the front desk shows up on the pathologist's laptop after the next sync —
  * which is exactly why the image is base64 in a column and not a file path.
  *
@@ -251,7 +252,7 @@ fun SignatureDialog(
                 OutlinedTextField(
                     value = registrationNo,
                     onValueChange = { registrationNo = it },
-                    label = { Text("Medical council registration no.") },
+                    label = { Text("Council registration no. (optional)") },
                     supportingText = {
                         Text("Printed under the signature — an Indian lab report is expected to carry it.")
                     },

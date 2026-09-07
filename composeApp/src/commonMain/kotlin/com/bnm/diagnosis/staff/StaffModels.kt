@@ -72,6 +72,14 @@ data class Staff(
     /** Catalog prices are a money surface too — they set what patients are charged. */
     val canEditCatalog: Boolean get() = role == StaffRole.OWNER
 
+    /**
+     * Anyone whose name lands on a report's sign-off — the technician who
+     * verifies as much as the pathologist who approves. Their stored signature
+     * is printed there, so they need somewhere to record one. A receptionist's
+     * never prints anywhere.
+     */
+    val canVerify: Boolean get() = role != StaffRole.RECEPTIONIST
+
     /** Pathologist sign-off is the legally meaningful one — owner included so a
      *  single-person lab is never stuck (an owner IS the responsible person). */
     val canApprove: Boolean get() = role == StaffRole.PATHOLOGIST || role == StaffRole.OWNER

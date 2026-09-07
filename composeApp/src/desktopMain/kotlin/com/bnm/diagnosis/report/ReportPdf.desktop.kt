@@ -431,14 +431,20 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
      */
     private inner class SignOffMetrics {
         val sigImage: ByteArray? = doc.signature?.imagePng?.takeIf { it.isNotEmpty() }
-        /** The gap is where a pen would go; an image needs a little more room. */
-        val gap = if (sigImage != null) 48f else 34f
+        val verifierImage: ByteArray? = doc.verifierSignature?.imagePng?.takeIf { it.isNotEmpty() }
+        /** The gap is where a pen would go; an image needs a little more room.
+         *  One gap for both columns, so the two rules stay level. */
+        val gap = if (sigImage != null || verifierImage != null) 48f else 34f
         val credentialLines = listOfNotNull(
             doc.signature?.qualifications?.takeIf { it.isNotBlank() },
             doc.signature?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
             doc.approvedOn?.takeIf { it.isNotBlank() }?.let { "Approved on $it" },
         )
-        val signOffH = gap + 25f + credentialLines.size * 10f
+        val verifierLines = listOfNotNull(
+            doc.verifierSignature?.qualifications?.takeIf { it.isNotBlank() },
+            doc.verifierSignature?.registrationNo?.takeIf { it.isNotBlank() }?.let { "Reg. No. $it" },
+        )
+        val signOffH = gap + 25f + maxOf(credentialLines.size, verifierLines.size) * 10f
 
         val qr = doc.qr?.takeIf { it.matrix.size > 0 }
         val qrSide = QR_MM * MM
@@ -462,8 +468,10 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
     private fun drawSignatures(flagLegendLine: String, lastSection: ReportSection?) {
         val m = signOff
         val sigImage = m.sigImage
+        val verifierImage = m.verifierImage
         val gap = m.gap
         val credentialLines = m.credentialLines
+        val verifierLines = m.verifierLines
         val qr = m.qr
         val qrSide = m.qrSide
         val qrCaption = m.qrCaption
@@ -483,17 +491,29 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         val sigW = 150f
         val ruleColor = Color(0x9A, 0xA2, 0xAA)
 
+        // Three columns, the way the reference labs lay a sign-off out: the
+        // technician who VERIFIED on the left, the pathologist who APPROVED on
+        // the right, the download code between them. Each image sits ON its
+        // rule like an inked signature, clamped to the gap so it can never run
+        // up into the last result row.
+        if (verifierImage != null) {
+            drawSignatureImage(verifierImage, left, lineY + 2f, gap - 8f, sigW, rightAligned = false, tag = "verifier-signature")
+        }
         if (sigImage != null) {
-            // Sits ON the rule, like an inked signature would. Clamped to the
-            // gap so it can never run up into the last result row.
-            drawSignatureImage(sigImage, right, lineY + 2f, gap - 8f, sigW)
+            drawSignatureImage(sigImage, right, lineY + 2f, gap - 8f, sigW, rightAligned = true, tag = "approver-signature")
         }
 
-        // "Verified by" shifts right of the QR block when there is one.
-        val verifiedX = if (qr != null) left + qrBlockW + 14f else left
-        hline(verifiedX, verifiedX + sigW, lineY, ruleColor, 0.8f)
+        hline(left, left + sigW, lineY, ruleColor, 0.8f)
         hline(right - sigW, right, lineY, ruleColor, 0.8f)
-        text(verifiedX, lineY - 12f, "Verified by: ${doc.verifiedBy ?: "-"}", fontR, 9f, ink)
+
+        text(left, lineY - 13f, doc.verifiedBy ?: "-", fontB, 10.5f, ink)
+        text(left, lineY - 25f, "Verified by", fontR, 8f, gray)
+        var vy = lineY - 35f
+        for (line in verifierLines) {
+            text(left, vy, line, fontR, 8f, gray)
+            vy -= 10f
+        }
+
         val approved = doc.approvedBy ?: "Authorised Signatory"
         textRight(right, lineY - 13f, approved, fontB, 10.5f, ink)
         textRight(right, lineY - 25f, "Approved by (Pathologist)", fontR, 8f, gray)
@@ -505,14 +525,14 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
 
         var qrBottom = blockTop
         if (qr != null) {
-            drawQrMatrix(qr.matrix, left + quiet, blockTop - quiet - qrSide, qrSide)
+            drawQrMatrix(qr.matrix, pageW / 2f - qrSide / 2f, blockTop - quiet - qrSide, qrSide)
             var ty = blockTop - quiet * 2f - qrSide - 4f
-            qrCaption.forEach { text(left, ty, it, fontB, 7f, ink); ty -= 9f }
-            qrNote.forEach { text(left, ty, it, fontR, 6.2f, gray); ty -= 8f }
+            qrCaption.forEach { textCenter(ty, it, fontB, 7f, ink); ty -= 9f }
+            qrNote.forEach { textCenter(ty, it, fontR, 6.2f, gray); ty -= 8f }
             qrBottom = ty
         }
 
-        y = minOf(lineY - 40f - credentialLines.size * 10f, qrBottom - 6f)
+        y = minOf(lineY - 40f - maxOf(credentialLines.size, verifierLines.size) * 10f, qrBottom - 6f)
         // Flag key. Only present when something on this report is actually
         // abnormal — a legend explaining marks that aren't there is noise on a
         // patient's paper. Already WinAnsi-safe (ASCII + U+00B7), which matters
@@ -526,21 +546,26 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
     }
 
     /**
-     * Draw the approver's signature PNG, right-aligned at [xEnd], sitting on
-     * [baseY], scaled to fit inside [maxH] x [maxW].
+     * Draw a signatory's signature PNG anchored at [xAnchor] (its right edge
+     * when [rightAligned], else its left), sitting on [baseY], scaled to fit
+     * inside [maxH] x [maxW].
      *
      * Failure is swallowed on purpose. A signature image that will not decode
      * must not stop a pathologist-approved report from printing — the typed
      * name and the rule under it are the part that carries weight, and they are
      * already on the page.
      */
-    private fun drawSignatureImage(bytes: ByteArray, xEnd: Float, baseY: Float, maxH: Float, maxW: Float) {
+    private fun drawSignatureImage(
+        bytes: ByteArray, xAnchor: Float, baseY: Float, maxH: Float, maxW: Float,
+        rightAligned: Boolean, tag: String,
+    ) {
         val c = cs ?: return
         runCatching {
-            val img = PDImageXObject.createFromByteArray(pdf, bytes, "approver-signature")
+            val img = PDImageXObject.createFromByteArray(pdf, bytes, tag)
             if (img.width <= 0 || img.height <= 0) return
             val scale = minOf(maxH / img.height.toFloat(), maxW / img.width.toFloat())
-            c.drawImage(img, xEnd - img.width * scale, baseY, img.width * scale, img.height * scale)
+            val w = img.width * scale
+            c.drawImage(img, if (rightAligned) xAnchor - w else xAnchor, baseY, w, img.height * scale)
         }
     }
 

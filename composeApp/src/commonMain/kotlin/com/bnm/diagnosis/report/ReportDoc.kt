@@ -306,6 +306,10 @@ data class ReportDoc(
     val approvedOn: String? = null,
     /** Approver's signature image + credentials; null = the old text-only block. */
     val signature: ReportSignature? = null,
+    /** The VERIFIER's signature image + credentials — the technician who checked
+     *  the results, drawn on the left of the sign-off. Null = name only, exactly
+     *  as before verifiers had signatures. */
+    val verifierSignature: ReportSignature? = null,
     /** Report-download QR; null on standalone licences (see [ReportQr]). */
     val qr: ReportQr? = null,
     val generatedAt: String,
@@ -337,6 +341,8 @@ fun buildReportDoc(
     paramName: (LabResult) -> String = { it.parameterKey },
     /** Approver sign-off image + credentials. Null keeps the pre-signature layout. */
     signature: ReportSignature? = null,
+    /** Verifier sign-off image + credentials; null = name only. */
+    verifierSignature: ReportSignature? = null,
     /** Report-download QR. Null (the default) prints no QR block at all — which
      *  is what a standalone licence must get. Assembled by [ReportAssembler];
      *  this function stays pure and never mints a token of its own. */
@@ -393,6 +399,7 @@ fun buildReportDoc(
         approvedOn = (results.firstNotNullOfOrNull { it.approvedAt?.takeIf { a -> a.isNotBlank() } }
             ?: order.approvedAt)?.let { reportStamp(it) ?: it.take(10) },
         signature = signature,
+        verifierSignature = verifierSignature,
         qr = qr,
         generatedAt = nowStamp(),
     )
@@ -489,6 +496,7 @@ fun sampleReportDoc(
     approvedBy = "Dr. A. Lakshmi, MD (Path.)",
     approvedOn = "2026-08-25 13:40",
     signature = sampleSignature(),
+    verifierSignature = sampleVerifierSignature(),
     // The preview exists to check the LAYOUT, and the QR block moves
     // "Verified by" across, so it has to be here. The token is deliberately
     // fake: this sheet is never handed to a patient, and scanning it 404s
@@ -508,23 +516,32 @@ private const val SAMPLE_QR_TOKEN =
  * text-only layout. Two sine strokes and a downstroke — enough ink to see the
  * spacing, no attempt to look like anybody's actual hand.
  */
-private fun sampleSignature(): ReportSignature {
+private fun sampleSignature(): ReportSignature = ReportSignature(
+    imagePng = sampleInk(freq = 10.0, phase = 1.1)?.takeIf { it.isNotEmpty() },
+    qualifications = "MD (Pathology)",
+    registrationNo = "TN/12345/2011",
+)
+
+/** The verifier's stand-in: a different squiggle (so the two blocks are
+ *  visibly two people) with a technician's credentials and no council number. */
+private fun sampleVerifierSignature(): ReportSignature = ReportSignature(
+    imagePng = sampleInk(freq = 7.0, phase = 2.6)?.takeIf { it.isNotEmpty() },
+    qualifications = "DMLT, B.Sc. (MLT)",
+    registrationNo = null,
+)
+
+private fun sampleInk(freq: Double, phase: Double): ByteArray? {
     val w = 720
     val h = 240
-    val png = PngWriter.grayscale1Bit(w, h) { x, y ->
+    return PngWriter.grayscale1Bit(w, h) { x, y ->
         val fx = x.toDouble() / w
         val fy = y.toDouble() / h
-        val upper = 0.52 + kotlin.math.sin(fx * 10.0) * 0.20
-        val lower = 0.58 + kotlin.math.sin(fx * 4.0 + 1.1) * 0.26
+        val upper = 0.52 + kotlin.math.sin(fx * freq) * 0.20
+        val lower = 0.58 + kotlin.math.sin(fx * 4.0 + phase) * 0.26
         kotlin.math.abs(fy - upper) < 0.05 ||
             kotlin.math.abs(fy - lower) < 0.04 ||
             (fx < 0.07 && kotlin.math.abs(fy - 0.5) < 0.32)
     }
-    return ReportSignature(
-        imagePng = png.takeIf { it.isNotEmpty() },
-        qualifications = "MD (Pathology)",
-        registrationNo = "TN/12345/2011",
-    )
 }
 
 /** ISO instant → "yyyy-MM-dd HH:mm" in the device timezone (null if unparseable). */
