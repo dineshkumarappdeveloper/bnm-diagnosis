@@ -491,6 +491,7 @@ fun NewOrderScreen(
                 invoice = inv,
                 onView = { onFinished(order.accessionNo, inv.id) },
                 onDone = { onFinished(order.accessionNo, null) },
+                doneLabel = "Home",          // registration is done — back to the desk, not "another sale"
                 autoCloseAfterPrint = !stickerOfferPending,
                 // The user's rule: once registered, offer to print the barcode only.
                 extra = {

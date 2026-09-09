@@ -493,7 +493,12 @@ fun App() {
                             onBack = { navController.popBackStack() },
                             onFinished = { accession, invoiceId ->
                                 lastAccession = accession
-                                navController.popBackStack() // → LabHome (snackbar shows the accession)
+                                // Home, whatever opened the registration (the EMR inbox
+                                // does too) — LabHome is always on the stack once signed
+                                // in; the snackbar there shows the accession.
+                                if (!navController.popBackStack(Screen.LabHome.route, inclusive = false)) {
+                                    navController.navigate(Screen.LabHome.route) { launchSingleTop = true }
+                                }
                                 invoiceId?.let { navController.navigate(Screen.InvoiceDetail.createRoute(it)) }
                             },
                             emrOrderId = emrId,

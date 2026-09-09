@@ -51,8 +51,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** Post-save popup (replaces navigating to a full page): confirms the bill and
- *  offers Print receipt / View details / New sale. [changeDue] (defaults to the
- *  invoice's recorded change) is shown prominently for cash sales.
+ *  offers Print receipt / View details / [doneLabel] ("New sale" at a shop
+ *  counter; the lab's registration says "Home", because that is where [onDone]
+ *  takes it). [changeDue] (defaults to the invoice's recorded change) is shown
+ *  prominently for cash sales.
  *
  *  Printing contract: with a CONNECTED printer (LAN IP or Bluetooth device
  *  configured + printing enabled) the receipt prints AUTOMATICALLY and the
@@ -84,6 +86,8 @@ fun SaveResultDialog(
      *  lab passes false while a sticker offer is pending, otherwise the
      *  auto-print + auto-close would sweep the offer away unseen. */
     autoCloseAfterPrint: Boolean = true,
+    /** The closing action's label — name the DESTINATION [onDone] leads to. */
+    doneLabel: String = "New sale",
 ) {
     val scope = rememberCoroutineScope()
     val prefs = remember { BillingPrefs() }
@@ -275,7 +279,7 @@ fun SaveResultDialog(
                 }
                 extra()
                 OutlinedButton(onClick = onView, modifier = Modifier.fillMaxWidth()) { Text("View details") }
-                TextButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) { Text("New sale") }
+                TextButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) { Text(doneLabel) }
             }
         }
     }
