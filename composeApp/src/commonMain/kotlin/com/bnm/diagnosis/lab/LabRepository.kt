@@ -26,6 +26,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.withContext
 import kotlinx.datetime.DatePeriod
 import kotlinx.datetime.LocalDate
@@ -874,7 +876,21 @@ class LabRepository(
     fun resultsForOrderFlow(orderId: String): Flow<List<LabResult>> =
         resQ.resultsForOrder(orderId).asFlow().mapToList(Dispatchers.Default)
             .map { rows -> rows.map { it.toModel() } }
-            .catch { }
+            .retryWhen { _, attempt -> delay(minOf(1000L * (attempt + 1), 5000L)); true }
+
+    /** Live graphs for one order — the engine writes them AFTER the results, so
+     *  the alerts strip must watch this table, not piggyback on the results. */
+    fun graphsForOrderFlow(orderId: String): Flow<List<ResultGraph>> =
+        gQ.graphsForOrder(orderId).asFlow().mapToList(Dispatchers.Default)
+            .map { rows -> rows.map { it.toGraph() } }
+            .retryWhen { _, attempt -> delay(minOf(1000L * (attempt + 1), 5000L)); true }
+
+    /** Live [instrumentNames], so an analyzer added or renamed while an order
+     *  is open is recognised at once. */
+    fun instrumentNamesFlow(): Flow<Set<String>> =
+        db.instrumentsQueries.listInstruments().asFlow().mapToList(Dispatchers.Default)
+            .map { rows -> rows.map { it.name.trim() }.filter { it.isNotEmpty() }.toSet() }
+            .retryWhen { _, attempt -> delay(minOf(1000L * (attempt + 1), 5000L)); true }
 
     /** Display names of the analyzers set up on this device. Until results carry
      *  a source of their own, a name on `entered_by` that matches one of these is
@@ -885,18 +901,18 @@ class LabRepository(
 
     /** Every graph the analyzer left against [orderId], per test and kind. */
     suspend fun graphsForOrder(orderId: String): List<ResultGraph> = withContext(Dispatchers.Default) {
-        gQ.graphsForOrder(orderId).executeAsList().map { g ->
-            ResultGraph(
-                orderId = g.order_id, testId = g.test_id, kind = g.kind,
-                points = runCatching { json.decodeFromString(ListSerializer(Double.serializer()), g.points_json) }
-                    .getOrDefault(emptyList()),
-                meta = g.meta_json?.let { m ->
-                    runCatching { json.decodeFromString(MapSerializer(String.serializer(), String.serializer()), m) }.getOrNull()
-                }.orEmpty(),
-                imageBase64 = g.image_base64,
-            )
-        }
+        gQ.graphsForOrder(orderId).executeAsList().map { it.toGraph() }
     }
+
+    private fun com.bnm.diagnosis.db.Lab_result_graphs.toGraph() = ResultGraph(
+        orderId = order_id, testId = test_id, kind = kind,
+        points = runCatching { json.decodeFromString(ListSerializer(Double.serializer()), points_json) }
+            .getOrDefault(emptyList()),
+        meta = meta_json?.let { m ->
+            runCatching { json.decodeFromString(MapSerializer(String.serializer(), String.serializer()), m) }.getOrNull()
+        }.orEmpty(),
+        imageBase64 = image_base64,
+    )
 
     // ── Report share links (the printed QR) ──────────────────────────────────
 

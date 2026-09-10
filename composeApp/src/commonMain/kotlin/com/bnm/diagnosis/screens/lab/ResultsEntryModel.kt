@@ -51,9 +51,11 @@ internal data class Provenance(
         at?.let { append(" · ").append(time(it)) }
     }
 
-    /** Tile line: "Filled by Mindray BC-5130 · 10:15", "Entered by S. Kumar and 1 more · 10:22". */
-    fun long(time: (String) -> String): String = buildString {
-        append(if (analyzer) "Filled by " else "Entered by ")
+    /** Tile line: "Filled by Mindray BC-5130 · 10:15", "Entered by S. Kumar and 1 more · 10:22".
+     *  [asAnalyzer] lets the caller pass the GROUP's verdict (name match OR
+     *  graphs), so a renamed instrument never reads "Entered by". */
+    fun long(asAnalyzer: Boolean = analyzer, time: (String) -> String): String = buildString {
+        append(if (asAnalyzer) "Filled by " else "Entered by ")
         append(who)
         if (others == 1) append(" and 1 more") else if (others > 1) append(" and $others more")
         at?.let { append(" · ").append(time(it)) }
@@ -144,6 +146,24 @@ internal fun nextEmptyIndex(groups: List<EntryGroup>, from: Int, size: Int, blan
         ?: (0 until g.first).firstOrNull(blank)
         ?: (from + 1).takeIf { it < size }
 }
+
+/**
+ * May the live flow overwrite the box for [key]? Never while its commit is in
+ * flight ([pending]: the DB still holds the OLD value, and the box the NEW
+ * one), and never under a cursor that has typed ([focusedKey] + [dirty]). A
+ * focused box nobody has typed in IS reseeded — that is how the technician
+ * sees an analyzer value arrive in the very cell they were waiting on.
+ */
+internal fun reseedable(key: String, focusedKey: String?, dirty: Set<String>, pending: Set<String>): Boolean =
+    key !in pending && !(key == focusedKey && key in dirty)
+
+/**
+ * Commit on blur ONLY what the operator edited. Comparing the box with the
+ * stored value is not enough once results refresh live: a blank box over a
+ * value the analyzer just wrote would otherwise commit "" and erase it.
+ */
+internal fun shouldCommitOnBlur(wasDirty: Boolean, text: String, stored: String?): Boolean =
+    wasDirty && text.trim() != stored.orEmpty().trim()
 
 /** Where the screen opens: the first test still missing a value, else the first test. */
 internal fun initialTestId(groups: List<EntryGroup>): String? =

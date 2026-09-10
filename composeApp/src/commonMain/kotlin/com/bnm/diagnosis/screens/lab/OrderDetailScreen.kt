@@ -129,6 +129,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.drawscope.Stroke
 import com.bnm.diagnosis.lab.ResultGraph
 import com.bnm.diagnosis.ui.theme.AppTheme
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.ui.semantics.Role
 
 /** Statuses in which result entry is still open (mirrors the repo's guard). */
 private val ENTRY_OPEN = setOf(LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED)
@@ -214,6 +218,9 @@ fun OrderDetailScreen(
     var selectedTestId by remember(orderId) { mutableStateOf<String?>(null) }
     var instrumentNames by remember { mutableStateOf(emptySet<String>()) }
     var graphs by remember { mutableStateOf<List<ResultGraph>>(emptyList()) }
+    // The first load is several reads; until it is through, the body is a
+    // spinner — not "No tests on this order" for a frame.
+    var loaded by remember(orderId) { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var showApprove by remember { mutableStateOf(false) }
@@ -275,6 +282,11 @@ fun OrderDetailScreen(
     // and flag a value live without asking each row for its private state.
     val draft = remember { mutableStateMapOf<String, String>() }
     var focusedKey by remember { mutableStateOf<String?>(null) }
+    // Keys the operator has typed into since they were last committed, and keys
+    // whose commit is in flight — the two things the live refresh must not
+    // overwrite, and (for dirty) the only thing blur may commit.
+    val dirty = remember { mutableSetOf<String>() }
+    val pending = remember { mutableSetOf<String>() }
 
     LaunchedEffect(orderId, reloadTick) {
         val o = repo.orderById(orderId) ?: return@LaunchedEffect
@@ -286,32 +298,34 @@ fun OrderDetailScreen(
         val fresh = repo.resultsForOrder(orderId).associateBy { "${it.testId}|${it.parameterKey}" }
         results = fresh
         catalog = ts.mapNotNull { t -> repo.testById(t.testId)?.let { t.testId to it } }.toMap()
-        instrumentNames = repo.instrumentNames()
-        graphs = repo.graphsForOrder(orderId)
-        // Re-seed the boxes from the DB, but never yank text out from under the
-        // field the technician is typing in (a status walk can reload mid-entry).
+        // Re-seed the boxes from the DB — except a box being typed in or one
+        // whose commit is still on its way (a status walk can reload mid-entry).
         fresh.forEach { (k, r) ->
-            if (k != focusedKey && draft[k] != r.value.orEmpty()) draft[k] = r.value.orEmpty()
+            if (reseedable(k, focusedKey, dirty, pending) && draft[k] != r.value.orEmpty()) draft[k] = r.value.orEmpty()
         }
+        loaded = true
     }
 
     // LIVE: an analyzer frame (or a sync pull) landing while this order is open
-    // shows up at once. The status it may have walked, and the graphs it left,
-    // are re-read on the same tick; the focused cell is left alone as above.
+    // shows up at once, and the status it may have walked is re-read on the same
+    // tick. Boxes follow the same reseed rule as the load above.
     LaunchedEffect(orderId) {
         repo.resultsForOrderFlow(orderId).collect { list ->
             val fresh = list.associateBy { "${it.testId}|${it.parameterKey}" }
             if (fresh == results) return@collect
             results = fresh
             fresh.forEach { (k, r) ->
-                if (k != focusedKey && draft[k] != r.value.orEmpty()) draft[k] = r.value.orEmpty()
+                if (reseedable(k, focusedKey, dirty, pending) && draft[k] != r.value.orEmpty()) draft[k] = r.value.orEmpty()
             }
             repo.orderById(orderId)?.let { f ->
                 if (f.status != order?.status) { order = f; tests = repo.orderTests(orderId) }
             }
-            graphs = repo.graphsForOrder(orderId)
         }
     }
+    // The engine writes graphs AFTER the results (own table, own notification),
+    // and an analyzer can be added or renamed while an order is open.
+    LaunchedEffect(orderId) { repo.graphsForOrderFlow(orderId).collect { graphs = it } }
+    LaunchedEffect(Unit) { repo.instrumentNamesFlow().collect { instrumentNames = it } }
 
     val o = order
     val locked = o == null || o.status !in ENTRY_OPEN
@@ -429,14 +443,22 @@ fun OrderDetailScreen(
     fun commit(row: GridRow, text: String) {
         val ord = order ?: return
         session.touch()
+        // In flight: the live flow must not reseed this box from the OLD stored
+        // value while the write is on its way (another cell's commit, or an
+        // analyzer frame, can make the flow emit in between).
+        pending += row.key
         scope.launch {
-            repo.enterResult(ord.id, row.testId, row.paramKey, text, enteredBy = actor)
-                .onSuccess { updated ->
-                    results = results + (row.key to updated)
-                    // Entry can walk the order status (in_progress/entered).
-                    repo.orderById(ord.id)?.let { fresh -> if (fresh.status != ord.status) reloadTick++ }
-                }
-                .onFailure { message = it.message }
+            try {
+                repo.enterResult(ord.id, row.testId, row.paramKey, text, enteredBy = actor)
+                    .onSuccess { updated ->
+                        results = results + (row.key to updated)
+                        // Entry can walk the order status (in_progress/entered).
+                        repo.orderById(ord.id)?.let { fresh -> if (fresh.status != ord.status) reloadTick++ }
+                    }
+                    .onFailure { message = it.message }
+            } finally {
+                pending -= row.key
+            }
         }
     }
 
@@ -533,7 +555,7 @@ fun OrderDetailScreen(
             }
         },
     ) { inner ->
-        if (o == null || patient == null) {
+        if (o == null || patient == null || !loaded) {
             Box(Modifier.padding(inner).fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             return@Scaffold
         }
@@ -565,8 +587,9 @@ fun OrderDetailScreen(
         BoxWithConstraints(Modifier.padding(inner).fillMaxSize()) {
             val wide = maxWidth >= WIDE_MIN_DP.dp
             // The rail is the order's table of contents; an order with ONE test
-            // has nothing to list, and a narrow pane shows the same tests as chips.
-            val showRail = wide && groups.size > 1
+            // has nothing to list, and a pane too narrow to hold the rail beside
+            // a five-column table shows the same tests as chips above it.
+            val showRail = maxWidth >= RAIL_MIN_DP.dp && groups.size > 1
 
             /** Focus row [target] (a GLOBAL index): switch the tile to its test
              *  if needed, scroll it into view, then focus. A requester that is
@@ -584,8 +607,10 @@ fun OrderDetailScreen(
                     if (listState.layoutInfo.visibleItemsInfo.none { it.index == local }) {
                         runCatching { listState.scrollToItem(local) }
                     }
+                    // requestFocus() answers false (or throws, older runtimes) when
+                    // the row is not composed yet — give it a few frames.
                     repeat(5) {
-                        if (runCatching { requesters[target].requestFocus() }.isSuccess) return@launch
+                        if (runCatching { requesters[target].requestFocus() }.getOrDefault(false)) return@launch
                         withFrameNanos { }
                     }
                 }
@@ -661,12 +686,13 @@ fun OrderDetailScreen(
                                 focused = focusedKey == row.key,
                                 last = i == rows.lastIndex,
                                 focusRequester = requesters[i],
-                                onValueChange = { draft[row.key] = it },
+                                onValueChange = { draft[row.key] = it; dirty += row.key },
                                 onFocus = { focusedKey = row.key },
                                 onBlur = {
                                     if (focusedKey == row.key) focusedKey = null
+                                    val wasDirty = dirty.remove(row.key)
                                     val text = draft[row.key].orEmpty()
-                                    if (text.trim() != row.result.value.orEmpty().trim()) commit(row, text)
+                                    if (shouldCommitOnBlur(wasDirty, text, row.result.value)) commit(row, text)
                                 },
                                 onNext = { focusRow(i + 1) },
                                 onPrevious = { if (i == 0) focusManager.clearFocus() else focusRow(i - 1) },
@@ -963,39 +989,43 @@ private fun buildGrid(
     val rows = mutableListOf<GridRow>()
     for (t in tests) {
         val test = catalog[t.testId]
-        val params = test?.parameters.orEmpty()
-        if (test != null && params.isNotEmpty()) {
-            for (p in params) {
-                val res = results["${t.testId}|${p.key}"] ?: continue
-                rows += GridRow(
-                    key = "${t.testId}|${p.key}",
-                    testId = t.testId,
-                    paramKey = p.key,
-                    label = p.name,
-                    unit = (res.unit ?: p.unit).orEmpty(),
-                    // Frozen range wins once a value is in (that is what printed);
-                    // otherwise show what WILL be frozen for this patient.
-                    refDisplay = res.refDisplay?.takeIf { res.isEntered && it.isNotBlank() }
-                        ?: LabRepository.refDisplayFor(test, p, patient),
-                    numeric = p.isNumeric(),
-                    range = LabRepository.rangeFor(test, p, patient),
-                    result = res,
-                )
-            }
-        } else {
-            for (res in results.values.filter { it.testId == t.testId }) {
-                rows += GridRow(
-                    key = "${t.testId}|${res.parameterKey}",
-                    testId = t.testId,
-                    paramKey = res.parameterKey,
-                    label = res.parameterKey,
-                    unit = res.unit.orEmpty(),
-                    refDisplay = res.refDisplay?.takeIf { it.isNotBlank() } ?: LabRepository.NO_RANGE,
-                    numeric = true,
-                    range = null,
-                    result = res,
-                )
-            }
+        val fromCatalog = if (test == null) emptyList() else test.parameters.mapNotNull { p ->
+            val res = results["${t.testId}|${p.key}"] ?: return@mapNotNull null
+            GridRow(
+                key = "${t.testId}|${p.key}",
+                testId = t.testId,
+                paramKey = p.key,
+                label = p.name,
+                unit = (res.unit ?: p.unit).orEmpty(),
+                // Frozen range wins once a value is in (that is what printed);
+                // otherwise show what WILL be frozen for this patient.
+                refDisplay = res.refDisplay?.takeIf { res.isEntered && it.isNotBlank() }
+                    ?: LabRepository.refDisplayFor(test, p, patient),
+                numeric = p.isNumeric(),
+                range = LabRepository.rangeFor(test, p, patient),
+                result = res,
+            )
+        }
+        if (fromCatalog.isNotEmpty()) {
+            rows += fromCatalog
+            continue
+        }
+        // No catalog entry, or one whose parameter keys no longer match the
+        // order's frozen rows (a re-imported platform test): show the rows we
+        // have, labelled by their key, so the test never vanishes from the rail
+        // while the header still counts its cells.
+        for (res in results.values.filter { it.testId == t.testId }) {
+            rows += GridRow(
+                key = "${t.testId}|${res.parameterKey}",
+                testId = t.testId,
+                paramKey = res.parameterKey,
+                label = res.parameterKey,
+                unit = res.unit.orEmpty(),
+                refDisplay = res.refDisplay?.takeIf { it.isNotBlank() } ?: LabRepository.NO_RANGE,
+                numeric = true,
+                range = null,
+                result = res,
+            )
         }
     }
     return rows
@@ -1186,6 +1216,15 @@ private fun HeadCell(text: String, modifier: Modifier = Modifier) {
 /** The rail's fixed width — room for "Erythrocyte Sedimentation Rate" on two lines. */
 private val RAIL_WIDTH = 236.dp
 
+/** Rail + five-column table need this much; below it the tests become chips
+ *  and the table keeps its full width (the table itself needs [WIDE_MIN_DP]). */
+private const val RAIL_MIN_DP = 1120
+
+/** Provenance text for an analyzer-filled test: the theme's info blue is too
+ *  light for 11 sp on a white surface (AA needs 4.5:1), so light mode deepens it. */
+@Composable
+private fun analyzerInk(): Color = if (AppTheme.colors.isDark) AppTheme.colors.info else Color(0xFF1D4ED8)
+
 /**
  * The order's table of contents: one line per test with a progress dot, who
  * entered it and when, and a count. Selecting a test swaps the tile; the
@@ -1201,10 +1240,11 @@ private fun TestRail(
     modifier: Modifier = Modifier,
 ) {
     val done = groups.count { it.done }
+    val scroll = rememberScrollState()
     Column(
         modifier
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scroll)
             .padding(horizontal = 8.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
@@ -1216,12 +1256,18 @@ private fun TestRail(
         )
         for (g in groups) {
             val isSelected = g.testId == selectedId
+            // Keyboard navigation selects tests without touching the rail: bring
+            // the selected line into view so the rail always shows where you are.
+            val bring = remember { BringIntoViewRequester() }
+            LaunchedEffect(isSelected) { if (isSelected) bring.bringIntoView() }
             Row(
                 Modifier.fillMaxWidth()
+                    .bringIntoViewRequester(bring)
                     .clip(RoundedCornerShape(8.dp))
                     .background(if (isSelected) MaterialTheme.colorScheme.surface else Color.Transparent)
                     .then(if (isSelected) Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp)) else Modifier)
-                    .clickable { onSelect(g.testId) }
+                    .selectable(selected = isSelected, role = Role.Tab) { onSelect(g.testId) }
+                    .heightIn(min = 44.dp)
                     .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -1240,7 +1286,7 @@ private fun TestRail(
                     sub?.let {
                         Text(
                             it, style = MaterialTheme.typography.labelSmall,
-                            color = if (g.analyzer) AppTheme.colors.info else MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = if (g.analyzer) analyzerInk() else MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
                     }
@@ -1257,8 +1303,14 @@ private fun TestRail(
 /** Under 900 dp the rail is a chip strip: same dots, catalog codes for names. */
 @Composable
 private fun TestChips(groups: List<EntryGroup>, selectedId: String, onSelect: (String) -> Unit) {
+    val state = rememberLazyListState()
+    LaunchedEffect(selectedId) {
+        val i = groups.indexOfFirst { it.testId == selectedId }
+        if (i >= 0) runCatching { state.animateScrollToItem(i) }
+    }
     LazyRow(
         Modifier.fillMaxWidth(),
+        state = state,
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -1278,7 +1330,7 @@ private fun TestChips(groups: List<EntryGroup>, selectedId: String, onSelect: (S
 @Composable
 private fun ProgressDot(g: EntryGroup) {
     val color = when {
-        g.analyzer -> AppTheme.colors.info
+        g.analyzer -> analyzerInk()
         g.started -> MaterialTheme.colorScheme.primary
         else -> MaterialTheme.colorScheme.outline
     }
@@ -1329,10 +1381,10 @@ private fun TestTile(
             Column(horizontalAlignment = Alignment.End) {
                 group.provenance?.let { p ->
                     Text(
-                        (if (group.analyzer) "⚡ " else "") + p.long(::shortTimeLabel),
+                        (if (group.analyzer) "⚡ " else "") + p.long(asAnalyzer = group.analyzer, time = ::shortTimeLabel),
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = if (group.analyzer) FontWeight.SemiBold else FontWeight.Normal,
-                        color = if (group.analyzer) AppTheme.colors.info else MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (group.analyzer) analyzerInk() else MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
                 }

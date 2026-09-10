@@ -16,6 +16,8 @@ import com.bnm.diagnosis.screens.lab.buildEntryGroups
 import com.bnm.diagnosis.screens.lab.initialTestId
 import com.bnm.diagnosis.screens.lab.nextEmptyIndex
 import com.bnm.diagnosis.screens.lab.provenanceOf
+import com.bnm.diagnosis.screens.lab.reseedable
+import com.bnm.diagnosis.screens.lab.shouldCommitOnBlur
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -145,6 +147,56 @@ class ResultsEntryModelTest {
         assertEquals("2026-09-10T03:00:00Z", p.at)
         assertNull(provenanceOf(listOf(res("t", "a", "1", null)), emptySet()))
         assertTrue(analyzerAlerts(listOf(ResultGraph("o", "t", "wbc", emptyList()))).isEmpty())
+    }
+
+    @Test
+    fun `blur commits only what the operator typed, and the live refresh keeps its hands off in-flight cells`() {
+        // The review's high finding: a blank box over a value the analyzer just
+        // wrote must NOT commit "" on blur.
+        assertFalse(shouldCommitOnBlur(wasDirty = false, text = "", stored = "9550"))
+        assertTrue(shouldCommitOnBlur(wasDirty = true, text = "9600", stored = "9550"))
+        assertFalse(shouldCommitOnBlur(wasDirty = true, text = " 9550 ", stored = "9550"), "typed the same value back: nothing to write")
+        assertTrue(shouldCommitOnBlur(wasDirty = true, text = "", stored = "9550"), "a deliberate clear still commits")
+
+        val dirty = setOf("cbc|wbc")
+        val pending = setOf("cbc|hb")
+        assertFalse(reseedable("cbc|hb", null, dirty, pending), "commit in flight: the DB still holds the old value")
+        assertFalse(reseedable("cbc|wbc", "cbc|wbc", dirty, pending), "typing here")
+        assertTrue(reseedable("cbc|wbc", "cbc|rbc", dirty, pending), "typed earlier but focus moved on: follow the DB")
+        assertTrue(reseedable("cbc|rbc", "cbc|rbc", dirty, pending), "focused but untouched: the analyzer's value may land in it")
+        assertTrue(reseedable("cbc|plt", null, emptySet(), emptySet()))
+    }
+
+    @Test
+    fun `a renamed instrument still reads Filled by when the group says analyzer`() {
+        val p = provenanceOf(listOf(res("t", "a", "1", "Old Name", "2026-09-10T01:00:00Z")), emptySet())!!
+        assertFalse(p.analyzer)
+        assertEquals("Entered by Old Name · T", p.long { "T" })
+        assertEquals("Filled by Old Name · T", p.long(asAnalyzer = true) { "T" })
+    }
+
+    @Test
+    fun `graphs and instrument names are live flows too`() = runBlocking {
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        AppDatabase.Schema.create(driver)
+        val db = AppDatabase(driver)
+        val repo = LabRepository(db, ApiClient.json)
+        val seenG = Channel<List<ResultGraph>>(Channel.UNLIMITED)
+        val jobG = launch { repo.graphsForOrderFlow("o-g").collect { seenG.send(it) } }
+        assertTrue(withTimeout(5_000) { seenG.receive() }.isEmpty())
+        db.instrumentsQueries.upsertGraph("o-g", "t", "wbc", "[1.0,2.0]", "{\"alerts\":\"Multiple alerts\"}", "2026-09-10T05:00:00Z", null)
+        val g = withTimeout(5_000) { seenG.receive() }.single()
+        assertEquals("Multiple alerts", g.meta["alerts"])
+        assertEquals(listOf(1.0, 2.0), g.points)
+        jobG.cancel()
+
+        val seenN = Channel<Set<String>>(Channel.UNLIMITED)
+        val jobN = launch { repo.instrumentNamesFlow().collect { seenN.send(it) } }
+        assertTrue(withTimeout(5_000) { seenN.receive() }.isEmpty())
+        val now = "2026-09-10T05:00:00Z"
+        db.instrumentsQueries.upsertInstrument("i9", "Sysmex XN-350", "mindray_hl7", "tcp", null, 115200L, 5501L, 1L, null, now, now)
+        assertEquals(setOf("Sysmex XN-350"), withTimeout(5_000) { seenN.receive() })
+        jobN.cancel()
     }
 
     @Test
