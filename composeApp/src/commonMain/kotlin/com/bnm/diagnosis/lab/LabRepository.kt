@@ -864,6 +864,25 @@ class LabRepository(
 
     // ── Analyzer graphs (histograms / scattergram) ──────────────────────────
 
+    /**
+     * Live results for one order. The entry screen lives on this so a value an
+     * analyzer (or another seat's sync) writes while the order is open appears
+     * at once — nobody types over a result that just arrived. An error keeps
+     * the last good list rather than emitting an empty one, which the screen
+     * would read as "every cell is blank".
+     */
+    fun resultsForOrderFlow(orderId: String): Flow<List<LabResult>> =
+        resQ.resultsForOrder(orderId).asFlow().mapToList(Dispatchers.Default)
+            .map { rows -> rows.map { it.toModel() } }
+            .catch { }
+
+    /** Display names of the analyzers set up on this device. Until results carry
+     *  a source of their own, a name on `entered_by` that matches one of these is
+     *  how the screen tells a machine from a person. */
+    suspend fun instrumentNames(): Set<String> = withContext(Dispatchers.Default) {
+        db.instrumentsQueries.listInstruments().executeAsList().map { it.name.trim() }.filter { it.isNotEmpty() }.toSet()
+    }
+
     /** Every graph the analyzer left against [orderId], per test and kind. */
     suspend fun graphsForOrder(orderId: String): List<ResultGraph> = withContext(Dispatchers.Default) {
         gQ.graphsForOrder(orderId).executeAsList().map { g ->

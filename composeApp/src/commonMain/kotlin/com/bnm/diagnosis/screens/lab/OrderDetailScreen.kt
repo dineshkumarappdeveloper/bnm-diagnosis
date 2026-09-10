@@ -113,6 +113,22 @@ import com.bnm.diagnosis.screens.billing.CollectPaymentDialog
 import com.bnm.diagnosis.chat.InvoiceBalance
 import com.bnm.diagnosis.billing.PrintProfiles
 import com.bnm.diagnosis.print.buildSampleStickers
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.VerticalDivider
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.drawscope.Stroke
+import com.bnm.diagnosis.lab.ResultGraph
+import com.bnm.diagnosis.ui.theme.AppTheme
 
 /** Statuses in which result entry is still open (mirrors the repo's guard). */
 private val ENTRY_OPEN = setOf(LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED)
@@ -129,9 +145,12 @@ private val COL_UNIT = 78.dp
 private val COL_FLAG = 124.dp   // widened in round 1: "⚠ CH↑" + CRITICAL measured ~107dp and Text overflow is Clip, so it would have truncated silently
 
 /**
- * One order's workbench: a compact patient header + entry progress, then a
- * DENSE results table (Parameter | Result | Unit | Ref. range | Flag) that
- * mirrors the printed report, and a compact stage action bar.
+ * One order's workbench: a compact patient header + entry progress, then the
+ * order's tests as a RAIL (or chips when narrow) with ONE test's dense results
+ * table at a time (Parameter | Result | Unit | Ref. range | Flag — the printed
+ * report's shape, one test per sheet), and a compact stage action bar. The
+ * rail says who filled each test and when, and a test an analyzer filled
+ * reads blue, with the analyzer's own alerts above its table.
  *
  * Three things make it a bench tool rather than a form:
  *  - **ranges are shown BEFORE entry** — computed live from the catalog against
@@ -141,8 +160,9 @@ private val COL_FLAG = 124.dp   // widened in round 1: "⚠ CH↑" + CRITICAL me
  *    value is obvious immediately; the authoritative flag is still whatever
  *    `enterResult` freezes on commit;
  *  - **keyboard-first** — Tab/Shift-Tab walk the rows, Enter jumps to the next
- *    EMPTY row (a whole CBC without touching the mouse). Every move blurs the
- *    field, and blur is what commits.
+ *    EMPTY row of the test in hand, then on to the next test that has a gap
+ *    (a whole order without touching the mouse — the tile follows). Every move
+ *    blurs the field, and blur is what commits.
  *
  * Entry locks once the order is verified (repo enforces; UI reflects).
  */
@@ -189,6 +209,11 @@ fun OrderDetailScreen(
     var results by remember { mutableStateOf<Map<String, LabResult>>(emptyMap()) } // "testId|paramKey"
     var catalog by remember { mutableStateOf<Map<String, LabTest>>(emptyMap()) }
     var reloadTick by remember { mutableStateOf(0) }
+    // Which test the tile shows. Null until the grid is known; then the first
+    // test still missing a value, and after that only the operator moves it.
+    var selectedTestId by remember(orderId) { mutableStateOf<String?>(null) }
+    var instrumentNames by remember { mutableStateOf(emptySet<String>()) }
+    var graphs by remember { mutableStateOf<List<ResultGraph>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var showApprove by remember { mutableStateOf(false) }
@@ -261,10 +286,30 @@ fun OrderDetailScreen(
         val fresh = repo.resultsForOrder(orderId).associateBy { "${it.testId}|${it.parameterKey}" }
         results = fresh
         catalog = ts.mapNotNull { t -> repo.testById(t.testId)?.let { t.testId to it } }.toMap()
+        instrumentNames = repo.instrumentNames()
+        graphs = repo.graphsForOrder(orderId)
         // Re-seed the boxes from the DB, but never yank text out from under the
         // field the technician is typing in (a status walk can reload mid-entry).
         fresh.forEach { (k, r) ->
             if (k != focusedKey && draft[k] != r.value.orEmpty()) draft[k] = r.value.orEmpty()
+        }
+    }
+
+    // LIVE: an analyzer frame (or a sync pull) landing while this order is open
+    // shows up at once. The status it may have walked, and the graphs it left,
+    // are re-read on the same tick; the focused cell is left alone as above.
+    LaunchedEffect(orderId) {
+        repo.resultsForOrderFlow(orderId).collect { list ->
+            val fresh = list.associateBy { "${it.testId}|${it.parameterKey}" }
+            if (fresh == results) return@collect
+            results = fresh
+            fresh.forEach { (k, r) ->
+                if (k != focusedKey && draft[k] != r.value.orEmpty()) draft[k] = r.value.orEmpty()
+            }
+            repo.orderById(orderId)?.let { f ->
+                if (f.status != order?.status) { order = f; tests = repo.orderTests(orderId) }
+            }
+            graphs = repo.graphsForOrder(orderId)
         }
     }
 
@@ -498,36 +543,65 @@ fun OrderDetailScreen(
         val listState = rememberLazyListState()
         val focusManager = LocalFocusManager.current
         val showLockNote = locked && o.status != LabStatus.CANCELLED
+        val groups = remember(rows, tests, catalog, results, instrumentNames, graphs) {
+            buildEntryGroups(
+                tests = tests,
+                codes = catalog.mapValues { it.value.code },
+                rowTestIds = rows.map { it.testId },
+                rowKeys = rows.map { it.key },
+                results = results,
+                instrumentNames = instrumentNames,
+                graphs = graphs,
+            )
+        }
+        // Open on the first test still missing a value; from then on the tile
+        // only changes when the operator changes it (click, Tab, or Enter).
+        LaunchedEffect(groups) {
+            if (groups.none { it.testId == selectedTestId }) selectedTestId = initialTestId(groups)
+        }
+        val selected = groups.firstOrNull { it.testId == selectedTestId }
+            ?: initialTestId(groups)?.let { id -> groups.first { it.testId == id } }
 
         BoxWithConstraints(Modifier.padding(inner).fillMaxSize()) {
             val wide = maxWidth >= WIDE_MIN_DP.dp
-            // The patient header is PINNED outside the list now, so rows start
-            // at 0 (+1 for the sticky column strip when wide). Keep this in
-            // step with the items emitted above `itemsIndexed` below.
-            val leading = if (wide) 1 else 0
+            // The rail is the order's table of contents; an order with ONE test
+            // has nothing to list, and a narrow pane shows the same tests as chips.
+            val showRail = wide && groups.size > 1
 
-            /** Focus row [target], scrolling it into view first — a LazyColumn
-             *  requester that is not composed would throw. */
+            /** Focus row [target] (a GLOBAL index): switch the tile to its test
+             *  if needed, scroll it into view, then focus. A requester that is
+             *  not composed yet throws, so after a switch we give it a frame or two. */
             fun focusRow(target: Int) {
                 if (target !in rows.indices) { focusManager.clearFocus(); return }
+                val g = groups.firstOrNull { target in it.range }
+                if (g == null) { focusManager.clearFocus(); return }
                 scope.launch {
-                    val itemIndex = leading + target
-                    if (listState.layoutInfo.visibleItemsInfo.none { it.index == itemIndex }) {
-                        runCatching { listState.scrollToItem(itemIndex) }
+                    if (selectedTestId != g.testId) {
+                        selectedTestId = g.testId
+                        withFrameNanos { }
                     }
-                    runCatching { requesters[target].requestFocus() }
+                    val local = target - g.first
+                    if (listState.layoutInfo.visibleItemsInfo.none { it.index == local }) {
+                        runCatching { listState.scrollToItem(local) }
+                    }
+                    repeat(5) {
+                        if (runCatching { requesters[target].requestFocus() }.isSuccess) return@launch
+                        withFrameNanos { }
+                    }
                 }
             }
 
-            /** Enter = "next thing that still needs a value": forward first,
-             *  then wrap to an earlier gap, else just step down; nothing empty
-             *  left → drop focus (which commits the field we are leaving). */
+            /** Enter = the next thing that still needs a value — this test first,
+             *  then the next test with a gap; nothing left → drop focus (commits). */
             fun focusNextEmpty(from: Int) {
-                val blank = { i: Int -> draft[rows[i].key].isNullOrBlank() }
-                val target = (from + 1 until rows.size).firstOrNull(blank)
-                    ?: (0 until from).firstOrNull(blank)
-                    ?: (from + 1).takeIf { it < rows.size }
+                val target = nextEmptyIndex(groups, from, rows.size) { i -> draft[rows[i].key].isNullOrBlank() }
                 if (target == null) focusManager.clearFocus() else focusRow(target)
+            }
+
+            fun selectTest(testId: String) {
+                focusManager.clearFocus()          // blur commits the cell being left
+                selectedTestId = testId
+                scope.launch { runCatching { listState.scrollToItem(0) } }
             }
 
             Column(Modifier.fillMaxSize()) {
@@ -566,38 +640,65 @@ fun OrderDetailScreen(
                     }
                 }
 
-            LazyColumn(
-                Modifier.fillMaxWidth().weight(1f),
-                state = listState,
-                contentPadding = PaddingValues(bottom = 28.dp),
-            ) {
-                if (wide) item(key = "cols") { TableHeader() }
-                itemsIndexed(rows, key = { _, r -> r.key }) { i, row ->
-                    Column(Modifier.fillMaxWidth()) {
-                        row.section?.let { SectionHeader(it) }
-                        ResultGridRow(
-                            row = row,
-                            value = draft[row.key].orEmpty(),
-                            wide = wide,
-                            locked = locked,
-                            focused = focusedKey == row.key,
-                            last = i == rows.lastIndex,
-                            focusRequester = requesters[i],
-                            onValueChange = { draft[row.key] = it },
-                            onFocus = { focusedKey = row.key },
-                            onBlur = {
-                                if (focusedKey == row.key) focusedKey = null
-                                val text = draft[row.key].orEmpty()
-                                if (text.trim() != row.result.value.orEmpty().trim()) commit(row, text)
-                            },
-                            onNext = { focusRow(i + 1) },
-                            onPrevious = { if (i == 0) focusManager.clearFocus() else focusRow(i - 1) },
-                            onEnter = { focusNextEmpty(i) },
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+                if (selected == null) {
+                    Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                        Text("No tests on this order", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    return@Column
+                }
+                val typingIn = focusedKey?.let { k -> rows.firstOrNull { it.key == k }?.testId }
+
+                /** The selected test's rows — the slice of the flat grid it owns. */
+                val tileRows: LazyListScope.() -> Unit = {
+                    itemsIndexed(selected.range.toList(), key = { _, i -> rows[i].key }) { _, i ->
+                        val row = rows[i]
+                        Column(Modifier.fillMaxWidth()) {
+                            ResultGridRow(
+                                row = row,
+                                value = draft[row.key].orEmpty(),
+                                wide = wide,
+                                locked = locked,
+                                focused = focusedKey == row.key,
+                                last = i == rows.lastIndex,
+                                focusRequester = requesters[i],
+                                onValueChange = { draft[row.key] = it },
+                                onFocus = { focusedKey = row.key },
+                                onBlur = {
+                                    if (focusedKey == row.key) focusedKey = null
+                                    val text = draft[row.key].orEmpty()
+                                    if (text.trim() != row.result.value.orEmpty().trim()) commit(row, text)
+                                },
+                                onNext = { focusRow(i + 1) },
+                                onPrevious = { if (i == 0) focusManager.clearFocus() else focusRow(i - 1) },
+                                onEnter = { focusNextEmpty(i) },
+                            )
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+                        }
                     }
                 }
-            }
+
+                if (showRail) {
+                    Row(Modifier.fillMaxWidth().weight(1f)) {
+                        TestRail(
+                            groups = groups, selectedId = selected.testId, typingIn = typingIn,
+                            onSelect = ::selectTest,
+                            modifier = Modifier.width(RAIL_WIDTH).fillMaxHeight(),
+                        )
+                        VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        TestTile(
+                            group = selected, test = catalog[selected.testId], wide = wide,
+                            listState = listState, modifier = Modifier.weight(1f).fillMaxHeight(), rows = tileRows,
+                        )
+                    }
+                } else {
+                    Column(Modifier.fillMaxWidth().weight(1f)) {
+                        if (groups.size > 1) TestChips(groups, selected.testId, ::selectTest)
+                        TestTile(
+                            group = selected, test = catalog[selected.testId], wide = wide,
+                            listState = listState, modifier = Modifier.fillMaxWidth().weight(1f), rows = tileRows,
+                        )
+                    }
+                }
             }
         }
     }
@@ -844,15 +945,14 @@ private data class GridRow(
     val numeric: Boolean,
     val range: RefRange?,             // for the LIVE flag while typing
     val result: LabResult,
-    val section: String?,             // slim test header drawn above this row
 )
 
 /**
- * Flatten the order into table rows. A test with SEVERAL parameters gets a slim
- * section header on its first row; a single-parameter test gets no header at
- * all — the row itself is the test ([singleRowLabel] picks the name that reads
- * best). A test whose catalog entry has vanished still renders from its frozen
- * result rows so nothing is ever hidden from the technician.
+ * Flatten the order into table rows, test by test (the tile shows one test's
+ * slice; the keyboard walks them all). The row label is the catalog parameter
+ * name — the test's own name is on the tile and the rail. A test whose
+ * catalog entry has vanished still renders from its frozen result rows so
+ * nothing is ever hidden from the technician.
  */
 private fun buildGrid(
     tests: List<LabOrderTest>,
@@ -865,15 +965,13 @@ private fun buildGrid(
         val test = catalog[t.testId]
         val params = test?.parameters.orEmpty()
         if (test != null && params.isNotEmpty()) {
-            val multi = params.size > 1
-            var first = true
             for (p in params) {
                 val res = results["${t.testId}|${p.key}"] ?: continue
                 rows += GridRow(
                     key = "${t.testId}|${p.key}",
                     testId = t.testId,
                     paramKey = p.key,
-                    label = if (multi) p.name else singleRowLabel(t.testName, p.name),
+                    label = p.name,
                     unit = (res.unit ?: p.unit).orEmpty(),
                     // Frozen range wins once a value is in (that is what printed);
                     // otherwise show what WILL be frozen for this patient.
@@ -882,12 +980,9 @@ private fun buildGrid(
                     numeric = p.isNumeric(),
                     range = LabRepository.rangeFor(test, p, patient),
                     result = res,
-                    section = if (multi && first) t.testName else null,
                 )
-                first = false
             }
         } else {
-            var first = true
             for (res in results.values.filter { it.testId == t.testId }) {
                 rows += GridRow(
                     key = "${t.testId}|${res.parameterKey}",
@@ -899,36 +994,11 @@ private fun buildGrid(
                     numeric = true,
                     range = null,
                     result = res,
-                    section = if (first) t.testName else null,
                 )
-                first = false
             }
         }
     }
     return rows
-}
-
-private val NAME_SPLIT = Regex("[^a-z0-9]+")
-private val NAME_NOISE = setOf("serum", "plasma", "total", "blood", "test", "level")
-
-/** Qualifiers a lab drops in conversation — "Serum Creatinine" IS "Creatinine". */
-private fun normalizeName(s: String): String =
-    s.lowercase().split(NAME_SPLIT).filter { it.isNotBlank() && it !in NAME_NOISE }.joinToString("")
-
-/**
- * The one name to show for a single-parameter test. When the parameter is just
- * the test again ("Serum Creatinine" → "Creatinine") the fuller test name wins;
- * when they say different things the PARAMETER name wins, because that is what
- * the report prints.
- */
-private fun singleRowLabel(testName: String, paramName: String): String {
-    val t = normalizeName(testName)
-    val p = normalizeName(paramName)
-    return when {
-        t.isEmpty() || p.isEmpty() -> paramName
-        t.contains(p) -> testName
-        else -> paramName
-    }
 }
 
 /** Numeric unless every defined range is qualitative (text-only). */
@@ -1113,22 +1183,190 @@ private fun HeadCell(text: String, modifier: Modifier = Modifier) {
     )
 }
 
-/** Slim divider + test name — only for tests with more than one parameter. */
+/** The rail's fixed width — room for "Erythrocyte Sedimentation Rate" on two lines. */
+private val RAIL_WIDTH = 236.dp
+
+/**
+ * The order's table of contents: one line per test with a progress dot, who
+ * entered it and when, and a count. Selecting a test swaps the tile; the
+ * cell being typed in commits on the way out (blur).
+ */
 @Composable
-private fun SectionHeader(name: String) {
-    Column(Modifier.fillMaxWidth()) {
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+private fun TestRail(
+    groups: List<EntryGroup>,
+    selectedId: String,
+    /** The test whose cell has keyboard focus — shows "typing…" on its line. */
+    typingIn: String?,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val done = groups.count { it.done }
+    Column(
+        modifier
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
         Text(
-            name.uppercase(),
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 0.8.sp,
-            color = MaterialTheme.colorScheme.primary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
-                .padding(horizontal = 16.dp, vertical = 6.dp),
+            "TESTS · $done OF ${groups.size} DONE",
+            style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, letterSpacing = 0.6.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+        )
+        for (g in groups) {
+            val isSelected = g.testId == selectedId
+            Row(
+                Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (isSelected) MaterialTheme.colorScheme.surface else Color.Transparent)
+                    .then(if (isSelected) Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp)) else Modifier)
+                    .clickable { onSelect(g.testId) }
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                ProgressDot(g)
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        g.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    )
+                    val sub = when {
+                        typingIn == g.testId -> "typing…"
+                        g.provenance != null -> g.provenance.short(::shortTimeLabel)
+                        else -> null
+                    }
+                    sub?.let {
+                        Text(
+                            it, style = MaterialTheme.typography.labelSmall,
+                            color = if (g.analyzer) AppTheme.colors.info else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                Text(
+                    "${g.entered}/${g.total}", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/** Under 900 dp the rail is a chip strip: same dots, catalog codes for names. */
+@Composable
+private fun TestChips(groups: List<EntryGroup>, selectedId: String, onSelect: (String) -> Unit) {
+    LazyRow(
+        Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        items(groups, key = { it.testId }) { g ->
+            FilterChip(
+                selected = g.testId == selectedId,
+                onClick = { onSelect(g.testId) },
+                leadingIcon = { ProgressDot(g) },
+                label = { Text("${g.code.ifBlank { g.name }} ${g.entered}/${g.total}", maxLines = 1) },
+            )
+        }
+    }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+}
+
+/** Empty ring → part-filled → full disc; blue when an analyzer filled it. */
+@Composable
+private fun ProgressDot(g: EntryGroup) {
+    val color = when {
+        g.analyzer -> AppTheme.colors.info
+        g.started -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.outline
+    }
+    val fraction = if (g.total == 0) 0f else g.entered.toFloat() / g.total.toFloat()
+    Canvas(Modifier.size(12.dp)) {
+        drawCircle(color = color, style = Stroke(width = 2.dp.toPx()))
+        when {
+            fraction >= 1f -> drawCircle(color = color)
+            fraction > 0f -> drawArc(color = color, startAngle = -90f, sweepAngle = 360f * fraction, useCenter = true)
+        }
+    }
+}
+
+/**
+ * One test: its name and catalog line, who filled it, the analyzer's alerts
+ * when it left any, the column strip (pinned — it no longer scrolls away), and
+ * the rows the caller emits.
+ */
+@Composable
+private fun TestTile(
+    group: EntryGroup,
+    test: LabTest?,
+    wide: Boolean,
+    listState: LazyListState,
+    modifier: Modifier = Modifier,
+    rows: LazyListScope.() -> Unit,
+) {
+    Column(modifier) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    group.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                )
+                val about = listOfNotNull(
+                    test?.category?.takeIf { it.isNotBlank() },
+                    test?.sampleType?.takeIf { it.isNotBlank() },
+                    test?.method?.takeIf { it.isNotBlank() },
+                ).joinToString(" · ")
+                if (about.isNotEmpty()) {
+                    Text(about, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                group.provenance?.let { p ->
+                    Text(
+                        (if (group.analyzer) "⚡ " else "") + p.long(::shortTimeLabel),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = if (group.analyzer) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (group.analyzer) AppTheme.colors.info else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Text(
+                    "${group.entered} of ${group.total} entered",
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (group.alerts.isNotEmpty()) AlertsStrip(group.alerts)
+        if (wide) TableHeader()
+        LazyColumn(
+            Modifier.fillMaxWidth().weight(1f),
+            state = listState,
+            contentPadding = PaddingValues(bottom = 28.dp),
+            content = rows,
+        )
+    }
+}
+
+/** The analyzer's own alerts and abnormal flags — the cue to look at the
+ *  scattergram (on the report) before verifying. */
+@Composable
+private fun AlertsStrip(alerts: List<String>) {
+    val c = AppTheme.colors
+    Surface(
+        color = c.warningSoft, shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+    ) {
+        Text(
+            "Analyzer alerts · " + alerts.joinToString(" · ") + " — review before verifying",
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = c.warning,
+            maxLines = 2, overflow = TextOverflow.Ellipsis,
         )
     }
 }
