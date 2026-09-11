@@ -1,4 +1,4 @@
-# BNMDiagnosis — feedback round 1 (2026-08-26)
+# BNM Lab — feedback round 1 (2026-08-26)
 
 Nine items from the lab owner, mapped against what the codebase actually has.
 Scouted before planning; every "already exists" below was verified at file:line.

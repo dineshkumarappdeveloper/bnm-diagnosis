@@ -1,0 +1,700 @@
+package com.bnm.lab.report
+
+import com.bnm.lab.lab.LabOrder
+import com.bnm.lab.lab.LabOrderTest
+import com.bnm.lab.lab.LabRepository
+import com.bnm.lab.lab.LabResult
+import com.bnm.lab.lab.Patient
+import com.bnm.lab.lab.ResultGraph
+import com.bnm.lab.print.Code128
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
+
+/**
+ * Pure document model for the styled A4 lab report PDF. Built once in common
+ * code ([buildReportDoc]) and rendered by the per-platform `writeLabReportPdf`
+ * actuals — the actuals only DRAW, they never look at domain models or prefs.
+ *
+ * Results carry EXACTLY what was frozen at entry time (`value`/`unit`/`flag`/
+ * `ref_display` from `lab_results`) — later catalog edits never shift a
+ * printed report (same guarantee as the thermal `renderLabReport`).
+ */
+
+/** How the letterhead area is produced. */
+enum class LetterheadMode {
+    /** The app draws the letterhead (accent band, lab name, contact lines). */
+    PRINTED,
+
+    /** Lab prints on pre-printed letterpads: header/footer space is RESERVED
+     *  but left completely blank. */
+    PREPRINTED,
+}
+
+/**
+ * How the tests split across pages.
+ *
+ * Labs hand pages to different people: the haematology sheet is filed in one
+ * place, the biochemistry sheet goes to another consultant, one page gets
+ * photographed for WhatsApp. So a page has to stand on its own — every page
+ * carries the patient block, and a page group ends with the sign-off, not just
+ * the last page of the document.
+ */
+enum class ReportPagination(
+    val slug: String,
+    val label: String,
+    val blurb: String,
+    /** What a single sheet carries under this layout — stated per layout,
+     *  because only PER_TEST can truthfully promise a sign-off on every sheet. */
+    val sheetNote: String,
+) {
+    /** Tests follow one another; a page break only when the sheet is full. */
+    CONTINUOUS(
+        "continuous",
+        "Continuous",
+        "Tests follow one another and a new sheet starts only when the page is full. Fewest pages.",
+        "Every sheet carries the patient's details; the sign-off comes once, at the end of the report.",
+    ),
+
+    /** Every test starts on a fresh page and closes with the sign-off. */
+    PER_TEST(
+        "per_test",
+        "One test per page",
+        "Every test starts on a fresh sheet and ends with the sign-off, so each page is a complete " +
+            "report on its own.",
+        "Every sheet carries the patient's details and each test closes with the sign-off — any " +
+            "sheet can be handed over on its own.",
+    ),
+
+    /**
+     * Tests in the same department (the catalog category — Haematology,
+     * Biochemistry…) share a page; a test with no department gets its own.
+     * The sheet the reference labs print: "BIO CHEMISTRY" with sugar, urea and
+     * creatinine together, the CBC on a sheet of its own.
+     */
+    PER_DEPARTMENT(
+        "per_department",
+        "One department per page",
+        "Tests from the same department (the catalog category) share a sheet — sugar, urea and " +
+            "creatinine together under Biochemistry, the CBC on its own. A test with no category " +
+            "gets its own sheet.",
+        "Every sheet carries the patient's details, and each department closes with the sign-off.",
+    );
+
+    companion object {
+        /** Unknown or missing → [PER_TEST], the documented default. */
+        fun fromSlug(slug: String?): ReportPagination =
+            entries.firstOrNull { it.slug == slug } ?: PER_TEST
+    }
+}
+
+/** Small preset accent palette (letterhead band + section titles only). */
+object ReportPalette {
+    const val TEAL = 0x0E8C8C
+    const val BLUE = 0x1467C8
+    const val MAROON = 0x8C1D30
+    const val GREEN = 0x1E7A3C
+
+    /** name → 0xRRGGBB, in settings-swatch order. Teal is the default. */
+    val presets: List<Pair<String, Int>> =
+        listOf("Teal" to TEAL, "Blue" to BLUE, "Maroon" to MAROON, "Green" to GREEN)
+}
+
+/** Row-emphasis colours (0xRRGGBB) — the point of the styled report. */
+object ReportColors {
+    const val HIGH_RED = 0xC62828     // H / CH → bold red
+    const val LOW_BLUE = 0x1565C0     // L / CL → bold blue
+    const val ABNORMAL_AMBER = 0xB45309 // qualitative A → bold amber
+}
+
+/** Emphasis colour for a result flag, or null for a regular black row. */
+fun flagEmphasisRgb(flag: String?): Int? = when (flag) {
+    "H", "CH" -> ReportColors.HIGH_RED
+    "L", "CL" -> ReportColors.LOW_BLUE
+    "A" -> ReportColors.ABNORMAL_AMBER
+    else -> null
+}
+
+/**
+ * Printed text for the Flag column: code + direction, criticals spelled out —
+ * "N", "H ^", "L v", "A", "!! H ^ CRITICAL".
+ *
+ * ASCII ONLY, deliberately. The desktop renderer draws with PDFBox base-14
+ * Helvetica in WinAnsi, which has no ↑ / ↓ / ⚠ glyph and would silently print
+ * "?" on a medical report. Both PDF renderers share this one function, so the
+ * desktop and Android outputs can never drift apart.
+ *
+ * Direction comes from the STORED flag code (frozen at entry), never from
+ * re-judging the value against today's ranges. Criticals drop the redundant
+ * "C" — "!!" is what marks them, and [flagLegend] says so on the paper.
+ */
+fun flagLabel(flag: String?): String {
+    if (flag.isNullOrBlank()) return ""
+    val arrow = when (LabRepository.flagDirection(flag)) {
+        1 -> " ^"
+        -1 -> " v"
+        else -> ""
+    }
+    if (!LabRepository.isCriticalFlag(flag)) return flag + arrow // N / L / H / A
+    return "!! " + flag.drop(1) + arrow + " CRITICAL"
+}
+
+/**
+ * One-line key for the Flag column marks, printed under the results. A patient
+ * or a referring doctor reads that paper without the app, so "^" and "!!" have
+ * to explain themselves; only the marks actually present are listed.
+ *
+ * Empty when nothing on the report is abnormal — there is then nothing to
+ * decode and the line is just noise. ASCII + Latin-1 only (see [flagLabel]).
+ */
+fun flagLegend(flags: Iterable<String?>): String {
+    val present = flags.filterNotNull().filter { it.isNotBlank() }
+    if (present.none { it != "N" }) return ""
+    val parts = ArrayList<String>(5)
+    if (present.any { it == "N" }) parts += "N within reference range"
+    if (present.any { LabRepository.flagDirection(it) > 0 }) parts += "^ above range"
+    if (present.any { LabRepository.flagDirection(it) < 0 }) parts += "v below range"
+    if (present.any { it == "A" }) parts += "A abnormal"
+    if (present.any { LabRepository.isCriticalFlag(it) }) parts += "!! CRITICAL - inform the physician"
+    return "Flag key:  " + parts.joinToString("  ·  ")
+}
+
+/**
+ * The accession as Code 128 modules (true = bar), or null when it cannot be
+ * encoded (blank, non-ASCII) — the renderers then print the text alone. The
+ * SAME symbol that is on the sample tube, so a bench scanner finds the order
+ * from the report as easily as from the sample; the reference labs print
+ * the SID barcode at exactly this spot. Shared so both renderers agree.
+ */
+fun accessionBarcode(accession: String): BooleanArray? {
+    val a = accession.trim()
+    if (!Code128.isEncodable(a)) return null
+    return runCatching { Code128.modules(a) }.getOrNull()
+}
+
+/**
+ * The approver's sign-off, drawn above the "Approved by" rule.
+ *
+ * NOT a data class on purpose: [imagePng] is a ByteArray, and a generated
+ * `equals` over an array compares identity, which would quietly lie the first
+ * time anyone diffed two docs.
+ *
+ * A lab with nothing on file simply has no [ReportSignature] and the block
+ * prints exactly as it always did — an unsigned report must never be broken by
+ * this feature.
+ */
+class ReportSignature(
+    /** Decoded PNG bytes. The renderers hand these straight to their platform
+     *  image decoder; null = print the name only, no image. */
+    val imagePng: ByteArray?,
+    /** "MD (Pathology)" — printed under the name. */
+    val qualifications: String?,
+    /** State medical-council number; an Indian lab report is expected to carry
+     *  the signatory's registration. */
+    val registrationNo: String?,
+) {
+    val hasImage: Boolean get() = imagePng != null && imagePng.isNotEmpty()
+}
+
+/**
+ * The "scan to download this report" block. [matrix] is already encoded, so the
+ * renderers only ever fill rectangles — no image codec, no resolution ceiling.
+ *
+ * A doc carries this ONLY when the report can actually resolve: standalone
+ * licences get null and print nothing, because `admin-lab` refuses their
+ * uploads (409 standalone_edition) and a dead QR on a medical report is worse
+ * than no QR at all.
+ */
+class ReportQr(
+    /** What the QR encodes — the public admin-lab resolver for this report. */
+    val url: String,
+    val matrix: QrMatrix,
+    /** Printed under the code so a patient knows what they are looking at. */
+    val caption: String,
+    /** Second, smaller line: this link is personal to them. */
+    val note: String,
+)
+
+data class ReportRow(
+    val param: String,
+    val value: String,
+    val unit: String,
+    val ref: String,
+    /** Raw flag as stored: N | L | H | CL | CH | A | null. */
+    val flag: String?,
+)
+
+/**
+ * One analyzer graph printed beside a test's table — the histogram column the
+ * reference labs' CBC reports carry. A measured curve ([points]: the histogram
+ * channels exactly as the analyzer sent them) and/or the analyzer's OWN bitmap
+ * ([image]: the Mindray DIFF scattergram). Renderers draw the curve when
+ * there are points, else the image. [lines] are discriminator x positions in
+ * channel units, drawn dashed.
+ *
+ * Not a data class: [image] is a ByteArray (see [ReportSignature]).
+ */
+class ReportGraph(
+    val kind: String,
+    val title: String,
+    val points: List<Double>,
+    val lines: List<Double> = emptyList(),
+    val image: ByteArray? = null,
+    /** Axis unit printed in the box corner — "fL" for the RBC/PLT volume axes. */
+    val xLabel: String? = null,
+) {
+    val hasCurve: Boolean get() = points.size >= 2 && points.any { it > 0.0 }
+    val hasImage: Boolean get() = image != null && image.isNotEmpty()
+}
+
+/**
+ * Stored analyzer graphs → what the report draws, in the order a CBC sheet
+ * reads them: WBC, RBC, PLT, then the DIFF scattergram. Discriminator lines
+ * come from the Mindray "<kind>_lines" meta; other analyzers' meta is left
+ * alone (unknown units are not a drawable position). An image that will not
+ * base64-decode is dropped, never a crash.
+ */
+@OptIn(ExperimentalEncodingApi::class)
+fun toReportGraphs(rows: List<ResultGraph>): List<ReportGraph> {
+    val order = listOf("wbc", "rbc", "plt", "diff")
+    return rows
+        .sortedBy { order.indexOf(it.kind).let { i -> if (i < 0) order.size else i } }
+        .map { g ->
+            ReportGraph(
+                kind = g.kind,
+                title = when (g.kind) { "wbc" -> "WBC"; "rbc" -> "RBC"; "plt" -> "PLT"; "diff" -> "DIFF"; else -> g.kind.uppercase() },
+                points = g.points,
+                lines = g.meta["${g.kind}_lines"]?.split(',')?.mapNotNull { it.trim().toDoubleOrNull() }.orEmpty(),
+                image = g.imageBase64?.trim()?.takeIf { it.isNotEmpty() }
+                    ?.let { b -> runCatching { Base64.Default.decode(b.filterNot { c -> c.isWhitespace() }) }.getOrNull() },
+                // No axis unit yet: the points are raw channels, and "fL" would claim
+                // a femtolitre scale nobody has calibrated against the analyzer.
+                xLabel = null,
+            )
+        }
+        .filter { it.hasCurve || it.hasImage }
+}
+
+/**
+ * One test = one titled section with a Parameter/Result/Unit/Ref/Flag table.
+ * [department] is the catalog category (null when the test has none); only
+ * [ReportPagination.PER_DEPARTMENT] reads it. [graphs] are the analyzer's
+ * curves/scattergram, drawn in a panel beside the table when present.
+ */
+data class ReportSection(
+    val title: String,
+    val rows: List<ReportRow>,
+    val department: String? = null,
+    val graphs: List<ReportGraph> = emptyList(),
+    /** The specimen this test was run on, as printed ("Serum", "Urine") —
+     *  right of the section title on every sheet, so a reader knows what was
+     *  tested without the requisition. Null prints nothing. */
+    val sampleType: String? = null,
+)
+
+/**
+ * Catalog `sample_type` ("serum", "urine", "other") → how it prints. Blank
+ * or "other" → null (nothing to say); a value that already carries capitals
+ * ("EDTA blood") is kept; a plain lowercase word gets its first letter.
+ */
+fun sampleTypeDisplay(raw: String?): String? {
+    val t = raw?.trim().orEmpty()
+    if (t.isEmpty() || t.equals("other", ignoreCase = true)) return null
+    return if (t.any { it.isUpperCase() }) t else t.replaceFirstChar { it.uppercase() }
+}
+
+/**
+ * The sections that share one page sequence. A group ALWAYS starts on a fresh
+ * page and ALWAYS ends with the sign-off block, so every group is a complete
+ * report by itself — that is the whole point of splitting.
+ */
+data class ReportPageGroup(
+    /** Department banner drawn above the sections, or null for none. */
+    val heading: String?,
+    val sections: List<ReportSection>,
+) {
+    /** Flag key for THIS group's rows only — a legend for marks that sit on
+     *  some other sheet is noise on this one. */
+    val flagLegendLine: String
+        get() = flagLegend(sections.flatMap { it.rows }.map { it.flag })
+}
+
+/**
+ * Split [sections] into page groups per [pagination]. Pure, and BOTH renderers
+ * draw exactly these, so the desktop and Android PDFs paginate identically.
+ *
+ * An empty section list still yields one (empty) group: the patient block and
+ * the sign-off must print even when nothing has been resulted yet.
+ */
+fun pageGroups(pagination: ReportPagination, sections: List<ReportSection>): List<ReportPageGroup> {
+    if (sections.isEmpty()) return listOf(ReportPageGroup(null, emptyList()))
+    return when (pagination) {
+        ReportPagination.CONTINUOUS -> listOf(ReportPageGroup(null, sections))
+        ReportPagination.PER_TEST -> sections.map { ReportPageGroup(null, listOf(it)) }
+        ReportPagination.PER_DEPARTMENT -> {
+            // First-appearance order. The key is case/space-insensitive so
+            // "Biochemistry" and "biochemistry " land together, and the banner
+            // uses the spelling of the first test seen. Uncategorised tests
+            // never merge with each other: nothing says they belong together.
+            val groups = ArrayList<ReportPageGroup>()
+            val indexByKey = HashMap<String, Int>()
+            for (s in sections) {
+                val dept = s.department?.trim()?.takeIf { it.isNotEmpty() }
+                val at = dept?.let { indexByKey[it.lowercase()] }
+                if (at == null) {
+                    if (dept != null) indexByKey[dept.lowercase()] = groups.size
+                    groups += ReportPageGroup(dept, listOf(s))
+                } else {
+                    groups[at] = groups[at].copy(sections = groups[at].sections + s)
+                }
+            }
+            groups
+        }
+    }
+}
+
+data class ReportDoc(
+    val mode: LetterheadMode,
+    /** Reserved header band per page, in millimetres (drawn letterhead lives
+     *  inside it in PRINTED mode; blank in PREPRINTED). */
+    val headerMm: Float,
+    /** Reserved footer band per page, in millimetres. */
+    val footerMm: Float,
+    /** Accent colour 0xRRGGBB (band, rules, section titles). */
+    val accentRgb: Int,
+    /** ALWAYS the LicenseManager lab name (read-only in-app). */
+    val labName: String,
+    /** Editable letterhead lines under the lab name: address / phone / email /
+     *  extra (NABL, GSTIN…). Blank lines are already filtered out. */
+    val letterheadLines: List<String>,
+    // ── Patient / meta block ──
+    val patientName: String,
+    val ageSex: String,
+    val phone: String?,
+    val referrer: String?,
+    val accession: String,
+    val registered: String,
+    val reported: String?,
+    /** Uppercased priority, null when routine. */
+    val priority: String?,
+    val sections: List<ReportSection>,
+    /** How [sections] split across sheets — see [pageGroups]. The DOC defaults
+     *  to continuous (the pre-split layout); the device default lives in
+     *  [ReportPrefs] and is applied by the assembler. */
+    val pagination: ReportPagination = ReportPagination.CONTINUOUS,
+    /** Tests of this order NOT on this report and not yet reported — printed on
+     *  every sheet under the patient block, so a partial report says it is one
+     *  ("To follow: Serum Electrolytes"). Empty for a complete report. */
+    val toFollow: List<String> = emptyList(),
+    val verifiedBy: String?,
+    val approvedBy: String?,
+    /** When the pathologist approved, "yyyy-MM-dd HH:mm". NABL expects the
+     *  sign-off to be dated, and it is already stored — printing it costs
+     *  nothing and a report without it is incomplete. */
+    val approvedOn: String? = null,
+    /** Approver's signature image + credentials; null = the old text-only block. */
+    val signature: ReportSignature? = null,
+    /** The VERIFIER's signature image + credentials — the technician who checked
+     *  the results, drawn on the left of the sign-off. Null = name only, exactly
+     *  as before verifiers had signatures. */
+    val verifierSignature: ReportSignature? = null,
+    /** Report-download QR; null on standalone licences (see [ReportQr]). */
+    val qr: ReportQr? = null,
+    val generatedAt: String,
+) {
+    /** What the renderers actually draw: each group on fresh sheets, each
+     *  closed by the sign-off. Derived, so it can never disagree with
+     *  [sections] + [pagination]. */
+    val pageGroups: List<ReportPageGroup> get() = pageGroups(pagination, sections)
+}
+
+/**
+ * Assemble a [ReportDoc] from the live domain objects. Mirrors the field
+ * derivation of the thermal `renderLabReport` (age label, frozen result rows,
+ * verified/approved names) so both outputs always agree.
+ */
+fun buildReportDoc(
+    labName: String,
+    order: LabOrder,
+    patient: Patient,
+    tests: List<LabOrderTest>,
+    results: List<LabResult>,
+    referrerName: String? = null,
+    mode: LetterheadMode = LetterheadMode.PRINTED,
+    headerMm: Float = 40f,
+    footerMm: Float = 20f,
+    accentRgb: Int = ReportPalette.TEAL,
+    letterheadLines: List<String> = emptyList(),
+    /** Display name for a result row (catalog parameter name); defaults to the raw key. */
+    paramName: (LabResult) -> String = { it.parameterKey },
+    /** Approver sign-off image + credentials. Null keeps the pre-signature layout. */
+    signature: ReportSignature? = null,
+    /** Verifier sign-off image + credentials; null = name only. */
+    verifierSignature: ReportSignature? = null,
+    /** Report-download QR. Null (the default) prints no QR block at all — which
+     *  is what a standalone licence must get. Assembled by [ReportAssembler];
+     *  this function stays pure and never mints a token of its own. */
+    qr: ReportQr? = null,
+    /** Page split; the assembler passes the device's [ReportPrefs] choice. */
+    pagination: ReportPagination = ReportPagination.CONTINUOUS,
+    /** Department (catalog category) of an ordered test; only PER_DEPARTMENT
+     *  reads it. The order line does not carry it, hence the lookup. */
+    department: (LabOrderTest) -> String? = { null },
+    /** Analyzer graphs for an ordered test (the assembler reads them from the
+     *  graphs table); none by default. */
+    graphsFor: (LabOrderTest) -> List<ReportGraph> = { emptyList() },
+    /** Catalog sample type of an ordered test ("serum"); printed beside the
+     *  section title via [sampleTypeDisplay]. */
+    sampleType: (LabOrderTest) -> String? = { null },
+    /** The signatories' CURRENT names, resolved by the assembler from the staff
+     *  ids stamped on the rows; null keeps the name snapshot the rows carry. */
+    verifiedByName: String? = null,
+    approvedByName: String? = null,
+    /** Names of the order's tests left off this report (per-test release). */
+    toFollow: List<String> = emptyList(),
+): ReportDoc {
+    val age = LabRepository.resolveAgeYears(patient.dob, patient.ageYears)
+    val ageLabel = when {
+        age == null -> "-"
+        age < 1.0 -> "${(age * 12).toInt().coerceAtLeast(0)} mo"
+        else -> "${age.toInt()} y"
+    }
+    val byTest = results.groupBy { it.testId }
+    val sections = tests.map { t ->
+        ReportSection(
+            title = t.testName,
+            rows = byTest[t.testId].orEmpty().map { r ->
+                ReportRow(
+                    param = paramName(r).replaceFirstChar { it.uppercase() },
+                    value = r.value?.takeIf { it.isNotBlank() } ?: "-",
+                    unit = r.unit.orEmpty(),
+                    ref = r.refDisplay.orEmpty(),
+                    flag = r.flag,
+                )
+            },
+            department = department(t),
+            graphs = graphsFor(t),
+            sampleType = sampleTypeDisplay(sampleType(t)),
+        )
+    }
+    return ReportDoc(
+        mode = mode,
+        headerMm = headerMm.coerceIn(0f, 120f),
+        footerMm = footerMm.coerceIn(0f, 80f),
+        accentRgb = accentRgb,
+        labName = labName.trim().ifEmpty { "BNM Lab" },
+        letterheadLines = letterheadLines.map { it.trim() }.filter { it.isNotEmpty() },
+        patientName = patient.name,
+        ageSex = "$ageLabel / ${patient.sex.uppercase()}",
+        phone = patient.phone?.takeIf { it.isNotBlank() },
+        referrer = referrerName?.takeIf { it.isNotBlank() },
+        accession = order.accessionNo,
+        registered = reportStamp(order.createdAt) ?: order.createdAt.take(10),
+        reported = order.reportedAt?.let { reportStamp(it) ?: it.take(10) },
+        priority = order.priority.takeIf { !it.equals("routine", ignoreCase = true) }?.uppercase(),
+        sections = sections,
+        pagination = pagination,
+        toFollow = toFollow.map { it.trim() }.filter { it.isNotEmpty() },
+        verifiedBy = verifiedByName ?: results.firstNotNullOfOrNull { it.verifiedBy?.takeIf { v -> v.isNotBlank() } },
+        approvedBy = approvedByName ?: results.firstNotNullOfOrNull { it.approvedBy?.takeIf { v -> v.isNotBlank() } },
+        // Results carry the sign-off stamp; the order's own approved_at is the
+        // fallback for rows written before results were stamped individually.
+        approvedOn = (results.firstNotNullOfOrNull { it.approvedAt?.takeIf { a -> a.isNotBlank() } }
+            ?: order.approvedAt)?.let { reportStamp(it) ?: it.take(10) },
+        signature = signature,
+        verifierSignature = verifierSignature,
+        qr = qr,
+        generatedAt = nowStamp(),
+    )
+}
+
+/**
+ * Deterministic sample report — the Settings "Preview sample report" button
+ * and the desktop PDF tests both use it. Covers every row emphasis: N, H, L,
+ * CH (critical), and a qualitative A.
+ */
+fun sampleReportDoc(
+    labName: String = "BNM Lab",
+    pagination: ReportPagination = ReportPagination.CONTINUOUS,
+    mode: LetterheadMode = LetterheadMode.PRINTED,
+    headerMm: Float = 40f,
+    footerMm: Float = 20f,
+    accentRgb: Int = ReportPalette.TEAL,
+    letterheadLines: List<String> = listOf(
+        "12 MG Road, Coimbatore 641001, Tamil Nadu",
+        "Ph: 98765 43210 · lab@example.in",
+        "NABL accredited · GSTIN 33ABCDE1234F1Z5",
+    ),
+): ReportDoc = ReportDoc(
+    mode = mode,
+    headerMm = headerMm,
+    footerMm = footerMm,
+    accentRgb = accentRgb,
+    labName = labName,
+    letterheadLines = letterheadLines.map { it.trim() }.filter { it.isNotEmpty() },
+    patientName = "Kavitha Subramanian",
+    ageSex = "42 y / F",
+    phone = "98400 12345",
+    referrer = "Dr. R. Menon, MD (Gen. Med.)",
+    accession = "ACC-S1-00042",
+    registered = "2026-08-25 09:12",
+    reported = "2026-08-25 13:45",
+    priority = null,
+    pagination = pagination,
+    // Departments are what PER_DEPARTMENT groups by: the LFT and the fasting
+    // glucose are both Biochemistry, so that mode shows them SHARING a sheet
+    // while PER_TEST gives each its own.
+    sections = listOf(
+        ReportSection(
+            "Complete Blood Count (CBC)",
+            sampleType = "Blood",
+            department = "Hematology",
+            graphs = sampleGraphs(),
+            rows = listOf(
+                ReportRow("Haemoglobin", "10.2", "g/dL", "12.0 - 15.0", "L"),
+                ReportRow("Total leucocyte count", "11.8", "10^3/uL", "4.0 - 11.0", "H"),
+                ReportRow("Neutrophils", "68", "%", "40 - 80", "N"),
+                ReportRow("Lymphocytes", "24", "%", "20 - 40", "N"),
+                ReportRow("Monocytes", "5", "%", "2 - 10", "N"),
+                ReportRow("Eosinophils", "2", "%", "1 - 6", "N"),
+                ReportRow("Basophils", "1", "%", "0 - 2", "N"),
+                ReportRow("Platelet count", "88", "10^3/uL", "150 - 410", "CL"),
+                ReportRow("RBC count", "4.1", "10^6/uL", "3.8 - 4.8", "N"),
+                ReportRow("Haematocrit (PCV)", "32.4", "%", "36 - 46", "L"),
+                ReportRow("MCV", "79", "fL", "83 - 101", "L"),
+                ReportRow("MCH", "24.9", "pg", "27 - 32", "L"),
+                ReportRow("MCHC", "31.5", "g/dL", "31.5 - 34.5", "N"),
+            ),
+        ),
+        ReportSection(
+            "Liver Function Test (LFT)",
+            sampleType = "Serum",
+            department = "Biochemistry",
+            rows = listOf(
+                ReportRow("Bilirubin total", "1.1", "mg/dL", "0.3 - 1.2", "N"),
+                ReportRow("Bilirubin direct", "0.3", "mg/dL", "0.0 - 0.4", "N"),
+                ReportRow("SGOT (AST)", "142", "U/L", "5 - 40", "H"),
+                ReportRow("SGPT (ALT)", "580", "U/L", "5 - 41", "CH"),
+                ReportRow("Alkaline phosphatase", "112", "U/L", "35 - 129", "N"),
+                ReportRow("Total protein", "6.9", "g/dL", "6.4 - 8.3", "N"),
+                ReportRow("Albumin", "3.9", "g/dL", "3.5 - 5.2", "N"),
+                ReportRow("A/G ratio", "1.3", "", "1.0 - 2.1", "N"),
+            ),
+        ),
+        ReportSection(
+            "Fasting Blood Sugar (FBS)",
+            sampleType = "Blood",
+            department = "Biochemistry",
+            rows = listOf(
+                ReportRow("Glucose (fasting)", "126", "mg/dL", "70 - 100", "H"),
+            ),
+        ),
+        ReportSection(
+            "Serology",
+            sampleType = "Serum",
+            department = "Serology",
+            rows = listOf(
+                ReportRow("HBsAg (rapid)", "Reactive", "", "Non-reactive", "A"),
+                ReportRow("HIV I & II (rapid)", "Non-reactive", "", "Non-reactive", "N"),
+                ReportRow("HCV (rapid)", "Non-reactive", "", "Non-reactive", "N"),
+            ),
+        ),
+    ),
+    verifiedBy = "Tech. S. Kumar",
+    approvedBy = "Dr. A. Lakshmi, MD (Path.)",
+    approvedOn = "2026-08-25 13:40",
+    signature = sampleSignature(),
+    verifierSignature = sampleVerifierSignature(),
+    // The preview exists to check the LAYOUT, and the QR block moves
+    // "Verified by" across, so it has to be here. The token is deliberately
+    // fake: this sheet is never handed to a patient, and scanning it 404s
+    // exactly like any other unknown token (see admin-lab's resolver).
+    qr = ReportShare.qrFor(SAMPLE_QR_TOKEN),
+    generatedAt = "2026-08-25 13:47",
+)
+
+/**
+ * Synthetic analyzer graphs for the sample: a bimodal WBC curve (lymphocyte
+ * peak, granulocyte hump), a single RBC peak, a right-skewed PLT curve, and a
+ * three-cluster DIFF scattergram as a tiny PNG — enough to check the panel
+ * layout; no attempt at physiology.
+ */
+private fun sampleGraphs(): List<ReportGraph> {
+    fun gauss(x: Int, mu: Double, sigma: Double): Double {
+        val d = (x - mu) / sigma
+        return kotlin.math.exp(-0.5 * d * d)
+    }
+    val wbc = List(256) { x -> 100.0 * gauss(x, 60.0, 12.0) + 55.0 * gauss(x, 150.0, 34.0) }
+    val rbc = List(256) { x -> 100.0 * gauss(x, 95.0, 18.0) }
+    val plt = List(256) { x -> 100.0 * gauss(x, 14.0, 7.0) + 18.0 * gauss(x, 40.0, 18.0) }
+    // Deterministic dots: three clusters, hashed positions — the same picture every preview.
+    val size = 96
+    val dots = HashSet<Int>()
+    var seed = 12345
+    fun next(): Int { seed = (seed * 1103515245 + 12345) and 0x7fffffff; return seed }
+    val clusters = listOf(Triple(30, 62, 9), Triple(58, 40, 12), Triple(48, 75, 7))
+    for ((cx, cy, r) in clusters) repeat(260) {
+        val dx = (next() % (2 * r + 1)) - r
+        val dy = (next() % (2 * r + 1)) - r
+        if (dx * dx + dy * dy <= r * r) dots += ((cy + dy).coerceIn(0, size - 1)) * size + (cx + dx).coerceIn(0, size - 1)
+    }
+    val png = PngWriter.grayscale1Bit(size, size) { x, y -> (y * size + x) in dots }
+    return listOf(
+        ReportGraph("wbc", "WBC", wbc, lines = listOf(38.0, 104.0, 196.0)),
+        ReportGraph("rbc", "RBC", rbc, lines = listOf(40.0, 165.0)),
+        ReportGraph("plt", "PLT", plt, lines = listOf(4.0, 60.0)),
+        ReportGraph("diff", "DIFF", emptyList(), image = png.takeIf { it.isNotEmpty() }),
+    )
+}
+
+/** Obviously-not-real token for [sampleReportDoc]; 64 hex chars so it is the
+ *  same size on the page as a live one. */
+private const val SAMPLE_QR_TOKEN =
+    "5a11e0000000000000000000000000000000000000000000000000000005a11e"
+
+/**
+ * A deterministic squiggle standing in for an inked signature, so the preview
+ * shows the sign-off block at its real height instead of collapsing to the
+ * text-only layout. Two sine strokes and a downstroke — enough ink to see the
+ * spacing, no attempt to look like anybody's actual hand.
+ */
+private fun sampleSignature(): ReportSignature = ReportSignature(
+    imagePng = sampleInk(freq = 10.0, phase = 1.1)?.takeIf { it.isNotEmpty() },
+    qualifications = "MD (Pathology)",
+    registrationNo = "TN/12345/2011",
+)
+
+/** The verifier's stand-in: a different squiggle (so the two blocks are
+ *  visibly two people) with a technician's credentials and no council number. */
+private fun sampleVerifierSignature(): ReportSignature = ReportSignature(
+    imagePng = sampleInk(freq = 7.0, phase = 2.6)?.takeIf { it.isNotEmpty() },
+    qualifications = "DMLT, B.Sc. (MLT)",
+    registrationNo = null,
+)
+
+private fun sampleInk(freq: Double, phase: Double): ByteArray? {
+    val w = 720
+    val h = 240
+    return PngWriter.grayscale1Bit(w, h) { x, y ->
+        val fx = x.toDouble() / w
+        val fy = y.toDouble() / h
+        val upper = 0.52 + kotlin.math.sin(fx * freq) * 0.20
+        val lower = 0.58 + kotlin.math.sin(fx * 4.0 + phase) * 0.26
+        kotlin.math.abs(fy - upper) < 0.05 ||
+            kotlin.math.abs(fy - lower) < 0.04 ||
+            (fx < 0.07 && kotlin.math.abs(fy - 0.5) < 0.32)
+    }
+}
+
+/** ISO instant → "yyyy-MM-dd HH:mm" in the device timezone (null if unparseable). */
+private fun reportStamp(iso: String): String? =
+    runCatching { kotlin.time.Instant.parse(iso).toLocalDateTime(TimeZone.currentSystemDefault()) }
+        .getOrNull()?.let {
+            "${it.date} ${it.hour.toString().padStart(2, '0')}:${it.minute.toString().padStart(2, '0')}"
+        }
+
+private fun nowStamp(): String {
+    val dt = kotlin.time.Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())
+    return "${dt.date} ${dt.hour.toString().padStart(2, '0')}:${dt.minute.toString().padStart(2, '0')}"
+}

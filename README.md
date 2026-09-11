@@ -1,4 +1,8 @@
-# BNMDiagnosis
+# BNM Lab
+
+*(repository name: BNM Lab — the product was renamed from "BNM
+Diagnosis" in 2026-09; package ids, release tags and download filenames keep
+the old spelling on purpose.)*
 
 Offline-first laboratory management (LIMS) for diagnostic labs — desktop
 first (Windows/macOS/Linux), Android secondary. Patients, test catalog with

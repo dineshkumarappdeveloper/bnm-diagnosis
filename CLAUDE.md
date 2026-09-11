@@ -1,6 +1,39 @@
-# CLAUDE.md — BNMDiagnosis
+# CLAUDE.md — BNM Lab (repo directory: BNMLab)
 
-**BNMDiagnosis** is a desktop-first KMP (Compose Multiplatform) LIMS for
+**The product is BNM Lab** (renamed from "BNM Diagnosis", 2026-09-12). The
+rename went all the way: the Kotlin package is `com.bnm.lab`, this repo
+directory is `BNMLab`, the Studio extension slug is `lab`, its routes are
+`/lab` and `/api/lab/*`, releases are `lab-v*` / `lab-latest` with `BNMLab-*`
+assets, and the desktop data dir is `BNMLab`.
+
+🔴 **FIVE COMPATIBILITY SHIMS EXIST AND MUST NOT BE DELETED.** Each protects
+something already installed in the field; none is dead code:
+
+1. `_shared/auth.ts` (BusinessStudio) keeps the legacy `diagnosis` infinite-idle
+   key beside `lab`. Devices activated before the rename carry `app='diagnosis'`
+   in a 10-year JWT and never re-mint — remove the key and they silently drop to
+   a 60-minute idle and 401 out of sync, the EMR inbox and billing.
+2. `UpdateChecker.TAG_PREFIXES` lists `lab-v` AND `diagnosis-v`; `assetNames`
+   lists the `BNMLab-*` name then the `BNMDiagnosis-*` one. The tag prefix is
+   compiled into every shipped build, so a pre-rename install only knows the old
+   names — without these it reports "you are up to date" forever.
+3. `.github/workflows/release.yml` dual-publishes: the `lab-*` channel plus a
+   legacy `diagnosis-v*` / `diagnosis-latest` alias with `BNMDiagnosis-*` copies
+   and checksum lines for both. Retire only when no pre-rename install remains.
+4. `DriverFactory.desktop.kt` copies the old data dir on first run (`BNMLab` →
+   `BNMDiagnosis` → `BNMAdmin`, COPY never move, `-wal`/`-shm` included).
+   SQLDelight is the SYSTEM OF RECORD and a standalone licence has no server
+   copy: without this the app creates an empty database and a lab's work appears
+   to vanish, with no error.
+5. `navigation-config.ts` maps both `lab` and `diagnostics` slugs to `/lab`.
+
+Still deliberately NOT renamed: `role='lab_device'` (write-once in a signed
+token — changing it permanently bricks activated devices), `upgradeUuid` (a
+GUID, not a name — changing it breaks MSI upgrades), and `lab_licenses.lab_name`
+(customer lab names). Gradle's `rootProject.name` is `BNMLab` without a space
+because Gradle rejects spaces in project names.
+
+**BNM Lab** is a desktop-first KMP (Compose Multiplatform) LIMS for
 diagnostic laboratories: patients → test orders (accession/barcode) → results
 entry with reference ranges → pathologist verify/approve → printable report +
 GST billing. **Complete offline-first**: SQLDelight is the SYSTEM OF RECORD —
@@ -9,7 +42,7 @@ EMR `clinical_lab_orders` bridge) is additive, never required.
 
 Product/build plan: `/Users/dineshkumarr/BNM/BNMLAB_PLAN.md` (phases P0-P5).
 Scaffolded 2026-08-18 from the BNMBilling skeleton (package renamed
-`com.bnm.billing` → `com.bnm.diagnosis`) — billing's offline invoice/outbox/
+`com.bnm.billing` → `com.bnm.lab`) — billing's offline invoice/outbox/
 printing/payment-sheet machinery is deliberately KEPT and reused: a lab bill
 IS a GST invoice whose line items are tests.
 

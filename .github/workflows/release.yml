@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# BNM Diagnosis — Release Pipeline
+# BNM Lab — Release Pipeline
 #
 # TRIGGER: push a branch named `release/<x.y.z>` (e.g. release/1.0.0), or run
 # manually ("Run workflow") with a version.
@@ -7,8 +7,8 @@
 # WHERE THE DOWNLOADS GO: the PUBLIC `bnmadmin-releases` repo — the same shelf
 # BNM Admin and BNM Billing already publish to, so every BNM desktop app is
 # downloadable from one place. Published as TWO releases:
-#   • diagnosis-v<x.y.z>  versioned history
-#   • diagnosis-latest    rolling tag whose assets are replaced each release —
+#   • lab-v<x.y.z>        versioned history
+#   • lab-latest          rolling tag whose assets are replaced each release —
 #                         bnmapp.com links /releases/download/diagnosis-latest/…
 #                         so the website never needs editing for a new version.
 # NEITHER is ever marked "latest". The repo's /releases/latest belongs to
@@ -23,13 +23,13 @@
 #                   The same token BNMAdmin already uses — copy its value across;
 #                   secrets are per-repo and are NOT inherited.
 #
-# Nothing else. There is no Play/App Store leg here: BNM Diagnosis is
+# Nothing else. There is no Play/App Store leg here: BNM Lab is
 # desktop-first and its mobile targets are secondary, so this pipeline ships
 # installers only.
 #
 # WHY NO SIGNING: the DMG is unsigned (no Apple Developer ID configured), so
 # macOS Gatekeeper will warn on first open — right-click → Open, or
-# `xattr -dr com.apple.quarantine /Applications/BNMDiagnosis.app`. The MSI is
+# `xattr -dr com.apple.quarantine /Applications/BNM\ Lab.app`. The MSI is
 # likewise unsigned and SmartScreen may warn. Add certificates here when the lab
 # product starts shipping to third parties.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,8 +91,8 @@ jobs:
             exit 1
           fi
           echo "version_name=$RAW" >> "$GITHUB_OUTPUT"
-          echo "tag=diagnosis-v$RAW" >> "$GITHUB_OUTPUT"
-          echo "Releasing BNM Diagnosis $RAW as tag diagnosis-v$RAW"
+          echo "tag=lab-v$RAW" >> "$GITHUB_OUTPUT"
+          echo "Releasing BNM Lab $RAW as tag lab-v$RAW"
 
   # ── Desktop installers ─────────────────────────────────────────────────────
   desktop:
@@ -117,22 +117,22 @@ jobs:
             os: windows-latest
             task: packageMsi
             glob: composeApp/build/compose/binaries/main/msi/*.msi
-            asset: BNMDiagnosis-windows-x64.msi
+            asset: BNMLab-windows-x64.msi
           - name: macos-arm64
             os: macos-14              # Apple Silicon
             task: packageDmg
             glob: composeApp/build/compose/binaries/main/dmg/*.dmg
-            asset: BNMDiagnosis-macos-arm64.dmg
+            asset: BNMLab-macos-arm64.dmg
           - name: linux-x64-deb
             os: ubuntu-latest
             task: packageDeb
             glob: composeApp/build/compose/binaries/main/deb/*.deb
-            asset: BNMDiagnosis-linux-x64.deb
+            asset: BNMLab-linux-x64.deb
           - name: portable-jar
             os: ubuntu-latest
             task: packageUberJarForCurrentOS
             glob: composeApp/build/compose/jars/*.jar
-            asset: BNMDiagnosis-portable.jar
+            asset: BNMLab-portable.jar
     steps:
       - uses: actions/checkout@v4
 
@@ -150,7 +150,7 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x ./gradlew || true
-          echo "BNM Diagnosis desktop version: $VERSION"
+          echo "BNM Lab desktop version: $VERSION"
           ./gradlew :composeApp:${{ matrix.task }} --no-daemon --stacktrace -PappVersion="$VERSION"
 
       - name: Rename to stable asset name
@@ -201,27 +201,27 @@ jobs:
       # Versioned release — history. NEVER marked latest: the shared repo's
       # /releases/latest belongs to BNMAdmin's site links, and stealing it would
       # 404 every "Download for Windows" button on bnmapp.com.
-      - name: Publish versioned release (diagnosis-v*)
+      - name: Publish versioned release (lab-v*)
         uses: softprops/action-gh-release@v2
         with:
           repository: dineshkumarappdeveloper/bnmadmin-releases
           token: ${{ secrets.RELEASE_TOKEN }}
           tag_name: ${{ needs.prepare.outputs.tag }}
-          name: BNM Diagnosis ${{ needs.prepare.outputs.version_name }}
+          name: BNM Lab ${{ needs.prepare.outputs.version_name }}
           make_latest: 'false'
           body: |
-            **BNM Diagnosis** — offline-first diagnostic laboratory (LIMS) — ${{ needs.prepare.outputs.tag }}
+            **BNM Lab** — offline-first diagnostic laboratory (LIMS) — ${{ needs.prepare.outputs.tag }}
 
             | Platform | Download |
             |---|---|
-            | Windows 10/11 (x64) | `BNMDiagnosis-windows-x64.msi` |
-            | macOS (Apple Silicon) | `BNMDiagnosis-macos-arm64.dmg` |
+            | Windows 10/11 (x64) | `BNMLab-windows-x64.msi` |
+            | macOS (Apple Silicon) | `BNMLab-macos-arm64.dmg` |
             | macOS (Intel) | use the portable `.jar` below |
-            | Linux (x64, Debian/Ubuntu) | `BNMDiagnosis-linux-x64.deb` |
-            | Any OS with a JRE | `BNMDiagnosis-portable.jar` |
+            | Linux (x64, Debian/Ubuntu) | `BNMLab-linux-x64.deb` |
+            | Any OS with a JRE | `BNMLab-portable.jar` |
 
             These builds are **unsigned**. On macOS, first launch needs
-            right-click → Open (or `xattr -dr com.apple.quarantine /Applications/BNMDiagnosis.app`).
+            right-click → Open (or `xattr -dr com.apple.quarantine /Applications/BNM\ Lab.app`).
             On Windows, SmartScreen may ask you to confirm via "More info → Run anyway".
 
             The app is offline-first: it runs with no network at all. A licence key
@@ -230,20 +230,72 @@ jobs:
           fail_on_unmatched_files: true
 
       # Rolling release — the STABLE URLs bnmapp.com links to:
-      #   /releases/download/diagnosis-latest/BNMDiagnosis-<platform>.<ext>
+      #   /releases/download/diagnosis-latest/BNM Lab-<platform>.<ext>
       # Same-named assets are replaced on each publish, so the website never
       # needs editing for a new version. Same pattern as billing-latest.
-      - name: Update rolling diagnosis-latest release
+      - name: Update rolling lab-latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: dineshkumarappdeveloper/bnmadmin-releases
+          token: ${{ secrets.RELEASE_TOKEN }}
+          tag_name: lab-latest
+          name: BNM Lab (latest)
+          make_latest: 'false'
+          body: |
+            Always-current BNM Lab desktop installers (updated by every release).
+            Versioned history lives in the lab-v* releases.
+          files: dist/*
+          fail_on_unmatched_files: true
+
+      # ── LEGACY ALIAS: keep the pre-rename channel alive ────────────────────
+      # The tag prefix and asset filenames are COMPILED INTO every shipped build
+      # (UpdateChecker.TAG_PREFIXES / UpdatePlatform.assetNames). A copy
+      # installed before the BNM Lab rename only knows `diagnosis-v*` and
+      # `BNM Lab-*`, and no server-side change can teach it otherwise — so
+      # dropping these names would make those installs report "you are up to
+      # date" forever, silently. Publishing the same binaries under the old
+      # names too gives them one more update, which is the one that teaches them
+      # the new names. Retire this block only once no install predating the
+      # rename remains (check `lab_devices.last_seen` on both refs).
+      - name: Duplicate artifacts under the legacy BNM Lab-* names
+        run: |
+          set -euo pipefail
+          cp dist/BNMLab-windows-x64.msi  dist/BNMDiagnosis-windows-x64.msi
+          cp dist/BNMLab-macos-arm64.dmg  dist/BNMDiagnosis-macos-arm64.dmg
+          cp dist/BNMLab-linux-x64.deb    dist/BNMDiagnosis-linux-x64.deb
+          cp dist/BNMLab-portable.jar     dist/BNMDiagnosis-portable.jar
+          # checksums.txt must cover BOTH names or the old client's verification
+          # step finds no line for its filename and reports UNVERIFIED.
+          cd dist
+          sha256sum BNM Lab-* >> checksums.txt
+          cat checksums.txt
+
+      - name: Publish legacy alias release (diagnosis-v*)
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: dineshkumarappdeveloper/bnmadmin-releases
+          token: ${{ secrets.RELEASE_TOKEN }}
+          tag_name: diagnosis-v${{ needs.prepare.outputs.version_name }}
+          name: BNM Lab ${{ needs.prepare.outputs.version_name }} (legacy channel)
+          make_latest: 'false'
+          body: |
+            Compatibility release for installs predating the **BNM Lab** rename.
+            Identical binaries to `lab-v${{ needs.prepare.outputs.version_name }}`.
+            New installs should use the `lab-latest` / `lab-v*` releases.
+          files: dist/*
+          fail_on_unmatched_files: true
+
+      - name: Update rolling legacy diagnosis-latest release
         uses: softprops/action-gh-release@v2
         with:
           repository: dineshkumarappdeveloper/bnmadmin-releases
           token: ${{ secrets.RELEASE_TOKEN }}
           tag_name: diagnosis-latest
-          name: BNM Diagnosis (latest)
+          name: BNM Lab (latest, legacy channel)
           make_latest: 'false'
           body: |
-            Always-current BNM Diagnosis desktop installers (updated by every release).
-            Versioned history lives in the diagnosis-v* releases.
+            Compatibility channel for pre-rename installs and any old bnmapp.com
+            link. Current channel: `lab-latest`.
           files: dist/*
           fail_on_unmatched_files: true
 
@@ -255,7 +307,7 @@ jobs:
     steps:
       - run: |
           {
-            echo "## BNM Diagnosis ${{ needs.prepare.outputs.tag }}"
+            echo "## BNM Lab ${{ needs.prepare.outputs.tag }}"
             echo ""
             echo "| Leg | Result |"
             echo "|---|---|"

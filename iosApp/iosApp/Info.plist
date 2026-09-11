@@ -5,11 +5,11 @@
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>BNM Diagnosis connects to your receipt printer on the local network to print bills.</string>
+	<string>BNM Lab connects to your receipt printer on the local network to print bills.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>BNM Diagnosis connects to your Bluetooth receipt printer to print bills.</string>
+	<string>BNM Lab connects to your Bluetooth receipt printer to print bills.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>BNM Diagnosis connects to your Bluetooth receipt printer to print bills.</string>
+	<string>BNM Lab connects to your Bluetooth receipt printer to print bills.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
