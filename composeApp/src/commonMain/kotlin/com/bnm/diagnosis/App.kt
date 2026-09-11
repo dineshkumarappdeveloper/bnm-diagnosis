@@ -367,6 +367,11 @@ fun App() {
                                     popUpTo(Screen.StaffSignIn.route) { inclusive = true }
                                 }
                             },
+                            // Deliberately reachable with nobody signed in: it is
+                            // where a lab checks its licence, migrates edition, or
+                            // hands this PC's seat back — and the sign-in grid is
+                            // the only screen a locked-out lab can see.
+                            onLicense = { navController.navigate(Screen.LicenseDevices.route) },
                         )
                     }
 
@@ -410,9 +415,13 @@ fun App() {
                             onBack = { navController.popBackStack() },
                             onDeactivatedSelf = {
                                 // Local license cleared (lab data untouched) →
-                                // back to the activation entry.
+                                // back to the activation entry, with NOTHING
+                                // behind it: this screen is now reachable from
+                                // the sign-in grid too, and backing into a
+                                // licence screen that has no licence is a trap.
                                 navController.navigate(Screen.Activation.route) {
-                                    popUpTo(Screen.Main.route) { inclusive = true }
+                                    popUpTo(navController.graph.id) { inclusive = true }
+                                    launchSingleTop = true
                                 }
                             },
                         )

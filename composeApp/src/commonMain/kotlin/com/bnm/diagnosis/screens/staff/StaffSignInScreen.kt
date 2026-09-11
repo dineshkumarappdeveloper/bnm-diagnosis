@@ -51,6 +51,11 @@ import com.bnm.diagnosis.staff.Staff
 import com.bnm.diagnosis.staff.StaffCredential
 import com.bnm.diagnosis.staff.StaffRole
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.material3.ButtonDefaults
+import com.bnm.diagnosis.platform.canExitApp
+import com.bnm.diagnosis.platform.exitApp
 
 /**
  * The seat's sign-in gate (P4): every active staff member as a tap target, with
@@ -72,6 +77,10 @@ import kotlinx.coroutines.launch
 fun StaffSignInScreen(
     labName: String,
     onSignedIn: (Staff) -> Unit,
+    /** Licence & devices — the way OUT of this screen when the lab needs to
+     *  check, change or hand back its licence. Reachable without signing in:
+     *  a lab whose only account is locked out must still get to it. */
+    onLicense: () -> Unit = {},
 ) {
     val repo = LocalStaffRepository.current
     val scope = rememberCoroutineScope()
@@ -203,6 +212,23 @@ fun StaffSignInScreen(
                             Text("Sign in with a username instead")
                         }
                     }
+                }
+            }
+
+            // ── The way out ──
+            // Without these the grid is a dead end: signing out lands here and
+            // there is no route to the licence and no way to close the app.
+            Spacer(Modifier.height(8.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onLicense) { Text("Licence & devices") }
+                if (canExitApp) {
+                    TextButton(
+                        onClick = { exitApp() },
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
+                    ) { Text("Exit") }
                 }
             }
         }

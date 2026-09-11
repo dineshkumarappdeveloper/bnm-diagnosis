@@ -393,6 +393,14 @@ fun LicenseDevicesScreen(
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                 ) { Text("Deactivate this device") }
             }
+            item {
+                Text(
+                    "Use this to move the licence to another computer, or to enter a different licence key here. " +
+                        "It works with no internet, and this lab's records stay on this disk.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 
