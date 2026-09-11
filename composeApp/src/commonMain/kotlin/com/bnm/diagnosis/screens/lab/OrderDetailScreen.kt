@@ -100,6 +100,7 @@ import com.bnm.diagnosis.print.renderLabReport
 import com.bnm.diagnosis.report.ReportDoc
 import com.bnm.diagnosis.report.sampleTypeDisplay
 import com.bnm.diagnosis.license.LicenseManager
+import com.bnm.diagnosis.license.OfflinePolicy
 import com.bnm.diagnosis.report.ReportShare
 import com.bnm.diagnosis.report.WaShareMode
 import com.bnm.diagnosis.report.openUrl
@@ -229,7 +230,14 @@ fun OrderDetailScreen(
     // Sending the report to the patient on WhatsApp — off, deep link, or the
     // lab's own WhatsApp Business number (Settings ▸ Printing ▸ Report).
     val reportPrefs = remember { ReportPrefs() }
-    val waMode = remember { reportPrefs.waShareMode() }
+    // An offline licence never sends through the Business API (the server
+    // refuses it anyway) — it falls back to opening WhatsApp with the file.
+    val waMode = remember {
+        val m = reportPrefs.waShareMode()
+        if (m == WaShareMode.API && !OfflinePolicy.allowsWhatsappApi(LicenseManager().state.value.isStandalone)) {
+            WaShareMode.LINK
+        } else m
+    }
     val waCountry = remember { reportPrefs.waCountryCode }
     val waToReferrer = remember { reportPrefs.waSendToReferrer }
     val waSendPdf = remember { reportPrefs.waSendPdf }

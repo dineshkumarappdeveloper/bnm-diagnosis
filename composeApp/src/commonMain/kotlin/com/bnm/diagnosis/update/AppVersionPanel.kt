@@ -32,6 +32,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.bnm.diagnosis.api.ApiClient
+import com.bnm.diagnosis.license.OfflinePolicy
+import com.bnm.diagnosis.license.LicenseManager
 import kotlinx.coroutines.launch
 
 /**
@@ -60,6 +62,10 @@ fun AppVersionPanel(
 ) {
     val scope = rememberCoroutineScope()
     val platform = remember { currentUpdatePlatform() }
+    // An OFFLINE licence never asks GitHub anything: the panel still names the
+    // running build (which is what an operator reporting a fault needs), and
+    // the supplier hands over installers under the maintenance contract.
+    val online = remember { OfflinePolicy.allowsUpdateCheck(LicenseManager().state.value.isStandalone) }
     var state by remember { mutableStateOf<UpdateCheck?>(null) }
     var checking by remember { mutableStateOf(false) }
     var downloading by remember { mutableStateOf(false) }
@@ -77,7 +83,7 @@ fun AppVersionPanel(
     }
 
     // One quiet check per app start — enough to surface a fix without polling.
-    LaunchedEffect(Unit) { if (platform != UpdatePlatform.STORE_MANAGED) check() }
+    LaunchedEffect(Unit) { if (online && platform != UpdatePlatform.STORE_MANAGED) check() }
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -94,7 +100,7 @@ fun AppVersionPanel(
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
-                if (platform != UpdatePlatform.STORE_MANAGED) {
+                if (online && platform != UpdatePlatform.STORE_MANAGED) {
                     if (checking) {
                         CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
                     } else {

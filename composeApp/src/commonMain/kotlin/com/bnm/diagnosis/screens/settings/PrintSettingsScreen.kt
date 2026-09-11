@@ -55,6 +55,7 @@ import com.bnm.diagnosis.billing.PrintKind
 import com.bnm.diagnosis.billing.PrintProfile
 import com.bnm.diagnosis.billing.PrintProfiles
 import com.bnm.diagnosis.print.BtPrinter
+import com.bnm.diagnosis.license.LicenseManager
 import com.bnm.diagnosis.report.ReportPagination
 import com.bnm.diagnosis.report.ReportPalette
 import com.bnm.diagnosis.report.ReportPrefs
@@ -599,6 +600,7 @@ private fun ColumnScope.WhatsAppBlock() {
     val c = AppTheme.colors
     val prefs = remember { ReportPrefs() }
     var mode by remember { mutableStateOf(prefs.waShareMode()) }
+    val standaloneLicence = remember { LicenseManager().state.value.isStandalone }
     var cc by remember { mutableStateOf(prefs.waCountryCode) }
     var toReferrer by remember { mutableStateOf(prefs.waSendToReferrer) }
 
@@ -654,7 +656,10 @@ private fun ColumnScope.WhatsAppBlock() {
                 Switch(checked = sendPdf, onCheckedChange = { sendPdf = it; prefs.waSendPdf = it })
             }
         }
-        if (mode == WaShareMode.API) {
+        if (mode == WaShareMode.API && standaloneLicence) {
+            Caution("This lab runs an OFFLINE licence: the Business API is not part of it, so the report is sent by opening WhatsApp from this computer instead.")
+        }
+        if (mode == WaShareMode.API && !standaloneLicence) {
             Caution("Needs WhatsApp connected to this lab's BNM business, and a patient who messaged the lab in the last 24 hours. Outside that window WhatsApp refuses the message and the app says so — the link option always works.")
         }
     }

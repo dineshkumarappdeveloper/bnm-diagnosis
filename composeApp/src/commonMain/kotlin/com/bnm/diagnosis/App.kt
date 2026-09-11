@@ -54,6 +54,7 @@ import com.bnm.diagnosis.lab.LabRepository
 import com.bnm.diagnosis.lab.LocalLabRepository
 import com.bnm.diagnosis.lab.SeedCatalog
 import com.bnm.diagnosis.license.LicenseManager
+import com.bnm.diagnosis.license.OfflinePolicy
 import com.bnm.diagnosis.navigation.GuardedRoute
 import com.bnm.diagnosis.navigation.RouteGuardEffect
 import com.bnm.diagnosis.navigation.Screen
@@ -193,7 +194,9 @@ fun App() {
         var first = true
         var wasOnline = false
         connectivity.isOnline.collect { online ->
-            if (online && (first || !wasOnline) && licenseManager.deviceToken() != null) {
+            if (online && (first || !wasOnline) && licenseManager.deviceToken() != null &&
+                OfflinePolicy.allowsHeartbeat(licenseManager.state.value.isStandalone)
+            ) {
                 labApi.heartbeat().onSuccess { hb ->
                     when (hb) {
                         is LabHeartbeatResult.Ok ->
@@ -214,7 +217,9 @@ fun App() {
         var first = true
         var wasOnline = false
         connectivity.isOnline.collect { online ->
-            if (online && (first || !wasOnline) && licenseManager.deviceToken() != null) {
+            if (online && (first || !wasOnline) && licenseManager.deviceToken() != null &&
+                OfflinePolicy.allowsSync(licenseManager.state.value.isStandalone)
+            ) {
                 // Bind this device's invoice numbering series before the sweep
                 // (no-op once bound) so billing works even if the operator's
                 // first bill happens offline later.
@@ -231,21 +236,30 @@ fun App() {
     LaunchedEffect(Unit) {
         while (true) {
             delay(5 * 60_000L)
-            if (licenseManager.deviceToken() != null) labSync.syncNow()
+            if (licenseManager.deviceToken() != null &&
+                OfflinePolicy.allowsSync(licenseManager.state.value.isStandalone)
+            ) labSync.syncNow()
         }
     }
 
-    // Drain the offline write outbox on start + every reconnect.
-    LaunchedEffect(Unit) { billingSync.start(this) }
+    // Drain the offline write outbox on start + every reconnect — CONNECTED
+    // editions only. An offline licence keeps its bills entirely on this PC.
+    LaunchedEffect(Unit) {
+        if (OfflinePolicy.allowsBillingSync(licenseManager.state.value.isStandalone)) billingSync.start(this)
+    }
     // Push tickle → targeted pull (FCM-ready, not used in v1).
     LaunchedEffect(Unit) {
-        SyncBus.requests.collect { t -> runCatching { syncEngine.sync(t.businessId, t.entities) } }
+        SyncBus.requests.collect { t ->
+            if (OfflinePolicy.allowsBillingSync(licenseManager.state.value.isStandalone)) {
+                runCatching { syncEngine.sync(t.businessId, t.entities) }
+            }
+        }
     }
     // Reconnect safety net → full pull for the selected business.
     LaunchedEffect(Unit) {
         var wasOnline = true
         connectivity.isOnline.collect { online ->
-            if (online && !wasOnline) {
+            if (online && !wasOnline && OfflinePolicy.allowsBillingSync(licenseManager.state.value.isStandalone)) {
                 authRepository.getSelectedBusinessId()?.let { bid -> runCatching { syncEngine.syncAll(bid) } }
             }
             wasOnline = online
