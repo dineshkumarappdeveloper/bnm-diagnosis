@@ -242,7 +242,13 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
         mode = settings.getStringOrNull(KEY_MODE),
         seats = settings.getInt(KEY_SEATS, 0),
         expiresAt = settings.getStringOrNull(KEY_EXPIRES_AT),
-        businessId = settings.getStringOrNull(KEY_BUSINESS_ID),
+        // Both of these ride in the SIGNED licence token, so a licence check
+        // is all a lab needs to move from the offline edition to the connected
+        // one: the new token carries the new edition AND the business it now
+        // syncs with. The stored value is the fallback for tokens minted
+        // before `biz` was a claim.
+        businessId = claims()?.businessId?.takeIf { it.isNotBlank() }
+            ?: settings.getStringOrNull(KEY_BUSINESS_ID),
         edition = claims()?.edition?.takeIf { it.isNotBlank() } ?: EDITION_CONNECTED,
         deviceRowId = settings.getStringOrNull(KEY_DEVICE_ROW_ID),
     )

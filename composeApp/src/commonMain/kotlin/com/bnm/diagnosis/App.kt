@@ -245,7 +245,29 @@ fun App() {
     // Drain the offline write outbox on start + every reconnect — CONNECTED
     // editions only. An offline licence keeps its bills entirely on this PC.
     LaunchedEffect(Unit) {
-        if (OfflinePolicy.allowsBillingSync(licenseManager.state.value.isStandalone)) billingSync.start(this)
+        // Reactive, not a one-shot check: a lab that migrates from the offline
+        // edition mid-session must start draining without a restart.
+        val scope = this
+        var started = false
+        licenseManager.state.collect { st ->
+            if (!started && OfflinePolicy.allowsBillingSync(st.isStandalone)) {
+                started = true
+                billingSync.start(scope)
+            }
+        }
+    }
+    // A migration to the connected edition syncs at once rather than waiting
+    // for the five-minute sweep, and the notice below tells the lab it is
+    // happening.
+    LaunchedEffect(Unit) {
+        var wasStandalone: Boolean? = null
+        licenseManager.state.collect { st ->
+            val now = st.isStandalone
+            if (wasStandalone == true && !now && licenseManager.deviceToken() != null) {
+                runCatching { labSync.syncNow() }
+            }
+            wasStandalone = now
+        }
     }
     // Push tickle → targeted pull (FCM-ready, not used in v1).
     LaunchedEffect(Unit) {

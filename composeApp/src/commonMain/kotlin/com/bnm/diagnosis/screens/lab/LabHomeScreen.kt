@@ -94,6 +94,14 @@ import kotlinx.coroutines.launch
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.AlertDialog
+import com.bnm.diagnosis.lab.DiagnosisPrefs
+import com.bnm.diagnosis.lab.TenantRowCounts
+import com.bnm.diagnosis.license.EditionSwitch
+import com.bnm.diagnosis.license.LicenseManager
+import com.bnm.diagnosis.license.editionNoticeBody
+import com.bnm.diagnosis.license.editionNoticeTitle
+import com.bnm.diagnosis.license.editionSwitch
 
 /** Desktop-first breakpoint: ≥ this width the home renders as a two-column
  *  dashboard; below it, the stacked phone layout. */
@@ -178,6 +186,23 @@ fun LabHomeScreen(
     onSignOut: () -> Unit = {},
 ) {
     val repo = LocalLabRepository.current
+    // A lab that has just been moved between editions is told once, in plain
+    // words, what changes about where its records live. Nothing to say on an
+    // ordinary start: the stored edition already matches the licence.
+    val diagPrefs = remember { DiagnosisPrefs() }
+    val currentEdition = remember(licenseMode) { LicenseManager().state.value.edition }
+    var editionNotice by remember { mutableStateOf(EditionSwitch.NONE) }
+    var editionCounts by remember { mutableStateOf<TenantRowCounts?>(null) }
+    LaunchedEffect(currentEdition) {
+        val switch = editionSwitch(diagPrefs.lastSeenEdition, currentEdition)
+        if (switch != EditionSwitch.NONE) {
+            editionCounts = runCatching { repo.tenantRowCounts() }.getOrNull()
+            editionNotice = switch
+        }
+        // Record it either way, including the very first run, so the notice
+        // fires on a real change and never on an upgrade of the app itself.
+        diagPrefs.lastSeenEdition = currentEdition
+    }
     val billingRepo = LocalBillingRepository.current
     // invoiceId → balance, so every order row can show whether money is still
     // owed. Worklist rows come from SQL while invoices are JSON docs in another
@@ -433,6 +458,18 @@ fun LabHomeScreen(
                 // (The standalone "Sync off" footer note now lives in the attention bar.)
             }
         }
+    }
+
+    // ── Edition changed: say it once, then never again ──
+    editionNoticeTitle(editionNotice)?.let { title ->
+        AlertDialog(
+            onDismissRequest = { editionNotice = EditionSwitch.NONE },
+            title = { Text(title) },
+            text = { Text(editionNoticeBody(editionNotice, editionCounts), style = MaterialTheme.typography.bodyMedium) },
+            confirmButton = {
+                Button(onClick = { editionNotice = EditionSwitch.NONE }) { Text("Got it") }
+            },
+        )
     }
 }
 

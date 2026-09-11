@@ -67,6 +67,8 @@ fun LicenseDevicesScreen(
 ) {
     val scope = rememberCoroutineScope()
     val license by licenseManager.state.collectAsState()
+    var checkingLicence by remember { mutableStateOf(false) }
+    var licenceMessage by remember { mutableStateOf<String?>(null) }
 
     var devices by remember { mutableStateOf<List<LabSeatDevice>>(emptyList()) }
     var selfId by remember { mutableStateOf<String?>(null) }
@@ -153,6 +155,62 @@ fun LicenseDevicesScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                        }
+                        // The one network call an offline lab may make on
+                        // purpose, and the whole of an edition migration: BNM
+                        // changes the licence, the lab presses this, and the
+                        // new signed licence arrives carrying its edition and
+                        // the business it now syncs with.
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    if (checkingLicence) return@OutlinedButton
+                                    checkingLicence = true; licenceMessage = null
+                                    val wasStandalone = license.isStandalone
+                                    scope.launch {
+                                        labApi.heartbeat()
+                                            .onSuccess { hb ->
+                                                when (hb) {
+                                                    is LabHeartbeatResult.Ok -> {
+                                                        licenseManager.applyHeartbeat(
+                                                            hb.licenseJwt, hb.mode, hb.seats, hb.expiresAt, hb.labName,
+                                                        )
+                                                        val nowStandalone = licenseManager.state.value.isStandalone
+                                                        licenceMessage = when {
+                                                            wasStandalone && !nowStandalone ->
+                                                                "This lab is now on the connected edition — its records will start syncing."
+                                                            !wasStandalone && nowStandalone ->
+                                                                "This lab is now offline-only — nothing further will leave this computer."
+                                                            else -> "Licence is up to date."
+                                                        }
+                                                    }
+                                                    is LabHeartbeatResult.Blocked -> licenceMessage = hb.message
+                                                    LabHeartbeatResult.InvalidSession ->
+                                                        licenceMessage = "Session expired — reactivate this device."
+                                                }
+                                            }
+                                            .onFailure { licenceMessage = "Couldn't reach BNM — try again when online." }
+                                        checkingLicence = false
+                                    }
+                                },
+                                enabled = !checkingLicence,
+                            ) {
+                                if (checkingLicence) {
+                                    CircularProgressIndicator(Modifier.padding(end = 8.dp).size(16.dp), strokeWidth = 2.dp)
+                                }
+                                Text("Check licence")
+                            }
+                            Text(
+                                if (license.isStandalone)
+                                    "Run this only if BNM has changed your licence — for example when moving to the connected edition."
+                                else "Picks up a change made by BNM (seats, renewal, edition).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        licenceMessage?.let {
+                            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
                         }
                         Text(
                             "The lab name is set by BNM and is read-only in the app.",
