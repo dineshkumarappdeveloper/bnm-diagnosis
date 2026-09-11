@@ -137,8 +137,16 @@ android {
         applicationId = "com.bnm.lab"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = 10000
-        versionName = "1.0.0"
+        // Derived from the SAME -PappVersion CI passes, so an APK from a
+        // release/1.1.0 build can never label itself 1.0.0. versionCode packs
+        // x.y.z as x*10000 + y*100 + z (1.1.0 -> 10100), which stays
+        // monotonic as long as minor/patch stay under 100.
+        versionCode = appVersionName.split(".").let { p ->
+            (p.getOrNull(0)?.toIntOrNull() ?: 1) * 10000 +
+                (p.getOrNull(1)?.toIntOrNull() ?: 0) * 100 +
+                (p.getOrNull(2)?.toIntOrNull() ?: 0)
+        }
+        versionName = appVersionName
     }
     packaging {
         resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
