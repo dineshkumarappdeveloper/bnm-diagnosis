@@ -478,7 +478,7 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         // see the desktop renderer.
         val tail = if (closesGroup && panel.isNotEmpty()) 16f + signOff.need else 0f
         ensure(maxOf(52f, 20f + panelH + tail))
-        sectionTitle(section.title)
+        sectionTitle(section.title, section.sampleType)
         val panelTop = y
         val panelPage = pageNo
         if (panel.isNotEmpty()) drawPanel(panel, right - panelW, panelTop)
@@ -564,8 +564,10 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         c.drawBitmap(bmp, null, RectF(l, t, l + dw, t + dh), Paint(Paint.FILTER_BITMAP_FLAG))
     }
 
-    private fun sectionTitle(title: String) {
+    /** Test name left, "Sample: Serum" right — mirror of the desktop renderer. */
+    private fun sectionTitle(title: String, sampleType: String? = null) {
         text(left, y + 11f, title, 11f, bold = true, accent)
+        sampleType?.let { textRight(right, y + 11f, "Sample: $it", 8.5f, bold = false, GRAY) }
         y += 15f
         hline(left, right, y, accent, 0.9f)
         y += 5f
@@ -575,7 +577,7 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
      *  desktop renderer; see its KDoc. */
     private fun continueSection(section: ReportSection) {
         newPage()
-        sectionTitle(section.title + " (contd.)")
+        sectionTitle(section.title + " (contd.)", section.sampleType)
         tableHeader()
     }
 

@@ -419,7 +419,7 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         // and without this the signatures went to a sheet of their own (review).
         val tail = if (closesGroup && panel.isNotEmpty()) 16f + signOff.need else 0f
         ensure(maxOf(52f, 20f + panelH + tail))
-        sectionTitle(section.title)
+        sectionTitle(section.title, section.sampleType)
         val panelTop = y
         val panelPage = pageIndex
         if (panel.isNotEmpty()) drawPanel(panel, right - panelW, panelTop)
@@ -525,8 +525,10 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         }
     }
 
-    private fun sectionTitle(title: String) {
+    /** Test name left, "Sample: Serum" right — the specimen on every sheet. */
+    private fun sectionTitle(title: String, sampleType: String? = null) {
         text(left, y - 11f, title, fontB, 11f, accent)
+        sampleType?.let { textRight(right, y - 11f, "Sample: $it", fontR, 8.5f, gray) }
         y -= 15f
         hline(left, right, y, accent, 0.9f)
         y -= 5f
@@ -540,7 +542,7 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
      */
     private fun continueSection(section: ReportSection) {
         newPage()
-        sectionTitle(section.title + " (contd.)")
+        sectionTitle(section.title + " (contd.)", section.sampleType)
         tableHeader()
     }
 

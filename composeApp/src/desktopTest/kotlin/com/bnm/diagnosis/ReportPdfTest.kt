@@ -94,9 +94,10 @@ class ReportPdfTest {
     }
 
     /** Lines that ARE the given department banner / title (squashed, upper-cased):
-     *  the banner is drawn with letter spacing, so it may come back as "B I O…". */
+     *  the banner is drawn with letter spacing, so it may come back as "B I O…";
+     *  a section title shares its line with "Sample: …", which is dropped first. */
     private fun bannerLines(page: String, name: String): Int =
-        page.lines().count { it.squash().uppercase() == name }
+        page.lines().count { it.squash().uppercase().substringBefore("SAMPLE:") == name }
 
     @Test
     fun `one test per page puts every test on its own sheet, each closed by the sign-off`() {

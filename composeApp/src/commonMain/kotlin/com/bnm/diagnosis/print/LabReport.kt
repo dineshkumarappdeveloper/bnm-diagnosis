@@ -32,6 +32,8 @@ fun renderLabReport(
     widthChars: Int = 64,
     /** Display name for a result row (catalog parameter name); defaults to the raw key. */
     paramName: (LabResult) -> String = { it.parameterKey },
+    /** Printed specimen for a test ("Serum"), already display-formed; null = no line. */
+    sampleType: (LabOrderTest) -> String? = { null },
 ): String {
     val w = widthChars.coerceIn(32, 80)
     val sb = StringBuilder()
@@ -93,6 +95,7 @@ fun renderLabReport(
     tests.forEachIndexed { i, t ->
         if (i > 0) ln()
         wrap(t.testName.uppercase())
+        sampleType(t)?.let { ln("Sample: $it") }
         rule()
         if (tabular) {
             ln(cell("Parameter", paramW) + " " + cell("Result", valueW) + " " + cell("Unit", unitW) + " " + cell("Ref. range", refW) + " " + "Flag")

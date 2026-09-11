@@ -287,7 +287,22 @@ data class ReportSection(
     val rows: List<ReportRow>,
     val department: String? = null,
     val graphs: List<ReportGraph> = emptyList(),
+    /** The specimen this test was run on, as printed ("Serum", "Urine") —
+     *  right of the section title on every sheet, so a reader knows what was
+     *  tested without the requisition. Null prints nothing. */
+    val sampleType: String? = null,
 )
+
+/**
+ * Catalog `sample_type` ("serum", "urine", "other") → how it prints. Blank
+ * or "other" → null (nothing to say); a value that already carries capitals
+ * ("EDTA blood") is kept; a plain lowercase word gets its first letter.
+ */
+fun sampleTypeDisplay(raw: String?): String? {
+    val t = raw?.trim().orEmpty()
+    if (t.isEmpty() || t.equals("other", ignoreCase = true)) return null
+    return if (t.any { it.isUpperCase() }) t else t.replaceFirstChar { it.uppercase() }
+}
 
 /**
  * The sections that share one page sequence. A group ALWAYS starts on a fresh
@@ -425,6 +440,9 @@ fun buildReportDoc(
     /** Analyzer graphs for an ordered test (the assembler reads them from the
      *  graphs table); none by default. */
     graphsFor: (LabOrderTest) -> List<ReportGraph> = { emptyList() },
+    /** Catalog sample type of an ordered test ("serum"); printed beside the
+     *  section title via [sampleTypeDisplay]. */
+    sampleType: (LabOrderTest) -> String? = { null },
     /** The signatories' CURRENT names, resolved by the assembler from the staff
      *  ids stamped on the rows; null keeps the name snapshot the rows carry. */
     verifiedByName: String? = null,
@@ -451,6 +469,7 @@ fun buildReportDoc(
             },
             department = department(t),
             graphs = graphsFor(t),
+            sampleType = sampleTypeDisplay(sampleType(t)),
         )
     }
     return ReportDoc(
@@ -522,6 +541,7 @@ fun sampleReportDoc(
     sections = listOf(
         ReportSection(
             "Complete Blood Count (CBC)",
+            sampleType = "Blood",
             department = "Hematology",
             graphs = sampleGraphs(),
             rows = listOf(
@@ -542,6 +562,7 @@ fun sampleReportDoc(
         ),
         ReportSection(
             "Liver Function Test (LFT)",
+            sampleType = "Serum",
             department = "Biochemistry",
             rows = listOf(
                 ReportRow("Bilirubin total", "1.1", "mg/dL", "0.3 - 1.2", "N"),
@@ -556,6 +577,7 @@ fun sampleReportDoc(
         ),
         ReportSection(
             "Fasting Blood Sugar (FBS)",
+            sampleType = "Blood",
             department = "Biochemistry",
             rows = listOf(
                 ReportRow("Glucose (fasting)", "126", "mg/dL", "70 - 100", "H"),
@@ -563,6 +585,7 @@ fun sampleReportDoc(
         ),
         ReportSection(
             "Serology",
+            sampleType = "Serum",
             department = "Serology",
             rows = listOf(
                 ReportRow("HBsAg (rapid)", "Reactive", "", "Non-reactive", "A"),

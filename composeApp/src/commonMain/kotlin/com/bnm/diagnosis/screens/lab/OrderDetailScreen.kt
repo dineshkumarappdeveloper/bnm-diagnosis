@@ -97,6 +97,7 @@ import com.bnm.diagnosis.print.EscPos
 import com.bnm.diagnosis.print.printToNetworkPrinter
 import com.bnm.diagnosis.print.renderLabReport
 import com.bnm.diagnosis.report.ReportDoc
+import com.bnm.diagnosis.report.sampleTypeDisplay
 import com.bnm.diagnosis.report.ReportPrefs
 import com.bnm.diagnosis.report.buildReportDoc
 import com.bnm.diagnosis.report.openPdf
@@ -421,6 +422,7 @@ fun OrderDetailScreen(
                 labName = labName, order = ord, patient = pat, tests = tests,
                 results = results.values.toList(), referrerName = referrer?.name,
                 widthChars = bp.paperWidth, paramName = nameOf,
+                sampleType = { t -> sampleTypeDisplay(catalog[t.testId]?.sampleType) },
             )
             // Extra copies are best-effort: the first one succeeding is what
             // counts as "reported", so a failed duplicate must not undo that.
@@ -640,7 +642,10 @@ fun OrderDetailScreen(
                         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        OrderHeader(o, pat, referrer, bill)
+                        OrderHeader(
+                            o, pat, referrer, bill,
+                            samples = tests.mapNotNull { sampleTypeDisplay(catalog[it.testId]?.sampleType) }.distinct(),
+                        )
                         // L3: outsourced lines get an indicator + a lightweight
                         // "Sent to partner" stamp BEFORE result entry. The order's
                         // status machine is untouched — entering the partner's
@@ -1064,6 +1069,9 @@ private fun OrderHeader(
     referrer: Referrer?,
     /** Null = no bill, or settled — the chip then renders nothing. */
     bill: InvoiceBalance? = null,
+    /** Distinct specimens the order's tests need ("Blood", "Serum") — what the
+     *  desk must collect, said where the order is identified. */
+    samples: List<String> = emptyList(),
 ) {
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
@@ -1100,7 +1108,8 @@ private fun OrderHeader(
                     // Registered whenever the report has actually gone out.
                     "· Registered ${shortTimeLabel(order.createdAt)}" +
                         (order.reportedAt?.let { " · Reported ${shortTimeLabel(it)}" } ?: "") +
-                        (referrer?.let { " · Ref: ${it.name}" } ?: ""),
+                        (referrer?.let { " · Ref: ${it.name}" } ?: "") +
+                        (samples.takeIf { it.isNotEmpty() }?.let { " · Sample${if (it.size == 1) "" else "s"}: ${it.joinToString(", ")}" } ?: ""),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -1381,13 +1390,16 @@ private fun TestTile(
             verticalAlignment = Alignment.Top,
         ) {
             Column(Modifier.weight(1f)) {
-                Text(
-                    group.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        group.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+                    )
+                    // The specimen as a chip — the same word the tube sticker carries.
+                    sampleTypeDisplay(test?.sampleType)?.let { SampleChip(it) }
+                }
                 val about = listOfNotNull(
                     test?.category?.takeIf { it.isNotBlank() },
-                    test?.sampleType?.takeIf { it.isNotBlank() },
                     test?.method?.takeIf { it.isNotBlank() },
                 ).joinToString(" · ")
                 if (about.isNotEmpty()) {
@@ -1417,6 +1429,20 @@ private fun TestTile(
             state = listState,
             contentPadding = PaddingValues(bottom = 28.dp),
             content = rows,
+        )
+    }
+}
+
+/** "SERUM" / "URINE" beside the test name — what this test was run on. */
+@Composable
+private fun SampleChip(sample: String) {
+    Box(
+        Modifier.background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+    ) {
+        Text(
+            sample.uppercase(), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold,
+            letterSpacing = 0.6.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
         )
     }
 }

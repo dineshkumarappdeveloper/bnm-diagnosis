@@ -98,6 +98,7 @@ class ReportAssembler(
             // snapshots the test NAME, so it comes from the catalog lookup the
             // parameter names already use.
             department = { t -> catalog[t.testId]?.category },
+            sampleType = { t -> catalog[t.testId]?.sampleType },
             graphsFor = { t -> toReportGraphs(graphs[t.testId].orEmpty()) },
         )
     }
