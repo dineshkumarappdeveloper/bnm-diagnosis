@@ -514,6 +514,41 @@ class LabApi(
     /** `POST admin-lab/reports/{token}/revoke` — kill a link (wrong patient,
      *  corrected report). The local row is marked revoked first, so a dropped
      *  connection can never leave the lab thinking a live link is dead. */
+    /**
+     * Send a PUBLISHED report to [to] (digits, country code first) as a
+     * WhatsApp document, from the lab's own WhatsApp Business number.
+     *
+     * The failure modes are the interesting part and they come back as words
+     * the screen can show: WhatsApp not connected for this business, the
+     * 24-hour window closed (Meta refuses business-initiated messages outside
+     * it), the file not on the server yet, the link revoked. [idempotencyKey]
+     * makes a retry a no-op instead of a second copy in the patient's chat.
+     */
+    suspend fun sendReportWhatsapp(
+        token: String,
+        to: String,
+        filename: String,
+        caption: String,
+        idempotencyKey: String,
+    ): Result<Unit> = withContext(Dispatchers.Default) {
+        runCatching {
+            val auth = deviceAuth()
+            val resp = httpClient.post(edgeUrl("/reports/$token/whatsapp")) {
+                header(auth.first, auth.second)
+                contentType(ContentType.Application.Json)
+                setBody(
+                    buildJsonObject {
+                        put("to", to)
+                        put("filename", filename)
+                        put("caption", caption)
+                        put("idempotencyKey", idempotencyKey)
+                    }.toString()
+                )
+            }
+            if (!resp.status.isSuccess()) syncFail(resp.status, resp.bodyAsText())
+        }
+    }
+
     suspend fun revokeReport(token: String): Result<Unit> = withContext(Dispatchers.Default) {
         runCatching {
             val auth = deviceAuth()

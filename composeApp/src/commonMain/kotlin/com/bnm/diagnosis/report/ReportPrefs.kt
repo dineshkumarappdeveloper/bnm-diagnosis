@@ -73,6 +73,28 @@ class ReportPrefs {
         get() = s.getBoolean(K_RELEASE_PER_TEST, false)
         set(v) = s.putBoolean(K_RELEASE_PER_TEST, v)
 
+    /**
+     * How a released report reaches the patient on WhatsApp: not at all, by
+     * opening WhatsApp with the message ready ([WaShareMode.LINK]), or sent by
+     * the lab's own WhatsApp Business number ([WaShareMode.API]). Off by
+     * default — a lab turns it on once it knows which one it wants.
+     */
+    var waShareSlug: String
+        get() = s.getString(K_WA_MODE, WaShareMode.OFF.slug)
+        set(v) = s.putString(K_WA_MODE, WaShareMode.fromSlug(v).slug)
+
+    fun waShareMode(): WaShareMode = WaShareMode.fromSlug(waShareSlug)
+
+    /** Country code prefixed to a bare local number ("91" for India). */
+    var waCountryCode: String
+        get() = s.getString(K_WA_CC, "91").filter { it.isDigit() }.ifEmpty { "91" }
+        set(v) = s.putString(K_WA_CC, v.filter { it.isDigit() }.take(4).ifEmpty { "91" })
+
+    /** Offer the referring doctor as a recipient too (their number is on the referrer row). */
+    var waSendToReferrer: Boolean
+        get() = s.getBoolean(K_WA_REFERRER, false)
+        set(v) = s.putBoolean(K_WA_REFERRER, v)
+
     /** The letterhead lines as printed: address, then phone/email combined, then extra. */
     fun letterheadLines(): List<String> {
         val contact = listOf(
@@ -93,5 +115,8 @@ class ReportPrefs {
         const val K_ACCENT = "report_accent_rgb"
         const val K_PAGINATION = "report_pagination"
         const val K_RELEASE_PER_TEST = "report_release_per_test"
+        const val K_WA_MODE = "report_wa_mode"
+        const val K_WA_CC = "report_wa_country_code"
+        const val K_WA_REFERRER = "report_wa_to_referrer"
     }
 }

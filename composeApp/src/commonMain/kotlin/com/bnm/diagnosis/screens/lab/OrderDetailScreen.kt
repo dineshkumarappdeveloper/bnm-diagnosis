@@ -99,6 +99,16 @@ import com.bnm.diagnosis.print.printToNetworkPrinter
 import com.bnm.diagnosis.print.renderLabReport
 import com.bnm.diagnosis.report.ReportDoc
 import com.bnm.diagnosis.report.sampleTypeDisplay
+import com.bnm.diagnosis.license.LicenseManager
+import com.bnm.diagnosis.report.ReportShare
+import com.bnm.diagnosis.report.WaShareMode
+import com.bnm.diagnosis.report.openUrl
+import com.bnm.diagnosis.report.waDeepLink
+import com.bnm.diagnosis.report.waPhone
+import com.bnm.diagnosis.report.waReportCaption
+import com.bnm.diagnosis.report.waReportFilename
+import com.bnm.diagnosis.report.waReportMessage
+import androidx.compose.material3.RadioButton
 import com.bnm.diagnosis.report.ReportPrefs
 import com.bnm.diagnosis.report.buildReportDoc
 import com.bnm.diagnosis.report.openPdf
@@ -214,6 +224,13 @@ fun OrderDetailScreen(
     // holds back the rest of the order. Read once per screen; the setting is
     // a device preference like the letterhead.
     val releasePerTest = remember { ReportPrefs().releasePerTest }
+    // Sending the report to the patient on WhatsApp — off, deep link, or the
+    // lab's own WhatsApp Business number (Settings ▸ Printing ▸ Report).
+    val reportPrefs = remember { ReportPrefs() }
+    val waMode = remember { reportPrefs.waShareMode() }
+    val waCountry = remember { reportPrefs.waCountryCode }
+    val waToReferrer = remember { reportPrefs.waSendToReferrer }
+    val standalone = remember { LicenseManager().state.value.isStandalone }
 
     var order by remember { mutableStateOf<LabOrder?>(null) }
     var patient by remember { mutableStateOf<Patient?>(null) }
@@ -238,6 +255,7 @@ fun OrderDetailScreen(
     var approveTarget by remember { mutableStateOf<String?>(null) }
     /** Per-test print: the tests the print chooser prints, null = the whole order. */
     var printTestIds by remember { mutableStateOf<Set<String>?>(null) }
+    var showWhatsapp by remember { mutableStateOf(false) }
     var showCancel by remember { mutableStateOf(false) }
     var showPrintChooser by remember { mutableStateOf(false) }
     // Payment gate on RELEASE. A lab hands the report over when the bill is
@@ -1040,10 +1058,127 @@ fun OrderDetailScreen(
                             Text("Thermal slip")
                         }
                     }
+                    // Handing the report over on WhatsApp is a release like any
+                    // other — it sits with the print options, behind the same gate.
+                    if (waMode != WaShareMode.OFF) {
+                        OutlinedButton(
+                            onClick = { showPrintChooser = false; printTestIds = null; showWhatsapp = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Send on WhatsApp") }
+                    }
                 }
             },
             confirmButton = {},
             dismissButton = { TextButton(onClick = { showPrintChooser = false; printTestIds = null }) { Text("Close") } },
+        )
+    }
+
+    // ── Send the report on WhatsApp ────────────────────────────────────────
+    // Two ways, chosen in Settings: open WhatsApp with the message ready (the
+    // operator presses send, works anywhere), or let the lab's own WhatsApp
+    // Business number send the PDF itself. Either way the message carries the
+    // name, the accession and the private link — never a result.
+    if (showWhatsapp && o != null && patient != null) {
+        val pat = patient!!
+        val patPhone = waPhone(pat.phone, waCountry)
+        val refPhone = referrer?.phone?.let { waPhone(it, waCountry) }.takeIf { waToReferrer }
+        var toDoctor by remember(showWhatsapp) { mutableStateOf(patPhone == null && refPhone != null) }
+        var typed by remember(showWhatsapp) { mutableStateOf("") }
+        val chosen = when {
+            typed.isNotBlank() -> waPhone(typed, waCountry)
+            toDoctor -> refPhone
+            else -> patPhone
+        }
+        val recipientName = if (toDoctor && typed.isBlank()) referrer?.name.orEmpty() else pat.name
+        var sending by remember(showWhatsapp) { mutableStateOf(false) }
+        var note by remember(showWhatsapp) { mutableStateOf<String?>(null) }
+
+        AlertDialog(
+            onDismissRequest = { if (!sending) { showWhatsapp = false } },
+            title = { Text("Send report on WhatsApp") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        when (waMode) {
+                            WaShareMode.API -> "The lab's WhatsApp Business number sends the report PDF."
+                            else -> "WhatsApp opens with the message ready — press send there."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (patPhone != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(selected = !toDoctor && typed.isBlank(), onClick = { toDoctor = false; typed = "" })
+                            Text("${pat.name} · ${pat.phone.orEmpty()}", style = MaterialTheme.typography.bodyMedium)
+                        }
+                    } else {
+                        Text("This patient has no phone number on file.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    if (refPhone != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(selected = toDoctor && typed.isBlank(), onClick = { toDoctor = true; typed = "" })
+                            Text("${referrer?.name.orEmpty()} (referring doctor)", style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                    OutlinedTextField(
+                        value = typed, onValueChange = { typed = it },
+                        label = { Text("Or another number") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (standalone) {
+                        Text(
+                            "Offline edition: the message says the report is ready, without a download link.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    note?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall,
+                            color = if (it.startsWith("Sent") || it.startsWith("Opened")) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = chosen != null && !sending,
+                    onClick = {
+                        val phone = chosen ?: return@Button
+                        if (paymentBlocksRelease) { showWhatsapp = false; showPaymentDue = true; return@Button }
+                        sending = true; note = null
+                        scope.launch {
+                            val token = if (standalone) null
+                            else runCatching { repo.reportShareToken(o.id, o.accessionNo) }.getOrNull()
+                            val url = token?.let { ReportShare.resolveUrl(it) }
+                            val doctor = toDoctor && typed.isBlank()
+                            when (waMode) {
+                                WaShareMode.API -> {
+                                    if (token == null) {
+                                        note = "This edition cannot send the file — use the link option."
+                                    } else {
+                                        labApi.sendReportWhatsapp(
+                                            token = token, to = phone,
+                                            filename = waReportFilename(o.accessionNo),
+                                            caption = waReportCaption(recipientName, labName, o.accessionNo, doctor),
+                                            idempotencyKey = "labrep-$token-$phone",
+                                        ).onSuccess {
+                                            note = "Sent to $phone"
+                                            markReported(null)
+                                        }.onFailure { note = it.message ?: "WhatsApp send failed" }
+                                    }
+                                }
+                                else -> {
+                                    val text = waReportMessage(recipientName, labName, o.accessionNo, url, doctor)
+                                    note = openUrl(waDeepLink(phone, text))
+                                    if (note?.startsWith("Opened") == true) markReported(null)
+                                }
+                            }
+                            sending = false
+                        }
+                    },
+                ) { Text(if (waMode == WaShareMode.API) "Send now" else "Open WhatsApp") }
+            },
+            dismissButton = { TextButton(enabled = !sending, onClick = { showWhatsapp = false }) { Text("Close") } },
         )
     }
 

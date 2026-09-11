@@ -58,6 +58,7 @@ import com.bnm.diagnosis.print.BtPrinter
 import com.bnm.diagnosis.report.ReportPagination
 import com.bnm.diagnosis.report.ReportPalette
 import com.bnm.diagnosis.report.ReportPrefs
+import com.bnm.diagnosis.report.WaShareMode
 import com.bnm.diagnosis.report.openPdf
 import com.bnm.diagnosis.report.sampleReportDoc
 import com.bnm.diagnosis.report.writeLabReportPdf
@@ -76,6 +77,7 @@ import com.bnm.diagnosis.print.sampleSticker
 import androidx.compose.runtime.LaunchedEffect
 import com.bnm.diagnosis.print.StickerRender
 import com.bnm.diagnosis.print.calibrateStickerPrinter
+import androidx.compose.foundation.layout.width
 
 /** Desktop is the primary target, so the two profiles sit side by side as soon
  *  as there is room. Same breakpoint the lab screens use (LabHomeScreen). */
@@ -145,6 +147,7 @@ fun PrintSettingsScreen(
                             LetterheadBlock(labName)
                             PageLayoutBlock()
                             ReleaseBlock()
+                            WhatsAppBlock()
                             ReportPreviewButton(labName)
                         }
                         PrinterProfileCard(PrintKind.BARCODE, onPickBluetooth, Modifier.weight(1f), labName = labName)
@@ -156,6 +159,7 @@ fun PrintSettingsScreen(
                             LetterheadBlock(labName)
                             PageLayoutBlock()
                             ReleaseBlock()
+                            WhatsAppBlock()
                             ReportPreviewButton(labName)
                         }
                     }
@@ -166,6 +170,7 @@ fun PrintSettingsScreen(
                         LetterheadBlock(labName)
                         PageLayoutBlock()
                         ReleaseBlock()
+                        WhatsAppBlock()
                         ReportPreviewButton(labName)
                     }
                     PrinterProfileCard(PrintKind.BARCODE, onPickBluetooth, Modifier.fillMaxWidth(), labName = labName)
@@ -578,6 +583,66 @@ private fun ColumnScope.PageLayoutBlock() {
     }
     Text(layout.blurb, style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
     Text(layout.sheetNote, style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
+}
+
+/**
+ * How a released report reaches the patient on WhatsApp.
+ *
+ * Two honest options, because they fail in different places: the deep link
+ * always works but needs a human to press send, and the Business API sends by
+ * itself but only inside WhatsApp's 24-hour window (or with an approved
+ * template). The lab picks; the report screen then shows one button.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ColumnScope.WhatsAppBlock() {
+    val c = AppTheme.colors
+    val prefs = remember { ReportPrefs() }
+    var mode by remember { mutableStateOf(prefs.waShareMode()) }
+    var cc by remember { mutableStateOf(prefs.waCountryCode) }
+    var toReferrer by remember { mutableStateOf(prefs.waSendToReferrer) }
+
+    HorizontalDivider(color = c.border)
+    Text("Send on WhatsApp", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        WaShareMode.entries.forEach { m ->
+            ChoiceChip(m.label, mode == m) { mode = m; prefs.waShareSlug = m.slug }
+        }
+    }
+    Text(mode.blurb, style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
+    if (mode != WaShareMode.OFF) {
+        Text(
+            "The message carries the patient's name, the accession and the private download link — never a result value.",
+            style = MaterialTheme.typography.bodySmall, color = c.textSecondary,
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = cc,
+                onValueChange = { v -> cc = v.filter { it.isDigit() }.take(4); prefs.waCountryCode = cc },
+                label = { Text("Country code") },
+                prefix = { Text("+") },
+                singleLine = true,
+                modifier = Modifier.width(150.dp),
+            )
+            Text(
+                "Added to a number typed without one — 98765 43210 becomes +$cc 98765 43210.",
+                style = MaterialTheme.typography.bodySmall, color = c.textSecondary, modifier = Modifier.weight(1f),
+            )
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Offer the referring doctor too", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "Adds the doctor on the order as a second recipient, when their number is on file.",
+                    style = MaterialTheme.typography.bodySmall, color = c.textSecondary,
+                )
+            }
+            Switch(checked = toReferrer, onCheckedChange = { toReferrer = it; prefs.waSendToReferrer = it })
+        }
+        if (mode == WaShareMode.API) {
+            Caution("Needs WhatsApp connected to this lab's BNM business, and a patient who messaged the lab in the last 24 hours. Outside that window WhatsApp refuses the message and the app says so — the link option always works.")
+        }
+    }
 }
 
 /**

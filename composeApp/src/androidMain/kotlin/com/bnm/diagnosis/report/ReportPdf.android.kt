@@ -34,7 +34,7 @@ import java.io.FileOutputStream
  * measure pass (finished PdfDocument pages can't be appended to later).
  */
 
-private var reportContext: Context? = null
+internal var reportContext: Context? = null
 
 /** Call once from MainActivity (mirrors initPrintContext). Keep the ACTIVITY
  *  context — PrintManager.print() requires one (single-activity app). */
