@@ -27,7 +27,13 @@ CREATE TABLE IF NOT EXISTS lab_results (
     -- NULL on rows written before then (name-matched, as before). Appended
     -- last: AppDatabaseFactory adds them positionally on existing DBs.
     verified_by_id TEXT,
-    approved_by_id TEXT
+    approved_by_id TEXT,
+    -- When THIS row went out on a printed/shared report (2026-09-11). Per row
+    -- like the other stamps, so a test released ahead of the rest of its order
+    -- (outsourced lines still pending) keeps its own reported time, and the
+    -- order's reported_at becomes the moment the LAST test went out. Appended
+    -- last: AppDatabaseFactory adds it positionally on existing DBs.
+    reported_at TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS lab_results_key ON lab_results(order_id, test_id, parameter_key);
@@ -62,11 +68,23 @@ SELECT count(*) FROM lab_results WHERE order_id = ? AND (value IS NULL OR value 
 countEmptyForTest:
 SELECT count(*) FROM lab_results WHERE order_id = ? AND test_id = ? AND (value IS NULL OR value = '');
 
+-- Order-wide sign-off. A row already signed (per-test release) keeps its
+-- stamp: a signature is never overwritten by a later, broader sign-off.
 markVerified:
-UPDATE lab_results SET verified_by = ?, verified_at = ?, verified_by_id = ? WHERE order_id = ?;
+UPDATE lab_results SET verified_by = ?, verified_at = ?, verified_by_id = ? WHERE order_id = ? AND verified_at IS NULL;
 
 markApproved:
-UPDATE lab_results SET approved_by = ?, approved_at = ?, approved_by_id = ? WHERE order_id = ?;
+UPDATE lab_results SET approved_by = ?, approved_at = ?, approved_by_id = ? WHERE order_id = ? AND approved_at IS NULL;
+
+-- Per-test sign-off and release (2026-09-11): the same stamps, one test at a time.
+markVerifiedForTest:
+UPDATE lab_results SET verified_by = ?, verified_at = ?, verified_by_id = ? WHERE order_id = ? AND test_id = ? AND verified_at IS NULL;
+
+markApprovedForTest:
+UPDATE lab_results SET approved_by = ?, approved_at = ?, approved_by_id = ? WHERE order_id = ? AND test_id = ? AND approved_at IS NULL;
+
+markReportedForTest:
+UPDATE lab_results SET reported_at = ? WHERE order_id = ? AND test_id = ? AND reported_at IS NULL;
 
 -- Signatory-id backfill: rows stamped before ids existed carry only the
 -- display name. Where that name is one staff member's, the id is filled in so
@@ -117,11 +135,12 @@ changedResultOrders:
 SELECT DISTINCT order_id FROM lab_results
 WHERE (entered_at IS NOT NULL AND entered_at > :since)
    OR (verified_at IS NOT NULL AND verified_at > :since)
-   OR (approved_at IS NOT NULL AND approved_at > :since);
+   OR (approved_at IS NOT NULL AND approved_at > :since)
+   OR (reported_at IS NOT NULL AND reported_at > :since);
 
 -- Pull apply: whole-row upsert of one remote result. INSERT OR REPLACE also
 -- resolves a (order,test,param) unique-index clash against a locally-minted
 -- empty row (the remote row id wins; ids are internal).
 upsertFull:
-INSERT OR REPLACE INTO lab_results(id, order_id, test_id, parameter_key, value, unit, flag, ref_display, notes, entered_by, entered_at, verified_by, verified_at, approved_by, approved_at, verified_by_id, approved_by_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+INSERT OR REPLACE INTO lab_results(id, order_id, test_id, parameter_key, value, unit, flag, ref_display, notes, entered_by, entered_at, verified_by, verified_at, approved_by, approved_at, verified_by_id, approved_by_id, reported_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);

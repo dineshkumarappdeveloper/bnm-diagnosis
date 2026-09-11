@@ -315,8 +315,41 @@ data class LabResult(
      *  from before ids were stamped. The NAME prints, the id fetches the ink. */
     val verifiedById: String? = null,
     val approvedById: String? = null,
+    /** When this row went out on a printed/shared report; per row so one test
+     *  can be released ahead of the rest of its order. */
+    val reportedAt: String? = null,
 ) {
     val isEntered: Boolean get() = !value.isNullOrBlank()
+}
+
+/**
+ * How far ONE test of an order has come, read off its result rows — the
+ * per-test pipeline that lets a finished test be signed and reported while an
+ * outsourced one on the same order is still out. Same vocabulary as
+ * [LabStatus] from `entered` up, so the order's status is simply the least
+ * advanced of its tests.
+ */
+object TestStage {
+    const val PENDING = "pending"
+    const val IN_PROGRESS = "in_progress"
+    const val ENTERED = "entered"
+    const val VERIFIED = "verified"
+    const val APPROVED = "approved"
+    const val REPORTED = "reported"
+
+    val ORDER = listOf(PENDING, IN_PROGRESS, ENTERED, VERIFIED, APPROVED, REPORTED)
+
+    fun of(rows: List<LabResult>): String = when {
+        rows.isEmpty() -> PENDING
+        rows.all { it.reportedAt != null } -> REPORTED
+        rows.all { it.approvedAt != null } -> APPROVED
+        rows.all { it.verifiedAt != null } -> VERIFIED
+        rows.all { it.isEntered } -> ENTERED
+        rows.any { it.isEntered } -> IN_PROGRESS
+        else -> PENDING
+    }
+
+    fun rank(stage: String): Int = ORDER.indexOf(stage).coerceAtLeast(0)
 }
 
 /**
@@ -407,6 +440,9 @@ data class WorklistEntry(
     val testCount: Long,
     /** Tests whose every parameter already has a value — the "3 of 7" numerator. */
     val doneCount: Long = 0,
+    /** Tests already out on a report (per-test release) — "2 reported" when
+     *  some are and the order as a whole is not. */
+    val reportedCount: Long = 0,
 )
 
 /** The linear order pipeline. Guards live in [LabRepository.setOrderStatus]. */

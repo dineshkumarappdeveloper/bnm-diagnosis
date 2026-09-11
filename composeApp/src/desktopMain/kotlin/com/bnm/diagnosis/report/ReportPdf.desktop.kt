@@ -358,6 +358,15 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         drawColumn(leftCol, left + pad, y - pad - 9f)
         drawColumn(rightCol, left + colW + pad, y - pad - barH - barGap - 9f)
         y -= boxH + 14f
+        // Per-test release: what this sheet does NOT cover, on every sheet, so
+        // a partial report can never be mistaken for the whole order.
+        if (doc.toFollow.isNotEmpty()) {
+            for (line in wrapText("To follow in a separate report: " + doc.toFollow.joinToString(", "), fontR, 8f, contentW)) {
+                text(left, y - 8f, line, fontR, 8f, gray)
+                y -= 11f
+            }
+            y -= 4f
+        }
     }
 
     /** Code 128 bars as filled rectangles (runs merged) — resolution-independent

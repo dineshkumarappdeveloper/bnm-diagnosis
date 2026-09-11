@@ -432,6 +432,14 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         drawColumn(leftCol, left + pad, y + pad + 9f)
         drawColumn(rightCol, left + colW + pad, y + pad + barH + barGap + 9f)
         y += boxH + 14f
+        // Per-test release note — mirror of the desktop renderer (y grows DOWN).
+        if (doc.toFollow.isNotEmpty()) {
+            for (line in wrapText("To follow in a separate report: " + doc.toFollow.joinToString(", "), 8f, false, contentW)) {
+                text(left, y + 8f, line, 8f, bold = false, GRAY)
+                y += 11f
+            }
+            y += 4f
+        }
     }
 
     /** Code 128 bars as filled rectangles (runs merged); [x]/[yTop] = top-left. */

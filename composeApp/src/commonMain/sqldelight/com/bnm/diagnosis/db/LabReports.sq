@@ -51,6 +51,11 @@ UPDATE lab_reports SET state = 'uploaded', published_at = ?, sha256 = ?, updated
 revokeReport:
 UPDATE lab_reports SET state = 'revoked', updated_at = ? WHERE order_id = ?;
 
+-- A report that grew (another test released under the same token) goes back
+-- in the upload queue so the server copy catches up. Same token, same QR.
+requeueReport:
+UPDATE lab_reports SET state = 'pending', updated_at = ? WHERE order_id = ? AND state = 'uploaded';
+
 -- Drain queue: everything minted but not yet on the server.
 pendingUploads:
 SELECT * FROM lab_reports WHERE state = 'pending' ORDER BY created_at;

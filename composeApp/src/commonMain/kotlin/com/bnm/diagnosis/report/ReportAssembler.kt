@@ -4,6 +4,7 @@ import com.bnm.diagnosis.api.LabApi
 import com.bnm.diagnosis.api.LabSyncDisabledException
 import com.bnm.diagnosis.lab.LabRepository
 import com.bnm.diagnosis.lab.LabStatus
+import com.bnm.diagnosis.lab.TestStage
 import com.bnm.diagnosis.license.LicenseManager
 import com.bnm.diagnosis.staff.Staff
 import com.bnm.diagnosis.staff.StaffRepository
@@ -47,16 +48,33 @@ class ReportAssembler(
         orderId: String,
         labName: String? = null,
         stampReportedNow: Boolean = true,
+        /** Per-test release: only these tests go on the paper, and the order's
+         *  other unreported tests are named as "to follow". Null = the whole
+         *  order, as before. */
+        testIds: Set<String>? = null,
     ): ReportDoc? = withContext(Dispatchers.Default) {
         val order0 = repo.orderById(orderId) ?: return@withContext null
         val patient = repo.patientById(order0.patientId) ?: return@withContext null
-        val order = if (stampReportedNow && order0.reportedAt == null && order0.status == LabStatus.APPROVED) {
-            order0.copy(reportedAt = kotlin.time.Clock.System.now().toString())
-        } else {
-            order0
+        val allTests = repo.orderTests(orderId)
+        val allResults = repo.resultsForOrder(orderId)
+        val tests = if (testIds == null) allTests else allTests.filter { it.testId in testIds }
+        val included = tests.map { it.testId }.toSet()
+        val results = if (testIds == null) allResults else allResults.filter { it.testId in included }
+        val byTest = allResults.groupBy { it.testId }
+        val toFollow = allTests.filter { t ->
+            t.testId !in included && TestStage.of(byTest[t.testId].orEmpty()) != TestStage.REPORTED
+        }.map { it.testName }
+        // "Reported" on the paper: THIS print is the reporting event for any
+        // included test that has not gone out yet; otherwise the latest time an
+        // included row went out (per-test release), else the order's own stamp.
+        val includedApproved = results.isNotEmpty() && results.all { it.approvedAt != null }
+        val now = kotlin.time.Clock.System.now().toString()
+        val reportedAt = when {
+            stampReportedNow && includedApproved && results.any { it.reportedAt == null } -> now
+            stampReportedNow && testIds == null && order0.reportedAt == null && order0.status == LabStatus.APPROVED -> now
+            else -> results.mapNotNull { it.reportedAt }.maxOrNull() ?: order0.reportedAt
         }
-        val tests = repo.orderTests(orderId)
-        val results = repo.resultsForOrder(orderId)
+        val order = order0.copy(reportedAt = reportedAt)
         val catalog = tests.mapNotNull { t -> repo.testById(t.testId)?.let { t.testId to it } }.toMap()
         // Analyzer curves / scattergram, per test — the histogram panel.
         val graphs = repo.graphsForOrder(orderId).groupBy { it.testId }
@@ -92,7 +110,9 @@ class ReportAssembler(
             // in when Verify was pressed is the name (and id) on the row, and
             // their stored signature is what prints on the left.
             verifierSignature = signatureFor(verifiedBy, verifiedById),
-            qr = qrFor(order.id, order.accessionNo, order.status),
+            // A QR needs a report that may be published: the whole order at
+            // approved+, or — per-test release — every test on THIS paper approved.
+            qr = qrFor(order.id, order.accessionNo, publishable = order.status in PUBLISHABLE_STATUSES || includedApproved),
             pagination = prefs.pagination(),
             // The department is the catalog category; the order line only
             // snapshots the test NAME, so it comes from the catalog lookup the
@@ -100,6 +120,7 @@ class ReportAssembler(
             department = { t -> catalog[t.testId]?.category },
             sampleType = { t -> catalog[t.testId]?.sampleType },
             graphsFor = { t -> toReportGraphs(graphs[t.testId].orEmpty()) },
+            toFollow = toFollow,
         )
     }
 
@@ -152,8 +173,8 @@ class ReportAssembler(
      * the printed code is correct with zero network — which is the property
      * that actually matters.
      */
-    private suspend fun qrFor(orderId: String, accessionNo: String, status: String): ReportQr? {
-        if (status !in PUBLISHABLE_STATUSES) return null
+    private suspend fun qrFor(orderId: String, accessionNo: String, publishable: Boolean): ReportQr? {
+        if (!publishable) return null
         if (license.state.value.isStandalone) return null
         val token = runCatching { repo.reportShareToken(orderId, accessionNo) }.getOrNull() ?: return null
         return ReportShare.qrFor(token)
@@ -219,7 +240,11 @@ class ReportUploader(
         var done = 0
         for (row in repo.pendingReportUploads().take(limit)) {
             if (!ReportShare.isWellFormed(row.token)) continue // corrupt row: leave it, don't publish junk
-            val doc = assembler.assemble(row.orderId, stampReportedNow = false) ?: continue
+            // Per-test release: the link resolves to every test signed off so
+            // far (re-queued as more are released); nothing unapproved leaves.
+            val approved = repo.approvedTestIds(row.orderId)
+            if (approved.isEmpty()) continue
+            val doc = assembler.assemble(row.orderId, stampReportedNow = false, testIds = approved) ?: continue
             val path = runCatching { render(doc) }.getOrNull()?.takeIf { it.isNotBlank() } ?: continue
             val bytes = readReportBytes(path) ?: continue
             val result = api.publishReport(

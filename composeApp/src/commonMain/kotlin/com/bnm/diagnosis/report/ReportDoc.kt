@@ -383,6 +383,10 @@ data class ReportDoc(
      *  to continuous (the pre-split layout); the device default lives in
      *  [ReportPrefs] and is applied by the assembler. */
     val pagination: ReportPagination = ReportPagination.CONTINUOUS,
+    /** Tests of this order NOT on this report and not yet reported — printed on
+     *  every sheet under the patient block, so a partial report says it is one
+     *  ("To follow: Serum Electrolytes"). Empty for a complete report. */
+    val toFollow: List<String> = emptyList(),
     val verifiedBy: String?,
     val approvedBy: String?,
     /** When the pathologist approved, "yyyy-MM-dd HH:mm". NABL expects the
@@ -447,6 +451,8 @@ fun buildReportDoc(
      *  ids stamped on the rows; null keeps the name snapshot the rows carry. */
     verifiedByName: String? = null,
     approvedByName: String? = null,
+    /** Names of the order's tests left off this report (per-test release). */
+    toFollow: List<String> = emptyList(),
 ): ReportDoc {
     val age = LabRepository.resolveAgeYears(patient.dob, patient.ageYears)
     val ageLabel = when {
@@ -489,6 +495,7 @@ fun buildReportDoc(
         priority = order.priority.takeIf { !it.equals("routine", ignoreCase = true) }?.uppercase(),
         sections = sections,
         pagination = pagination,
+        toFollow = toFollow.map { it.trim() }.filter { it.isNotEmpty() },
         verifiedBy = verifiedByName ?: results.firstNotNullOfOrNull { it.verifiedBy?.takeIf { v -> v.isNotBlank() } },
         approvedBy = approvedByName ?: results.firstNotNullOfOrNull { it.approvedBy?.takeIf { v -> v.isNotBlank() } },
         // Results carry the sign-off stamp; the order's own approved_at is the

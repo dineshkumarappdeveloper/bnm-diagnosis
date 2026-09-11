@@ -63,7 +63,10 @@ SELECT o.*, p.name AS patient_name, p.sex AS patient_sex, p.dob AS patient_dob, 
           AND NOT EXISTS (SELECT 1 FROM lab_results r
                           WHERE r.order_id = o.id AND r.test_id = t.test_id
                             AND (r.value IS NULL OR trim(r.value) = ''))) AS done_count,
-       (SELECT count(*) FROM lab_order_tests t WHERE t.order_id = o.id) AS test_count
+       (SELECT count(*) FROM lab_order_tests t WHERE t.order_id = o.id) AS test_count,
+       (SELECT count(*) FROM lab_order_tests t WHERE t.order_id = o.id
+          AND EXISTS (SELECT 1 FROM lab_results r
+                      WHERE r.order_id = o.id AND r.test_id = t.test_id AND r.reported_at IS NOT NULL)) AS reported_count
 FROM lab_orders o
 JOIN patients p ON p.id = o.patient_id
 WHERE o.status = ?
@@ -101,7 +104,10 @@ SELECT o.*, p.name AS patient_name, p.sex AS patient_sex, p.dob AS patient_dob, 
           AND NOT EXISTS (SELECT 1 FROM lab_results r
                           WHERE r.order_id = o.id AND r.test_id = t.test_id
                             AND (r.value IS NULL OR trim(r.value) = ''))) AS done_count,
-       (SELECT count(*) FROM lab_order_tests t WHERE t.order_id = o.id) AS test_count
+       (SELECT count(*) FROM lab_order_tests t WHERE t.order_id = o.id) AS test_count,
+       (SELECT count(*) FROM lab_order_tests t WHERE t.order_id = o.id
+          AND EXISTS (SELECT 1 FROM lab_results r
+                      WHERE r.order_id = o.id AND r.test_id = t.test_id AND r.reported_at IS NOT NULL)) AS reported_count
 FROM lab_orders o
 JOIN patients p ON p.id = o.patient_id
 WHERE o.status IN ('registered', 'collected', 'in_progress', 'entered', 'verified', 'approved')

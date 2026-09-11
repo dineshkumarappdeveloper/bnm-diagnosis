@@ -403,16 +403,13 @@ class LabSyncEngine(
                             .executeAsOneOrNull()
                         if (local != null) {
                             val localRes = local.toResult()
-                            if (localRes.stampMs() >= res.stampMs()) continue
-                            // NEVER downgrade a verified/approved local row to an
-                            // incoming copy that lacks those stamps.
-                            if (localRes.verifiedAt != null && res.verifiedAt == null) continue
-                            if (localRes.approvedAt != null && res.approvedAt == null) continue
+                            if (!incomingResultWins(localRes, res)) continue
                         }
                         resQ.upsertFull(res.id, res.orderId, res.testId, res.parameterKey,
                             res.value, res.unit, res.flag, res.refDisplay, res.notes,
                             res.enteredBy, res.enteredAt, res.verifiedBy, res.verifiedAt,
-                            res.approvedBy, res.approvedAt, res.verifiedById, res.approvedById)
+                            res.approvedBy, res.approvedAt, res.verifiedById, res.approvedById,
+                            res.reportedAt)
                     }
                 }
             }
@@ -574,9 +571,9 @@ class LabSyncEngine(
 
     private fun Lab_results.toResult() = LabResult(id, order_id, test_id, parameter_key,
         value_, unit, flag, ref_display, notes, entered_by, entered_at, verified_by,
-        verified_at, approved_by, approved_at, verified_by_id, approved_by_id)
+        verified_at, approved_by, approved_at, verified_by_id, approved_by_id, reported_at)
 
-    private fun LabResult.stampMs(): Long = maxOf(ms(enteredAt), ms(verifiedAt), ms(approvedAt))
+    private fun LabResult.stampMs(): Long = resultStampMs()
 
     private fun catalogFingerprint(tests: List<LabTest>, panels: List<LabPanel>): Long {
         val s = json.encodeToString(ListSerializer(LabTest.serializer()), tests.sortedBy { it.id }) +
@@ -643,3 +640,25 @@ internal fun com.bnm.diagnosis.db.Staff.toStaff(): Staff = Staff(
     username = username, signaturePng = signature_png,
     qualifications = qualifications, registrationNo = registration_no,
 )
+
+// ── Result-row merge rules (file level so the test can pin them) ─────────────
+
+private fun isoMs(iso: String?): Long =
+    if (iso.isNullOrBlank()) 0L else runCatching { Instant.parse(iso).toEpochMilliseconds() }.getOrDefault(0L)
+
+/** The latest audit stamp on a row — what LWW compares. */
+internal fun LabResult.resultStampMs(): Long =
+    maxOf(isoMs(enteredAt), isoMs(verifiedAt), isoMs(approvedAt), isoMs(reportedAt))
+
+/**
+ * Pull merge for one result row: the newer stamp wins, except that a
+ * sign-off or release the local row already carries is NEVER removed by an
+ * incoming copy that lacks it — those are legal audit facts.
+ */
+internal fun incomingResultWins(local: LabResult, incoming: LabResult): Boolean {
+    if (local.resultStampMs() >= incoming.resultStampMs()) return false
+    if (local.verifiedAt != null && incoming.verifiedAt == null) return false
+    if (local.approvedAt != null && incoming.approvedAt == null) return false
+    if (local.reportedAt != null && incoming.reportedAt == null) return false
+    return true
+}

@@ -89,6 +89,8 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
     // Signatory ids on results (2026-09-07) — same order as Results.sq appends them.
     driver.addColumn("lab_results", "verified_by_id", "TEXT")
     driver.addColumn("lab_results", "approved_by_id", "TEXT")
+    // Per-test release (2026-09-11): when each row went out on a report.
+    driver.addColumn("lab_results", "reported_at", "TEXT")
     driver.addColumn("lab_tests", "platform_json", "TEXT")
     driver.execute(null,
         "CREATE TABLE IF NOT EXISTS lab_order_tests (id TEXT NOT NULL PRIMARY KEY, order_id TEXT NOT NULL, " +

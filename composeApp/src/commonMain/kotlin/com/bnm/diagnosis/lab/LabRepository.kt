@@ -762,6 +762,11 @@ class LabRepository(
             require(order.status in ENTRY_OPEN_STATUSES) {
                 "Results are locked once an order is ${order.status}"
             }
+            // Per-test release: a test signed off on its own is locked even
+            // while the rest of the order is still open.
+            require(resQ.resultsForOrderTest(orderId, testId).executeAsList().none { it.verified_at != null }) {
+                "This test's results are verified — locked"
+            }
             val patient = pQ.byId(order.patientId).executeAsOneOrNull()?.toModel()
                 ?: error("Patient not found: ${order.patientId}")
             val test = tQ.testById(testId).executeAsOneOrNull()?.toModel() ?: error("Test not found: $testId")
@@ -834,6 +839,121 @@ class LabRepository(
                 oQ.stampApproved(now, orderId)
             }
         }
+    }
+
+    // ── Per-test release ─────────────────────────────────────────────────────
+    //
+    // An order whose outsourced test is still out must not hold the finished
+    // ones back. Each test can be verified, approved and reported on its own;
+    // the stamps are the SAME per-row audit trio the order-wide path writes,
+    // and the order's status is rolled up from its least advanced test — so
+    // every consumer of `lab_orders.status` (worklist, EMR bridge, QR) keeps a
+    // coherent answer without learning a new vocabulary.
+
+    /** Technologist sign-off for ONE test: every parameter entered, not yet verified. */
+    suspend fun verifyTest(orderId: String, testId: String, by: String, byId: String? = null): Result<Unit> =
+        withContext(Dispatchers.Default) {
+            runCatching {
+                val order = openOrder(orderId)
+                val rows = resQ.resultsForOrderTest(orderId, testId).executeAsList().map { it.toModel() }
+                require(rows.isNotEmpty()) { "No results on ${order.accessionNo} for this test" }
+                require(rows.all { it.isEntered }) { "Enter every result of this test before verifying" }
+                require(rows.none { it.verifiedAt != null }) { "This test is already verified" }
+                val now = nowIso()
+                db.transaction {
+                    resQ.markVerifiedForTest(by, now, byId, orderId, testId)
+                    rollupOrderStatus(orderId, now)
+                }
+            }
+        }
+
+    /** Pathologist sign-off for ONE test: verified, not yet approved. */
+    suspend fun approveTest(orderId: String, testId: String, by: String, byId: String? = null): Result<Unit> =
+        withContext(Dispatchers.Default) {
+            runCatching {
+                val order = openOrder(orderId)
+                val rows = resQ.resultsForOrderTest(orderId, testId).executeAsList().map { it.toModel() }
+                require(rows.isNotEmpty()) { "No results on ${order.accessionNo} for this test" }
+                require(rows.all { it.verifiedAt != null }) { "Verify this test before approving it" }
+                require(rows.none { it.approvedAt != null }) { "This test is already approved" }
+                val now = nowIso()
+                db.transaction {
+                    resQ.markApprovedForTest(by, now, byId, orderId, testId)
+                    rollupOrderStatus(orderId, now)
+                }
+            }
+        }
+
+    /**
+     * The tests in [testIds] went out on a report: stamp them, roll the order
+     * up (REPORTED once the last one is out), and re-queue the share upload so
+     * the QR's PDF grows to match. Already-reported tests are left as they
+     * were; a test that is not approved yet is refused — nothing unsigned
+     * leaves the lab.
+     */
+    suspend fun markReported(orderId: String, testIds: Collection<String>): Result<Unit> = withContext(Dispatchers.Default) {
+        runCatching {
+            val order = oQ.byId(orderId).executeAsOneOrNull()?.toModel() ?: error("Order not found: $orderId")
+            require(order.status != LabStatus.CANCELLED) { "Order ${order.accessionNo} is cancelled" }
+            val now = nowIso()
+            var newlyReported = 0
+            db.transaction {
+                for (testId in testIds.distinct()) {
+                    val rows = resQ.resultsForOrderTest(orderId, testId).executeAsList().map { it.toModel() }
+                    if (rows.isEmpty()) continue
+                    require(rows.all { it.approvedAt != null }) { "A test must be approved before it is reported" }
+                    if (rows.any { it.reportedAt == null }) {
+                        resQ.markReportedForTest(now, orderId, testId)
+                        newlyReported++
+                    }
+                }
+                rollupOrderStatus(orderId, now)
+                if (newlyReported > 0) repQ.requeueReport(now, orderId)
+            }
+        }
+    }
+
+    /** Ids of the order's tests whose every row is approved — what may be printed or published. */
+    suspend fun approvedTestIds(orderId: String): Set<String> = withContext(Dispatchers.Default) {
+        resQ.resultsForOrder(orderId).executeAsList().map { it.toModel() }
+            .groupBy { it.testId }
+            .filterValues { rows -> rows.all { it.approvedAt != null } }
+            .keys
+    }
+
+    private fun openOrder(orderId: String): LabOrder {
+        val order = oQ.byId(orderId).executeAsOneOrNull()?.toModel() ?: error("Order not found: $orderId")
+        require(order.status != LabStatus.CANCELLED && order.status != LabStatus.DELIVERED) {
+            "Order ${order.accessionNo} is ${order.status}"
+        }
+        return order
+    }
+
+    /**
+     * The order is as far along as its LEAST advanced test. Only ever moves
+     * forward, only past `entered` (entry itself walks the earlier stages),
+     * and stamps approved_at / reported_at when the last test gets there.
+     * Called inside the signer's transaction.
+     */
+    private fun rollupOrderStatus(orderId: String, now: String) {
+        val order = oQ.byId(orderId).executeAsOneOrNull()?.toModel() ?: return
+        if (order.status == LabStatus.CANCELLED || order.status == LabStatus.DELIVERED) return
+        val tests = oQ.testsForOrder(orderId).executeAsList()
+        if (tests.isEmpty()) return
+        val byTest = resQ.resultsForOrder(orderId).executeAsList().map { it.toModel() }.groupBy { it.testId }
+        val slowest = tests.minOf { TestStage.rank(TestStage.of(byTest[it.test_id].orEmpty())) }
+        val target = when (TestStage.ORDER[slowest]) {
+            TestStage.REPORTED -> LabStatus.REPORTED
+            TestStage.APPROVED -> LabStatus.APPROVED
+            TestStage.VERIFIED -> LabStatus.VERIFIED
+            else -> return
+        }
+        if (LabStatus.FLOW.indexOf(target) <= LabStatus.FLOW.indexOf(order.status)) return
+        oQ.setStatus(target, now, orderId)
+        if (LabStatus.FLOW.indexOf(target) >= LabStatus.FLOW.indexOf(LabStatus.APPROVED) && order.approvedAt == null) {
+            oQ.stampApproved(now, orderId)
+        }
+        if (target == LabStatus.REPORTED && order.reportedAt == null) oQ.stampReported(now, orderId)
     }
 
     // ── Signatory ids on old rows ───────────────────────────────────────────
@@ -1022,7 +1142,7 @@ class LabRepository(
 
     private fun Lab_results.toModel() = LabResult(id, order_id, test_id, parameter_key, value_, unit,
         flag, ref_display, notes, entered_by, entered_at, verified_by, verified_at, approved_by, approved_at,
-        verified_by_id, approved_by_id)
+        verified_by_id, approved_by_id, reported_at)
 
     private fun Lab_reports.toModel() = LabReportShare(
         orderId = order_id, token = token, accessionNo = accession_no, state = state,
@@ -1042,6 +1162,7 @@ class LabRepository(
         patientDob = patient_dob,
         patientAgeYears = patient_age_years,
         testCount = test_count,
+        reportedCount = reported_count,
         doneCount = done_count,
     )
 
@@ -1053,6 +1174,7 @@ class LabRepository(
         patientDob = patient_dob,
         patientAgeYears = patient_age_years,
         testCount = test_count,
+        reportedCount = reported_count,
         doneCount = done_count,
     )
 

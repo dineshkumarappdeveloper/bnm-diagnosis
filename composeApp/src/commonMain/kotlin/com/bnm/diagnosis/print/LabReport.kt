@@ -34,6 +34,9 @@ fun renderLabReport(
     paramName: (LabResult) -> String = { it.parameterKey },
     /** Printed specimen for a test ("Serum"), already display-formed; null = no line. */
     sampleType: (LabOrderTest) -> String? = { null },
+    /** Tests of the order left off this slip (per-test release) — named so the
+     *  slip is never mistaken for the whole order. */
+    toFollow: List<String> = emptyList(),
 ): String {
     val w = widthChars.coerceIn(32, 80)
     val sb = StringBuilder()
@@ -63,6 +66,7 @@ fun renderLabReport(
     if (!order.priority.equals("routine", ignoreCase = true)) ln("Priority  : ${order.priority.uppercase()}")
     ln("Registered: ${localStamp(order.createdAt) ?: order.createdAt.take(10)}")
     order.reportedAt?.let { ln("Reported  : ${localStamp(it) ?: it.take(10)}") }
+    if (toFollow.isNotEmpty()) wrap("To follow : " + toFollow.joinToString(", "))
     rule()
 
     // ── Per-test result sections ──
