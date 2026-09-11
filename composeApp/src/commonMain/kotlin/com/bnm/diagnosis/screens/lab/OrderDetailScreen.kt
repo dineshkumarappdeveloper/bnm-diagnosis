@@ -104,6 +104,8 @@ import com.bnm.diagnosis.report.ReportShare
 import com.bnm.diagnosis.report.WaShareMode
 import com.bnm.diagnosis.report.openUrl
 import com.bnm.diagnosis.report.waDeepLink
+import com.bnm.diagnosis.report.shareFile
+import com.bnm.diagnosis.report.waHandedOver
 import com.bnm.diagnosis.report.waPhone
 import com.bnm.diagnosis.report.waReportCaption
 import com.bnm.diagnosis.report.waReportFilename
@@ -230,6 +232,7 @@ fun OrderDetailScreen(
     val waMode = remember { reportPrefs.waShareMode() }
     val waCountry = remember { reportPrefs.waCountryCode }
     val waToReferrer = remember { reportPrefs.waSendToReferrer }
+    val waSendPdf = remember { reportPrefs.waSendPdf }
     val standalone = remember { LicenseManager().state.value.isStandalone }
 
     var order by remember { mutableStateOf<LabOrder?>(null) }
@@ -1100,9 +1103,10 @@ fun OrderDetailScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        when (waMode) {
-                            WaShareMode.API -> "The lab's WhatsApp Business number sends the report PDF."
-                            else -> "WhatsApp opens with the message ready — press send there."
+                        when {
+                            waMode == WaShareMode.API -> "The lab's WhatsApp Business number sends the report PDF."
+                            waSendPdf -> "WhatsApp opens with the report PDF attached — send it there."
+                            else -> "WhatsApp opens with the message and the download link — press send there."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1127,7 +1131,7 @@ fun OrderDetailScreen(
                         label = { Text("Or another number") }, singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    if (standalone) {
+                    if (standalone && !waSendPdf) {
                         Text(
                             "Offline edition: the message says the report is ready, without a download link.",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1169,9 +1173,25 @@ fun OrderDetailScreen(
                                     }
                                 }
                                 else -> {
-                                    val text = waReportMessage(recipientName, labName, o.accessionNo, url, doctor)
-                                    note = openUrl(waDeepLink(phone, text))
-                                    if (note?.startsWith("Opened") == true) markReported(null)
+                                    // The file beats a link: WhatsApp cannot attach one
+                                    // from a wa.me link, but the platform share can, and
+                                    // the PDF we already render for printing is the same
+                                    // document. Falls back to the link when there is no
+                                    // file (iOS) or the lab chose links.
+                                    val released = repo.approvedTestIds(o.id)
+                                    val doc = if (!waSendPdf) null
+                                    else assembler.assemble(o.id, labName, testIds = released.ifEmpty { null })
+                                    val pdf = doc?.let { withContext(Dispatchers.Default) { writeLabReportPdf(it) } }
+                                        ?.takeIf { it.isNotBlank() }
+                                    note = if (pdf != null) {
+                                        // No link in the text — the report is attached.
+                                        shareFile(pdf, "application/pdf",
+                                            waReportMessage(recipientName, labName, o.accessionNo, null, doctor), phone)
+                                    } else {
+                                        openUrl(waDeepLink(phone,
+                                            waReportMessage(recipientName, labName, o.accessionNo, url, doctor)))
+                                    }
+                                    if (waHandedOver(note)) markReported(null)
                                 }
                             }
                             sending = false

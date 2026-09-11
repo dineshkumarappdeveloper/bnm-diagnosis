@@ -639,6 +639,21 @@ private fun ColumnScope.WhatsAppBlock() {
             }
             Switch(checked = toReferrer, onCheckedChange = { toReferrer = it; prefs.waSendToReferrer = it })
         }
+        if (mode == WaShareMode.LINK) {
+            var sendPdf by remember { mutableStateOf(prefs.waSendPdf) }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Attach the report PDF", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (sendPdf)
+                            "The patient gets the file itself. On this PC the report is copied to the clipboard and WhatsApp opens at the chat — one paste attaches it. On a phone the share sheet does it."
+                        else "The message carries a download link instead of the file.",
+                        style = MaterialTheme.typography.bodySmall, color = c.textSecondary,
+                    )
+                }
+                Switch(checked = sendPdf, onCheckedChange = { sendPdf = it; prefs.waSendPdf = it })
+            }
+        }
         if (mode == WaShareMode.API) {
             Caution("Needs WhatsApp connected to this lab's BNM business, and a patient who messaged the lab in the last 24 hours. Outside that window WhatsApp refuses the message and the app says so — the link option always works.")
         }

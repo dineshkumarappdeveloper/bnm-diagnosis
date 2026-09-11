@@ -90,6 +90,16 @@ class ReportPrefs {
         get() = s.getString(K_WA_CC, "91").filter { it.isDigit() }.ifEmpty { "91" }
         set(v) = s.putString(K_WA_CC, v.filter { it.isDigit() }.take(4).ifEmpty { "91" })
 
+    /**
+     * Send the report PDF itself rather than a download link, when WhatsApp
+     * opens from this device ([WaShareMode.LINK]). On/by default: a patient
+     * would rather have the file than a link, and the file needs no server —
+     * which is what makes this work on an offline licence too.
+     */
+    var waSendPdf: Boolean
+        get() = s.getBoolean(K_WA_PDF, true)
+        set(v) = s.putBoolean(K_WA_PDF, v)
+
     /** Offer the referring doctor as a recipient too (their number is on the referrer row). */
     var waSendToReferrer: Boolean
         get() = s.getBoolean(K_WA_REFERRER, false)
@@ -118,5 +128,6 @@ class ReportPrefs {
         const val K_WA_MODE = "report_wa_mode"
         const val K_WA_CC = "report_wa_country_code"
         const val K_WA_REFERRER = "report_wa_to_referrer"
+        const val K_WA_PDF = "report_wa_send_pdf"
     }
 }

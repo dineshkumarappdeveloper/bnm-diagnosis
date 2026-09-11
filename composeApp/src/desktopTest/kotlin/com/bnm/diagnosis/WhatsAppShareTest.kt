@@ -4,6 +4,7 @@ import com.bnm.diagnosis.report.WaShareMode
 import com.bnm.diagnosis.report.hasWaPhone
 import com.bnm.diagnosis.report.waBillMessage
 import com.bnm.diagnosis.report.waDeepLink
+import com.bnm.diagnosis.report.waHandedOver
 import com.bnm.diagnosis.report.waPhone
 import com.bnm.diagnosis.report.waReportCaption
 import com.bnm.diagnosis.report.waReportFilename
@@ -83,6 +84,25 @@ class WhatsAppShareTest {
         assertTrue("%E2%82%B9" in utf && "%E2%80%94" in utf, utf)
         // Unreserved characters are left alone.
         assertTrue("ACC-1" in link, link)
+    }
+
+    @Test
+    fun `only a real hand-over marks the report as sent`() {
+        // What the platform bridges answer when it worked.
+        assertTrue(waHandedOver("Opened WhatsApp"))
+        assertTrue(waHandedOver("Opened WhatsApp — choose the chat and send"))
+        assertTrue(waHandedOver("WhatsApp opened — press Cmd+V to attach the report, then send"))
+        assertTrue(waHandedOver("Report copied — open the chat and press Ctrl+V to attach it"))
+        assertTrue(waHandedOver("Sent to 919876543210"))
+        // And when it did not.
+        assertFalse(waHandedOver("Could not open WhatsApp — the report is saved at /tmp/x.pdf"))
+        assertFalse(waHandedOver("The report file could not be found"))
+        assertFalse(waHandedOver("No app on this device can share the report"))
+        assertFalse(waHandedOver("Not ready yet — try again"))
+        assertFalse(waHandedOver("Sharing the file arrives on iOS later"))
+        assertFalse(waHandedOver("Share failed: permission denied"))
+        assertFalse(waHandedOver(null))
+        assertFalse(waHandedOver("  "))
     }
 
     @Test
