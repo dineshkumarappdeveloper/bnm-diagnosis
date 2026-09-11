@@ -25,6 +25,7 @@ data class LicenseClaims(
     val businessId: String?, // biz
     val edition: String?,    // ed — "connected" | "standalone" (absent = connected)
     val licExp: Long?,       // subscription license expiry (epoch seconds)
+    val graceSeconds: Long?, // gr — offline grace past licExp; absent = 45d default
     val issuedAt: Long?,     // iat
     val exp: Long?,          // JWS exp (subscription only: expiry + 45d grace)
 )
@@ -85,7 +86,27 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
         const val EDITION_CONNECTED = "connected"
         const val EDITION_STANDALONE = "standalone"
 
-        /** Subscriptions keep working 45 days past lic_exp (offline grace). */
+        /**
+         * Pure decision core behind [isDifferentTenant], split out so it can be
+         * tested without a Settings store — on JVM that is the REAL user
+         * preferences, and a test that wrote to it would clobber the operator's
+         * actual licence.
+         */
+        internal fun differentTenant(
+            storedFingerprint: String?,
+            keyFingerprint: String,
+            hasLocalData: Boolean,
+        ): Boolean {
+            val current = storedFingerprint ?: return hasLocalData
+            return current != keyFingerprint
+        }
+
+        /**
+         * Default offline grace past lic_exp. Only a fallback now: the server
+         * signs the actual allowance into the `gr` claim, because a fixed 45
+         * days is right for a lapsed annual subscription and absurd for a
+         * 24-hour trial key (it would outlive the term 45x).
+         */
         private const val GRACE_SECONDS = 45L * 24 * 60 * 60
     }
 
@@ -117,14 +138,19 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
      * already carrying data for — i.e. activating it would put another lab's
      * records under a new name, and sync them into the new tenant.
      *
-     * False for a fresh device and for re-activating the same licence (refresh,
-     * seat replacement, re-install against the same lab), so the common cases
-     * never prompt.
+     * False for re-activating the same licence (refresh, seat replacement,
+     * re-install against the same lab), so the common case never prompts.
+     *
+     * [hasLocalData] settles the case with NO recorded fingerprint. Absent is
+     * not the same as "fresh device": an install activated before fingerprints
+     * were recorded — or one whose database arrived through the BNMDiagnosis
+     * data-dir migration — holds a full lab yet has nothing to compare against.
+     * Reading that as "fresh" let a different licence take over another lab's
+     * records silently, which is the very leak this guard exists to stop. With
+     * no fingerprint we therefore defer to whether there is anything to lose.
      */
-    fun isDifferentTenant(key: String): Boolean {
-        val current = licenseFingerprint ?: return false
-        return current != fingerprintOf(key)
-    }
+    fun isDifferentTenant(key: String, hasLocalData: Boolean = false): Boolean =
+        differentTenant(licenseFingerprint, fingerprintOf(key), hasLocalData)
 
     /** sha256 of the normalised key — matches how the server hashes it. */
     fun fingerprintOf(key: String): String = sha256Hex(key.trim().uppercase())
@@ -207,6 +233,7 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
             businessId = payload.str("biz"),
             edition = payload.str("ed"),
             licExp = payload["lic_exp"]?.jsonPrimitive?.longOrNull,
+            graceSeconds = payload["gr"]?.jsonPrimitive?.longOrNull,
             issuedAt = payload["iat"]?.jsonPrimitive?.longOrNull,
             exp = payload["exp"]?.jsonPrimitive?.longOrNull,
         )
@@ -224,9 +251,11 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
         if (c.issuer != null && c.issuer != ISSUER) return false
         val mode = c.mode ?: settings.getStringOrNull(KEY_MODE) ?: MODE_PERPETUAL
         if (mode != MODE_SUBSCRIPTION) return true // perpetual never locks
-        // Subscription: lic_exp + grace; fall back to the JWS exp (which the
-        // server already mints as expiry + 45d grace).
-        val gate = c.licExp?.plus(GRACE_SECONDS) ?: c.exp ?: return true
+        // Subscription: lic_exp + the grace the server signed (legacy tokens
+        // carry no `gr` claim → the 45-day default); fall back to the JWS exp,
+        // which the server already mints as expiry + that same grace.
+        val grace = c.graceSeconds?.takeIf { it >= 0 } ?: GRACE_SECONDS
+        val gate = c.licExp?.plus(grace) ?: c.exp ?: return true
         return trustedNowSeconds() <= gate
     }
 

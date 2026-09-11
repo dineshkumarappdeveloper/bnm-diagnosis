@@ -1,6 +1,15 @@
 package com.bnm.lab.lab
 
 /**
+ * NO LONGER SHIPPED — retained as a test fixture only.
+ *
+ * The app now bootstraps from the GLOBAL master catalog (`lab_test_catalog`,
+ * 223 tests) instead: see the catalog bootstrap in App.kt and
+ * [com.bnm.lab.sync.MasterCatalogImporter]. This set overlapped the master
+ * catalog on 22 codes and was the THINNER copy of each (its CBC carries 13
+ * analytes against the master's 22), so seeding it first meant a lab kept the
+ * poorer version of every overlapping test. Do not wire it back into App.kt.
+ *
  * Starter catalog: ~40 standard Indian diagnostic tests with real parameters,
  * units and reference ranges — sex-split where medically standard (Hb, PCV,
  * RBC, uric acid, creatinine, SGOT/SGPT, HDL, ESR) and AGE-BANDED for the six

@@ -1,5 +1,6 @@
 package com.bnm.lab.api
 
+import com.bnm.lab.lab.TestParameter
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -156,9 +157,39 @@ data class PlatformLabTest(
     val name: String = "Lab test",
     @SerialName("selling_price") val sellingPrice: Double? = null,
     val currency: String? = null,
+    /** Discipline from the product's first category ("Haematology", …).
+     *  Nullable and defaulted: a server that predates this field still parses. */
+    val category: String? = null,
     @SerialName("lab_config") val labConfig: JsonObject? = null,
     @SerialName("updated_at") val updatedAt: String? = null,
     val seq: Long = 0,
+)
+
+/**
+ * One row of the GLOBAL master test catalog (`lab_test_catalog`), served by
+ * `admin-lab/master-catalog`.
+ *
+ * Note what is NOT here: a price. The master catalog is reference data about
+ * MEDICINE — every lab prices its own menu, so an imported test lands at 0 and
+ * the lab sets its own price locally.
+ *
+ * `parameters` is stored on the platform in the LIMS shape ALREADY, with the
+ * same field names as [TestParameter]/[RefRange], so it deserialises straight
+ * into the local model. That is deliberate: the connected-edition importer has
+ * to flatten lab_config into reference_ranges and regroup them BY ANALYTE NAME,
+ * which loses a rangeless analyte unless it emits an empty row. Reading the
+ * canonical shape directly skips that hazard entirely.
+ */
+@Serializable
+data class MasterCatalogTest(
+    val code: String,
+    val name: String,
+    val category: String? = null,
+    @SerialName("sample_type") val sampleType: String = "blood",
+    val method: String? = null,
+    @SerialName("tat_hours") val tatHours: Double? = null,
+    val parameters: List<TestParameter> = emptyList(),
+    @SerialName("sort_order") val sortOrder: Int = 0,
 )
 
 /**
@@ -383,6 +414,28 @@ class LabApi(
             if (!resp.status.isSuccess()) syncFail(resp.status, text)
             json.parseToJsonElement(text).jsonObject["tests"]?.let {
                 json.decodeFromJsonElement(ListSerializer(PlatformLabTest.serializer()), it)
+            } ?: emptyList()
+        }
+    }
+
+    /**
+     * `GET admin-lab/master-catalog` — the global master test catalog.
+     *
+     * Unlike every other sync call this one is allowed on a STANDALONE licence:
+     * it returns no tenant data, only public clinical reference data. It is
+     * invoked ONLY from an explicit user action, never from the sync loop, so
+     * an offline lab still makes no background requests.
+     */
+    suspend fun masterCatalog(): Result<List<MasterCatalogTest>> = withContext(Dispatchers.Default) {
+        runCatching {
+            val auth = deviceAuth()
+            val resp = httpClient.get(edgeUrl("/master-catalog")) {
+                header(auth.first, auth.second)
+            }
+            val text = resp.bodyAsText()
+            if (!resp.status.isSuccess()) syncFail(resp.status, text)
+            json.parseToJsonElement(text).jsonObject["tests"]?.let {
+                json.decodeFromJsonElement(ListSerializer(MasterCatalogTest.serializer()), it)
             } ?: emptyList()
         }
     }

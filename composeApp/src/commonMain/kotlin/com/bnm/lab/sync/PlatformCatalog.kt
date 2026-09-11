@@ -66,7 +66,10 @@ class PlatformCatalogImporter(private val db: AppDatabase, private val json: Jso
                     // — never re-derived once assigned.
                     code = existing?.code ?: deriveCode(p.name, p.id),
                     name = p.name,
-                    category = existing?.category,
+                    // The lab's own choice wins (it may have re-filed a test);
+                    // otherwise take the platform's discipline. Before the
+                    // server sent one, every imported test landed uncategorised.
+                    category = existing?.category?.takeIf { it.isNotBlank() } ?: p.category?.takeIf { it.isNotBlank() },
                     price = p.sellingPrice ?: existing?.price ?: 0.0,
                     sampleType = cfg?.sampleType?.takeIf { it.isNotBlank() } ?: "blood",
                     method = cfg?.method,

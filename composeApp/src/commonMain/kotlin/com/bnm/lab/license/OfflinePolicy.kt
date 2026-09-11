@@ -43,10 +43,30 @@ object OfflinePolicy {
     /** Sending a report through the WhatsApp Business API (the server refuses it too). */
     fun allowsWhatsappApi(standalone: Boolean): Boolean = !standalone
 
+    /**
+     * Pulling the GLOBAL master test catalog (`lab_test_catalog`) — public
+     * clinical reference data. No tenant data travels in either direction.
+     *
+     * This is the one call an offline licence may make AFTER activation, and it
+     * belongs to the same category as activation: the operator starts it by
+     * pressing a button. It never runs on a timer, at startup, or as part of a
+     * sync sweep — hence [userInitiated], which is the whole gate.
+     *
+     * Why an offline lab needs it: with no business there are no `products` to
+     * sync, so without this its catalog is the bundled ~40-test starter set
+     * forever, with the national set permanently out of reach.
+     *
+     * What a standalone customer is promised is that their patients' data never
+     * leaves the building and that nothing happens behind their back — not that
+     * the machine may never fetch a public list of tests when asked to.
+     */
+    fun allowsMasterCatalogPull(userInitiated: Boolean): Boolean = userInitiated
+
     /** One line for the operator: what this licence does with the network. */
     fun summary(standalone: Boolean): String = if (standalone) {
         "Offline edition — after activation, nothing leaves this computer: no sync, " +
-            "no report upload, no QR link, no licence check, no update check."
+            "no report upload, no QR link, no licence check, no update check. The only " +
+            "network call is fetching the master test catalog, and only when you ask for it."
     } else {
         "Connected edition — results sync to BNM, report QR links resolve, and updates are checked."
     }

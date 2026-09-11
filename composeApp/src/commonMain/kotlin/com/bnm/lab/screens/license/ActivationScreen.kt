@@ -120,10 +120,19 @@ fun ActivationScreen(
     var replaceCandidate by remember { mutableStateOf<LabSeatDevice?>(null) }
     // Set when the entered key belongs to a DIFFERENT licence and this device
     // still holds another lab's records; drives the erase-confirmation dialog.
-    var pendingTenantSwitch by remember { mutableStateOf<Pair<String, TenantRowCounts>?>(null) }
+    // Counts are nullable: a failed count must still be able to raise the dialog
+    // rather than fall through to a silent decision either way.
+    var pendingTenantSwitch by remember { mutableStateOf<Pair<String, TenantRowCounts?>?>(null) }
     val labRepo = LocalLabRepository.current
 
-    fun runActivate(replaceDeviceId: String? = null, eraseConfirmed: Boolean = false) {
+    fun runActivate(
+        replaceDeviceId: String? = null,
+        eraseConfirmed: Boolean = false,
+        /** Decided ONCE in the confirmation step below and threaded through, so
+         *  the "ask" and the "wipe" can never disagree about what is happening —
+         *  re-deriving it here risked prompting and then not erasing, or worse. */
+        wipeFirst: Boolean = false,
+    ) {
         if (loading) return
         val k = key.trim()
         if (k.length < 8) {
@@ -134,15 +143,23 @@ fun ActivationScreen(
         // must never proceed silently: the old lab's patients would appear under
         // the new lab's name and then sync into the new tenant. Ask first — and
         // ask BEFORE the network call, so no seat is consumed on a cancel.
-        if (!eraseConfirmed && licenseManager.isDifferentTenant(k)) {
+        if (!eraseConfirmed) {
             scope.launch {
+                // Read the counts FIRST: on an install with no recorded
+                // fingerprint they are what decides whether this is a tenant
+                // switch at all.
                 val counts = runCatching { labRepo.tenantRowCounts() }.getOrNull()
-                if (counts != null && !counts.isEmpty) {
-                    pendingTenantSwitch = k to counts
-                    return@launch
+                // A count that FAILED is not evidence of an empty device. Treat
+                // unknown as "there is something here" so the fallback is always
+                // to ask — never to erase silently, never to adopt silently.
+                val hasLocalData = counts == null || !counts.isEmpty
+                when {
+                    !licenseManager.isDifferentTenant(k, hasLocalData) ->
+                        runActivate(replaceDeviceId, eraseConfirmed = true)
+                    hasLocalData -> pendingTenantSwitch = k to counts
+                    // Different licence, but nothing stored — nothing to erase.
+                    else -> runActivate(replaceDeviceId, eraseConfirmed = true)
                 }
-                // Nothing stored locally — nothing to erase, just carry on.
-                runActivate(replaceDeviceId, eraseConfirmed = true)
             }
             return
         }
@@ -150,7 +167,7 @@ fun ActivationScreen(
         loading = true
         errorMessage = null
         scope.launch {
-            if (eraseConfirmed && licenseManager.isDifferentTenant(k)) {
+            if (wipeFirst) {
                 // Wipe BEFORE saving the new activation, so a crash in between
                 // leaves the device unlicensed-but-clean rather than licensed to
                 // the new lab while still holding the old lab's data. Analyzer
@@ -397,7 +414,7 @@ fun ActivationScreen(
                 Column {
                     Text(
                         "${licenseManager.state.value.labName ?: "The current lab"} has " +
-                            "${counts.summary} stored on this device.",
+                            "${counts?.summary ?: "records"} stored on this device.",
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
@@ -420,7 +437,7 @@ fun ActivationScreen(
                     onClick = {
                         pendingTenantSwitch = null
                         key = pendingKey
-                        runActivate(eraseConfirmed = true)
+                        runActivate(eraseConfirmed = true, wipeFirst = true)
                     },
                 ) { Text("Erase and activate", color = MaterialTheme.colorScheme.error) }
             },

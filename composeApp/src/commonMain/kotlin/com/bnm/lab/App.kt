@@ -52,7 +52,6 @@ import com.bnm.lab.db.createAppDatabase
 import com.bnm.lab.instruments.InstrumentEngine
 import com.bnm.lab.lab.LabRepository
 import com.bnm.lab.lab.LocalLabRepository
-import com.bnm.lab.lab.SeedCatalog
 import com.bnm.lab.license.LicenseManager
 import com.bnm.lab.license.OfflinePolicy
 import com.bnm.lab.navigation.GuardedRoute
@@ -65,6 +64,7 @@ import com.bnm.lab.screens.billing.CustomerDetailsScreen
 import com.bnm.lab.screens.billing.InvoiceDetailScreen
 import com.bnm.lab.screens.business.BusinessSelectorScreen
 import com.bnm.lab.screens.lab.CatalogScreen
+import com.bnm.lab.sync.MasterCatalogImporter
 import com.bnm.lab.screens.lab.EmrInboxScreen
 import com.bnm.lab.screens.lab.LabHomeScreen
 import com.bnm.lab.screens.lab.NewOrderScreen
@@ -126,9 +126,8 @@ fun App() {
     // restarted seat comes back to the sign-in grid. ──
     val staffRepo = remember { StaffRepository(database, ApiClient.json) }
     val staffSession = remember { StaffSession() }
+    val licenseState by licenseManager.state.collectAsState()
 
-    // First-run seed: ~40 standard tests + panels, only when the catalog is empty.
-    LaunchedEffect(Unit) { runCatching { SeedCatalog.seedIfEmpty(labRepo) } }
     // Old result rows carry only the signatory's NAME; give them the person's
     // id so a reprint follows a rename (the seeded "Lab Owner" above all).
     LaunchedEffect(Unit) {
@@ -152,6 +151,32 @@ fun App() {
     // ── License (P2): activation + device management via admin-lab
     // (licenseManager itself is created above, before BillingApi) ──
     val labApi = remember { LabApi(httpClient, deviceTokenProvider = { licenseManager.deviceToken() }) }
+
+    // Catalog bootstrap — the MASTER catalog, not a bundled starter set.
+    //
+    // An OFFLINE lab has no business whose `products` it could sync, so the
+    // global `lab_test_catalog` is where its menu comes from. This runs only
+    // when the catalog is EMPTY, which is exactly two moments: the first launch
+    // after activation, and the first launch after a tenant-switch wipe. Both
+    // sit right next to the one online moment a standalone licence has.
+    //
+    // It replaced a bundled ~40-test starter catalog. That set overlapped the
+    // master catalog on 22 codes and was the THINNER copy of each (its CBC
+    // carried 13 analytes against the master's 22), so a lab that seeded it and
+    // then pulled kept the poorer version of every overlapping test.
+    //
+    // Failure is deliberately quiet: the catalog screen's "Pull master catalog"
+    // is the retry, and a lab with no connection at first launch is not blocked
+    // from anything else.
+    LaunchedEffect(licenseState.licensed, licenseState.edition) {
+        if (!licenseState.licensed || !licenseState.isStandalone) return@LaunchedEffect
+        if (licenseManager.deviceToken().isNullOrEmpty()) return@LaunchedEffect
+        if (runCatching { labRepo.countTests() }.getOrDefault(1L) > 0L) return@LaunchedEffect
+        runCatching {
+            MasterCatalogImporter(database, ApiClient.json)
+                .apply(labApi.masterCatalog().getOrThrow())
+        }
+    }
 
     // ── P3: additive lab sync (push/pull lab_entities + EMR inbox). The app is
     // the system of record — every phase is best-effort and never blocks UI. ──
@@ -630,7 +655,35 @@ fun App() {
                     }
 
                     composable(Screen.Catalog.route) {
-                        CatalogScreen(onBack = { navController.popBackStack() })
+                        CatalogScreen(
+                            onBack = { navController.popBackStack() },
+                            // OFFLINE edition only, and NOT because the platform
+                            // sweep would prune these — it cannot, since it is
+                            // scoped to `platform_product_id IS NOT NULL` and
+                            // master rows carry NULL. The real hazard is DUPLICATE
+                            // ROWS: master-pull "CBC" on a connected device, then
+                            // let Studio publish a Complete Blood Count product —
+                            // PlatformCatalogImporter derives the code "CBC", finds
+                            // it taken by a different id, and falls back to the
+                            // product id, leaving the lab with two CBC entries.
+                            // A connected lab's catalog is authored in
+                            // Studio/BNMAdmin as `products`, which already has its
+                            // own one-click import of this same master catalog —
+                            // that is where a connected lab gets these tests.
+                            // An offline lab has no business and no products, so
+                            // this is its only route to the national set.
+                            onPullMasterCatalog = if (
+                                licState.isStandalone &&
+                                licenseManager.deviceToken() != null &&
+                                OfflinePolicy.allowsMasterCatalogPull(userInitiated = true)
+                            ) {
+                                {
+                                    val pulled = labApi.masterCatalog().getOrThrow()
+                                    val outcome = MasterCatalogImporter(database, ApiClient.json).apply(pulled)
+                                    outcome.added to outcome.skipped
+                                }
+                            } else null,
+                        )
                     }
 
                     composable(Screen.CreateInvoice.route) {

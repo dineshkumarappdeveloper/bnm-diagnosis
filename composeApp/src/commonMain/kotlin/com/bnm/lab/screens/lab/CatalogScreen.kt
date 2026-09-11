@@ -76,9 +76,20 @@ private val SAMPLE_TYPES = listOf("blood", "serum", "urine", "stool", "swab", "o
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CatalogScreen(onBack: () -> Unit) {
+fun CatalogScreen(
+    onBack: () -> Unit,
+    /**
+     * Fetch the global master test catalog and merge it in, returning
+     * (added, skipped). Null hides the action entirely — the host decides
+     * whether this licence may pull (see OfflinePolicy.allowsMasterCatalogPull),
+     * so this screen stays unaware of editions and network policy.
+     */
+    onPullMasterCatalog: (suspend () -> Pair<Int, Int>)? = null,
+) {
     val repo = LocalLabRepository.current
     val scope = rememberCoroutineScope()
+    var pulling by remember { mutableStateOf(false) }
+    var pullResult by remember { mutableStateOf<String?>(null) }
     var tab by remember { mutableStateOf(0) }
     var search by remember { mutableStateOf("") }
     var tests by remember { mutableStateOf<List<LabTest>>(emptyList()) }
@@ -99,10 +110,62 @@ fun CatalogScreen(onBack: () -> Unit) {
                 navigationIcon = {
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
                 },
+                actions = {
+                    if (onPullMasterCatalog != null) {
+                        TextButton(
+                            enabled = !pulling,
+                            onClick = onClick@{
+                                // `enabled` is only re-evaluated at recomposition,
+                                // so two events delivered in the SAME frame (a
+                                // double-click, or an accessibility press that
+                                // arrives twice) both get through it and start two
+                                // pulls. The import is transactional and
+                                // insert-only so nothing is corrupted, but the
+                                // second pull finds everything present and
+                                // overwrites the summary with "already up to
+                                // date" — the lab is told nothing was imported
+                                // when 201 tests just landed. Guard on the state
+                                // itself, which IS updated synchronously.
+                                if (pulling) return@onClick
+                                pulling = true
+                                pullResult = null
+                                scope.launch {
+                                    val r = runCatching { onPullMasterCatalog() }
+                                    pulling = false
+                                    pullResult = r.fold(
+                                        onSuccess = { (added, skipped) ->
+                                            when {
+                                                added == 0 && skipped == 0 -> "The master catalog is empty."
+                                                added == 0 -> "Already up to date — all $skipped tests are in your catalog."
+                                                skipped == 0 -> "Added $added tests."
+                                                // Say what was left alone and WHY: a lab that edited
+                                                // a price or a range must not think it was overwritten.
+                                                else -> "Added $added tests. Kept your existing $skipped unchanged."
+                                            }
+                                        },
+                                        onFailure = {
+                                            it.message ?: "Couldn't reach the catalog — check your connection."
+                                        },
+                                    )
+                                    refresh++
+                                }
+                            },
+                        ) { Text(if (pulling) "Pulling…" else "Pull master catalog") }
+                    }
+                },
             )
         },
     ) { inner ->
         Column(Modifier.padding(inner).fillMaxSize()) {
+            pullResult?.let { msg ->
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(msg, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { pullResult = null }) { Text("Dismiss") }
+                }
+            }
             PrimaryTabRow(selectedTabIndex = tab) {
                 Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Tests (${tests.size})") })
                 Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Panels (${panels.size})") })

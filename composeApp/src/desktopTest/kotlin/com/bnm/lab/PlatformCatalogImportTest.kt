@@ -234,4 +234,47 @@ class PlatformCatalogImportTest {
         val res = repo.enterResult(order.id, t.id, "result", "No growth after 48h").getOrThrow()
         assertNull(res.flag, "qualitative entry with no range stays unflagged")
     }
+
+    /**
+     * The server sends the product's DISCIPLINE as `category`; the importer must
+     * file the test under it, and must never overwrite a category the lab chose
+     * for itself. Regression: before /platform-tests sent this field, every
+     * imported test landed uncategorised — silently losing the grouping the
+     * catalog screen and the report's sections are built on.
+     */
+    @Test
+    fun category_comes_from_the_platform_and_a_local_choice_wins() = runBlocking {
+        val db = freshDb()
+        val repo = LabRepository(db, json)
+        val importer = PlatformCatalogImporter(db, json)
+
+        val withCategory = """
+          {"id":"prod-cbc-1","name":"Complete Blood Count","selling_price":350.0,"currency":"INR",
+           "category":"Haematology","updated_at":"2026-09-12T10:00:00Z","seq":21,
+           "lab_config":{"sample_type":"blood","method":"Analyser","tat_hours":4,
+             "reference_ranges":[{"analyte":"Haemoglobin","low":13.0,"high":17.0,"unit":"g/dL","gender":"any","age_min":null,"age_max":null,"notes":null}],
+             "consumables":[],"fulfillment":"in_house","outsource":null}}
+        """.trimIndent()
+
+        importer.apply(parse("[$withCategory]"))
+        val imported = repo.listTests(includeInactive = true).first { it.platformProductId == "prod-cbc-1" }
+        assertEquals("Haematology", imported.category, "discipline must come across from the server")
+
+        // The lab re-files it; a later sync must respect that.
+        repo.upsertTest(imported.copy(category = "Clinical Pathology"))
+        importer.apply(parse("[$withCategory]"))
+        assertEquals(
+            "Clinical Pathology",
+            repo.listTests(includeInactive = true).first { it.platformProductId == "prod-cbc-1" }.category,
+            "a category the lab set itself must survive re-import",
+        )
+
+        // A server that predates the field (no `category` key) must still parse
+        // and simply leave the category alone rather than failing the sync.
+        importer.apply(parse("[$cbcJson]"))
+        assertEquals(
+            "Clinical Pathology",
+            repo.listTests(includeInactive = true).first { it.platformProductId == "prod-cbc-1" }.category,
+        )
+    }
 }
