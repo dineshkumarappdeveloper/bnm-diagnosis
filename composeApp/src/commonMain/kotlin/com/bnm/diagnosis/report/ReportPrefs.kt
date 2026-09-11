@@ -64,6 +64,15 @@ class ReportPrefs {
 
     fun pagination(): ReportPagination = ReportPagination.fromSlug(paginationSlug)
 
+    /**
+     * Per-test release: each test can be verified, approved and printed on its
+     * own, so an outsourced test no longer holds back the rest of its order.
+     * Off by default — the whole order is signed and printed at once.
+     */
+    var releasePerTest: Boolean
+        get() = s.getBoolean(K_RELEASE_PER_TEST, false)
+        set(v) = s.putBoolean(K_RELEASE_PER_TEST, v)
+
     /** The letterhead lines as printed: address, then phone/email combined, then extra. */
     fun letterheadLines(): List<String> {
         val contact = listOf(
@@ -83,5 +92,6 @@ class ReportPrefs {
         const val K_EXTRA = "report_lh_extra"
         const val K_ACCENT = "report_accent_rgb"
         const val K_PAGINATION = "report_pagination"
+        const val K_RELEASE_PER_TEST = "report_release_per_test"
     }
 }

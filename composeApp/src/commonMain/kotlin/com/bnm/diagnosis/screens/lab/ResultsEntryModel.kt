@@ -3,6 +3,7 @@ package com.bnm.diagnosis.screens.lab
 import com.bnm.diagnosis.lab.LabOrderTest
 import com.bnm.diagnosis.lab.LabResult
 import com.bnm.diagnosis.lab.ResultGraph
+import com.bnm.diagnosis.lab.TestStage
 
 /**
  * The results-entry screen's table of contents: one [EntryGroup] per ordered
@@ -30,10 +31,29 @@ internal data class EntryGroup(
     val analyzer: Boolean,
     /** The analyzer's own alerts and abnormal flags, ready to print in a strip. */
     val alerts: List<String>,
+    /** How far this test has come on its own ([TestStage]): entered → verified →
+     *  approved → reported. Read off its result rows, the same stamps the
+     *  order-wide sign-off writes. */
+    val stage: String = TestStage.PENDING,
+    val verifiedBy: String? = null,
+    val verifiedAt: String? = null,
+    val approvedBy: String? = null,
+    val approvedAt: String? = null,
+    val reportedAt: String? = null,
 ) {
     val done: Boolean get() = total > 0 && entered >= total
     val started: Boolean get() = entered > 0
     val range: IntRange get() = first..last
+    /** Verified or beyond: its cells are locked even while the order is open. */
+    val signedOff: Boolean get() = TestStage.rank(stage) >= TestStage.rank(TestStage.VERIFIED)
+
+    /** "Reported · 11:10" / "Approved by Dr. P · 11:05" / "Verified by S. Kumar · 10:22", else null. */
+    fun stageLine(time: (String) -> String): String? = when (stage) {
+        TestStage.REPORTED -> "Reported" + (reportedAt?.let { " · ${time(it)}" } ?: "")
+        TestStage.APPROVED -> "Approved" + (approvedBy?.let { " by $it" } ?: "") + (approvedAt?.let { " · ${time(it)}" } ?: "")
+        TestStage.VERIFIED -> "Verified" + (verifiedBy?.let { " by $it" } ?: "") + (verifiedAt?.let { " · ${time(it)}" } ?: "")
+        else -> null
+    }
 }
 
 /** Who entered a test's values: the name on most of its rows, how many other
@@ -95,6 +115,12 @@ internal fun buildEntryGroups(
             provenance = prov,
             analyzer = (prov?.analyzer == true) || t.testId in graphTests,
             alerts = alertsByTest[t.testId].orEmpty(),
+            stage = TestStage.of(rows),
+            verifiedBy = rows.firstNotNullOfOrNull { it.verifiedBy?.takeIf { n -> n.isNotBlank() } },
+            verifiedAt = rows.mapNotNull { it.verifiedAt }.maxOrNull(),
+            approvedBy = rows.firstNotNullOfOrNull { it.approvedBy?.takeIf { n -> n.isNotBlank() } },
+            approvedAt = rows.mapNotNull { it.approvedAt }.maxOrNull(),
+            reportedAt = rows.mapNotNull { it.reportedAt }.maxOrNull(),
         )
     }
 }

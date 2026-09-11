@@ -92,6 +92,7 @@ import com.bnm.diagnosis.lab.Patient
 import com.bnm.diagnosis.lab.RefRange
 import com.bnm.diagnosis.lab.Referrer
 import com.bnm.diagnosis.lab.TestParameter
+import com.bnm.diagnosis.lab.TestStage
 import com.bnm.diagnosis.print.BtPrinter
 import com.bnm.diagnosis.print.EscPos
 import com.bnm.diagnosis.print.printToNetworkPrinter
@@ -208,6 +209,11 @@ fun OrderDetailScreen(
     // role that verifies (technician / pathologist / owner). A receptionist's
     // name must not land there with no way to ever carry a signature.
     val canVerify = (me?.canVerify == true)
+    // Per-test release (Settings ▸ Printing ▸ Report): each test can be
+    // verified, approved and printed on its own — an outsourced test no longer
+    // holds back the rest of the order. Read once per screen; the setting is
+    // a device preference like the letterhead.
+    val releasePerTest = remember { ReportPrefs().releasePerTest }
 
     var order by remember { mutableStateOf<LabOrder?>(null) }
     var patient by remember { mutableStateOf<Patient?>(null) }
@@ -228,6 +234,10 @@ fun OrderDetailScreen(
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var showApprove by remember { mutableStateOf(false) }
+    /** Per-test approval: the test the Approve dialog signs, null = the whole order. */
+    var approveTarget by remember { mutableStateOf<String?>(null) }
+    /** Per-test print: the tests the print chooser prints, null = the whole order. */
+    var printTestIds by remember { mutableStateOf<Set<String>?>(null) }
     var showCancel by remember { mutableStateOf(false) }
     var showPrintChooser by remember { mutableStateOf(false) }
     // Payment gate on RELEASE. A lab hands the report over when the bill is
@@ -335,20 +345,45 @@ fun OrderDetailScreen(
     val locked = o == null || o.status !in ENTRY_OPEN
     val enteredCount = results.values.count { it.isEntered }
     val totalCount = results.size
+    // Per-test release: tests approved but not yet out on a report — what the
+    // bottom bar offers to print while the order as a whole is still open.
+    val readyTestIds = remember(results) {
+        results.values.groupBy { it.testId }
+            .filterValues { rows -> rows.all { it.approvedAt != null } && rows.any { it.reportedAt == null } }
+            .keys
+    }
+    val perTestHint: String? = remember(results, tests, releasePerTest, o?.status) {
+        if (!releasePerTest || o == null || o.status !in ENTRY_OPEN) null
+        else {
+            val stages = tests.map { t -> TestStage.of(results.values.filter { it.testId == t.testId }) }
+            val reported = stages.count { it == TestStage.REPORTED }
+            val ready = stages.count { it == TestStage.APPROVED }
+            val awaiting = stages.count { it == TestStage.VERIFIED }
+            if (reported + ready + awaiting == 0) null
+            else listOfNotNull(
+                "$reported of ${tests.size} tests reported",
+                ready.takeIf { it > 0 }?.let { "$it ready to print" },
+                awaiting.takeIf { it > 0 }?.let { "$it awaiting approval" },
+            ).joinToString(" · ")
+        }
+    }
 
     /** Catalog parameter display name for a result row (raw key fallback). */
     val nameOf: (LabResult) -> String = { r ->
         catalog[r.testId]?.parameters?.firstOrNull { it.key == r.parameterKey }?.name ?: r.parameterKey
     }
 
-    /** First successful print/open of an APPROVED order marks it `reported`.
-     *  Reprints stay unlimited (reported/delivered orders reprint freely). */
-    suspend fun markReportedIfApproved() {
+    /**
+     * A successful print/open is the reporting event for the tests it carried:
+     * their rows are stamped (a reprint is a no-op) and the order rolls up to
+     * `reported` once its last test is out. Only approved tests are stamped —
+     * nothing reaches here unapproved, but the repository refuses anyway.
+     */
+    suspend fun markReported(testIds: Set<String>?) {
         val ord = order ?: return
-        if (ord.status == LabStatus.APPROVED) {
-            repo.setOrderStatus(ord.id, LabStatus.REPORTED)
-            reloadTick++
-        }
+        val ids = (testIds ?: tests.map { it.testId }.toSet()).intersect(repo.approvedTestIds(ord.id))
+        if (ids.isEmpty()) return
+        repo.markReported(ord.id, ids).onSuccess { reloadTick++ }.onFailure { message = it.message }
     }
 
     /** Assemble the styled-A4 document from the frozen results + this device's
@@ -361,11 +396,12 @@ fun OrderDetailScreen(
      *
      * Suspending because assembling now reads the staff row and may mint a token.
      */
-    suspend fun buildDoc(): ReportDoc? = assembler.assemble(order?.id ?: return null, labName)
+    suspend fun buildDoc(testIds: Set<String>? = null): ReportDoc? =
+        assembler.assemble(order?.id ?: return null, labName, testIds = testIds)
 
     /** Styled A4 PDF path: write, then open in the viewer or send to the OS
      *  print pipeline. Success (not cancelled/failed) marks approved → reported. */
-    suspend fun pdfReport(print: Boolean): Boolean {
+    suspend fun pdfReport(print: Boolean, testIds: Set<String>? = null): Boolean {
         // Authoritative gate. The button that opens the chooser already checks
         // this, but a UI-only guard is not a guard: the flow could re-emit
         // unsettled between opening the chooser and tapping, and a future caller
@@ -376,7 +412,7 @@ fun OrderDetailScreen(
             return false
         }
 
-        val doc = buildDoc() ?: return false
+        val doc = buildDoc(testIds) ?: return false
         val status = withContext(Dispatchers.Default) {
             val path = writeLabReportPdf(doc)
             when {
@@ -390,13 +426,13 @@ fun OrderDetailScreen(
             !status.contains("cancelled", ignoreCase = true) &&
             !status.contains("not found", ignoreCase = true) &&
             !status.contains("later", ignoreCase = true)
-        if (ok) markReportedIfApproved()
+        if (ok) markReported(testIds)
         return ok
     }
 
     /** Legacy monospace slip on the configured LAN/BT thermal printer (the
      *  renderLabReport text path — kept for sample-tube counter slips). */
-    suspend fun printThermalSlip(): Boolean {
+    suspend fun printThermalSlip(testIds: Set<String>? = null): Boolean {
         // Authoritative gate. The button that opens the chooser already checks
         // this, but a UI-only guard is not a guard: the flow could re-emit
         // unsettled between opening the chooser and tapping, and a future caller
@@ -417,12 +453,20 @@ fun OrderDetailScreen(
             message = "Report printing is turned off in Settings ▸ Printing."
             return false
         }
+        // Per-test release: the slip carries the chosen tests; the order's
+        // other unreported tests are named on it.
+        val slipTests = if (testIds == null) tests else tests.filter { it.testId in testIds }
+        val slipIds = slipTests.map { it.testId }.toSet()
+        val toFollow = tests.filter { t ->
+            t.testId !in slipIds && TestStage.of(results.values.filter { it.testId == t.testId }) != TestStage.REPORTED
+        }.map { it.testName }
         val result = withContext(Dispatchers.Default) {
             val body = renderLabReport(
-                labName = labName, order = ord, patient = pat, tests = tests,
-                results = results.values.toList(), referrerName = referrer?.name,
+                labName = labName, order = ord, patient = pat, tests = slipTests,
+                results = results.values.filter { it.testId in slipIds }, referrerName = referrer?.name,
                 widthChars = bp.paperWidth, paramName = nameOf,
                 sampleType = { t -> sampleTypeDisplay(catalog[t.testId]?.sampleType) },
+                toFollow = toFollow,
             )
             // Extra copies are best-effort: the first one succeeding is what
             // counts as "reported", so a failed duplicate must not undo that.
@@ -439,7 +483,7 @@ fun OrderDetailScreen(
         }
         val ok = result.startsWith("Sent to")
         message = if (ok) "Report sent to printer" else result
-        if (ok) markReportedIfApproved()
+        if (ok) markReported(testIds)
         return ok
     }
 
@@ -519,6 +563,21 @@ fun OrderDetailScreen(
                                     else MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
+                            perTestHint?.let {
+                                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        // Per-test release: what is approved can go out now, while
+                        // the rest of the order is still open. Same release gate.
+                        if (releasePerTest && readyTestIds.isNotEmpty() && o.status in ENTRY_OPEN) {
+                            OutlinedButton(
+                                onClick = {
+                                    if (busy) return@OutlinedButton
+                                    printTestIds = readyTestIds
+                                    if (paymentBlocksRelease) showPaymentDue = true else showPrintChooser = true
+                                },
+                                enabled = !busy,
+                            ) { Text("Print released (${readyTestIds.size})") }
                         }
                         ActionBar(
                             status = o.status,
@@ -634,6 +693,31 @@ fun OrderDetailScreen(
                 scope.launch { runCatching { listState.scrollToItem(0) } }
             }
 
+            // Per-test release: the tile's own Verify / Approve / Print. Same
+            // actor, same RBAC, same release gate as the order-wide bar.
+            val release = if (!releasePerTest) null else TestRelease(
+                canVerify = canVerify, canApprove = canApprove, busy = busy,
+                onVerify = { testId ->
+                    if (!busy) {
+                        focusManager.clearFocus()
+                        busy = true; message = null; session.touch()
+                        scope.launch {
+                            repo.verifyTest(o.id, testId, actor, me?.id)
+                                .onSuccess { message = "Verified by $actor" }
+                                .onFailure { message = it.message }
+                            busy = false
+                        }
+                    }
+                },
+                onApprove = { testId -> session.touch(); approveTarget = testId; showApprove = true },
+                onPrint = { testId ->
+                    if (!busy) {
+                        printTestIds = setOf(testId)
+                        if (paymentBlocksRelease) showPaymentDue = true else showPrintChooser = true
+                    }
+                },
+            )
+
             Column(Modifier.fillMaxSize()) {
                 // PINNED patient header — who you are typing results for must
                 // never scroll away mid-entry (it reads as part of the app bar).
@@ -690,7 +774,8 @@ fun OrderDetailScreen(
                                 row = row,
                                 value = draft[row.key].orEmpty(),
                                 wide = wide,
-                                locked = locked,
+                                // A test signed off on its own is locked while the rest stays open.
+                                locked = locked || row.result.verifiedAt != null,
                                 focused = focusedKey == row.key,
                                 last = i == rows.lastIndex,
                                 focusRequester = requesters[i],
@@ -715,13 +800,15 @@ fun OrderDetailScreen(
                     Row(Modifier.fillMaxWidth().weight(1f)) {
                         TestRail(
                             groups = groups, selectedId = selected.testId, typingIn = typingIn,
+                            perTest = releasePerTest,
                             onSelect = ::selectTest,
                             modifier = Modifier.width(RAIL_WIDTH).fillMaxHeight(),
                         )
                         VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         TestTile(
                             group = selected, test = catalog[selected.testId], wide = wide,
-                            listState = listState, modifier = Modifier.weight(1f).fillMaxHeight(), rows = tileRows,
+                            listState = listState, release = release,
+                            modifier = Modifier.weight(1f).fillMaxHeight(), rows = tileRows,
                         )
                     }
                 } else {
@@ -729,7 +816,8 @@ fun OrderDetailScreen(
                         if (groups.size > 1) TestChips(groups, selected.testId, ::selectTest)
                         TestTile(
                             group = selected, test = catalog[selected.testId], wide = wide,
-                            listState = listState, modifier = Modifier.fillMaxWidth().weight(1f), rows = tileRows,
+                            listState = listState, release = release,
+                            modifier = Modifier.fillMaxWidth().weight(1f), rows = tileRows,
                         )
                     }
                 }
@@ -763,14 +851,20 @@ fun OrderDetailScreen(
 
     if (showApprove && o != null && canApprove) {
         val signer = me
+        val target = approveTarget
+        val targetName = target?.let { id -> tests.firstOrNull { it.testId == id }?.testName }
         var name by remember(signer) { mutableStateOf(signer?.name ?: prefs.approvedBy) }
         var err by remember { mutableStateOf<String?>(null) }
         AlertDialog(
-            onDismissRequest = { showApprove = false },
-            title = { Text("Approve results") },
+            onDismissRequest = { showApprove = false; approveTarget = null },
+            title = { Text(if (targetName != null) "Approve $targetName" else "Approve results") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("The approving pathologist's name prints on every report.", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        if (targetName != null) "Only this test is signed off; the rest of the order stays open. The approving pathologist's name prints on the report."
+                        else "The approving pathologist's name prints on every report.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     // Surface the balance HERE too, so the pathologist signing off
                     // knows the report will not go out yet — but approval itself is
                     // never blocked. Sign-off is a clinical act: withholding it on a
@@ -818,17 +912,17 @@ fun OrderDetailScreen(
                     val n = (signer?.name ?: name).trim()
                     if (n.isEmpty()) { err = "Name is required"; return@Button }
                     if (signer == null) prefs.approvedBy = n
-                    showApprove = false
+                    showApprove = false; approveTarget = null
                     busy = true; message = null; session.touch()
                     scope.launch {
-                        repo.approveOrder(o.id, n, signer?.id)
+                        (if (target != null) repo.approveTest(o.id, target, n, signer?.id) else repo.approveOrder(o.id, n, signer?.id))
                             .onSuccess { message = "Approved by $n"; reloadTick++ }
                             .onFailure { message = it.message }
                         busy = false
                     }
                 }) { Text("Approve") }
             },
-            dismissButton = { TextButton(onClick = { showApprove = false }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { showApprove = false; approveTarget = null }) { Text("Cancel") } },
         )
     }
 
@@ -907,18 +1001,21 @@ fun OrderDetailScreen(
             // Report profile, not the counter's.
             PrintProfiles.report.isDirectlyConnected
         }
-        fun run(block: suspend () -> Unit) {
+        val ids = printTestIds
+        val subtitle = ids?.let { s -> tests.filter { it.testId in s }.joinToString(", ") { it.testName } }
+        fun run(block: suspend (Set<String>?) -> Unit) {
             showPrintChooser = false
             if (busy) return
             busy = true; message = "Preparing report…"
             scope.launch {
-                try { block() } catch (e: Throwable) { message = "Report failed: ${e.message}" }
+                try { block(ids) } catch (e: Throwable) { message = "Report failed: ${e.message}" }
+                printTestIds = null
                 busy = false
             }
         }
         AlertDialog(
-            onDismissRequest = { showPrintChooser = false },
-            title = { Text("Report ${o.accessionNo}") },
+            onDismissRequest = { showPrintChooser = false; printTestIds = null },
+            title = { Text("Report ${o.accessionNo}" + (subtitle?.let { " · $it" } ?: "")) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
@@ -926,21 +1023,27 @@ fun OrderDetailScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Button(onClick = { run { pdfReport(print = false) } }, modifier = Modifier.fillMaxWidth()) {
+                    if (subtitle != null) {
+                        Text(
+                            "Only the tests named above go on this report; the rest of the order is listed on it as still to follow.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Button(onClick = { run { t -> pdfReport(print = false, testIds = t) } }, modifier = Modifier.fillMaxWidth()) {
                         Text("Open PDF")
                     }
-                    Button(onClick = { run { pdfReport(print = true) } }, modifier = Modifier.fillMaxWidth()) {
+                    Button(onClick = { run { t -> pdfReport(print = true, testIds = t) } }, modifier = Modifier.fillMaxWidth()) {
                         Text("Print")
                     }
                     if (thermalAvailable) {
-                        OutlinedButton(onClick = { run { printThermalSlip() } }, modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(onClick = { run { t -> printThermalSlip(t) } }, modifier = Modifier.fillMaxWidth()) {
                             Text("Thermal slip")
                         }
                     }
                 }
             },
             confirmButton = {},
-            dismissButton = { TextButton(onClick = { showPrintChooser = false }) { Text("Close") } },
+            dismissButton = { TextButton(onClick = { showPrintChooser = false; printTestIds = null }) { Text("Close") } },
         )
     }
 
@@ -1248,6 +1351,8 @@ private fun TestRail(
     selectedId: String,
     /** The test whose cell has keyboard focus — shows "typing…" on its line. */
     typingIn: String?,
+    /** Per-test release on: the sub-line prefers the sign-off stage over who typed. */
+    perTest: Boolean = false,
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1292,6 +1397,7 @@ private fun TestRail(
                     )
                     val sub = when {
                         typingIn == g.testId -> "typing…"
+                        perTest && g.signedOff -> g.stageLine(::shortTimeLabel)
                         g.provenance != null -> g.provenance.short(::shortTimeLabel)
                         else -> null
                     }
@@ -1374,12 +1480,23 @@ private fun ProgressDot(g: EntryGroup) {
  * when it left any, the column strip (pinned — it no longer scrolls away), and
  * the rows the caller emits.
  */
+/** Per-test release controls the tile shows when the setting is on. */
+private class TestRelease(
+    val canVerify: Boolean,
+    val canApprove: Boolean,
+    val busy: Boolean,
+    val onVerify: (testId: String) -> Unit,
+    val onApprove: (testId: String) -> Unit,
+    val onPrint: (testId: String) -> Unit,
+)
+
 @Composable
 private fun TestTile(
     group: EntryGroup,
     test: LabTest?,
     wide: Boolean,
     listState: LazyListState,
+    release: TestRelease? = null,
     modifier: Modifier = Modifier,
     rows: LazyListScope.() -> Unit,
 ) {
@@ -1420,6 +1537,7 @@ private fun TestTile(
                     "${group.entered} of ${group.total} entered",
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                release?.let { r -> TestStageActions(group, r) }
             }
         }
         if (group.alerts.isNotEmpty()) AlertsStrip(group.alerts)
@@ -1430,6 +1548,32 @@ private fun TestTile(
             contentPadding = PaddingValues(bottom = 28.dp),
             content = rows,
         )
+    }
+}
+
+/**
+ * One test's own stage button — the same ladder as the order-wide bar
+ * (Verify → Approve → Print → Print again), plus the sign-off stamp line.
+ * A test that is not fully entered shows nothing: entry is what it needs.
+ */
+@Composable
+private fun TestStageActions(group: EntryGroup, r: TestRelease) {
+    Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(top = 4.dp)) {
+        group.stageLine(::shortTimeLabel)?.let {
+            Text(it, style = MaterialTheme.typography.labelSmall, color = AppTheme.colors.success, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        }
+        when (group.stage) {
+            TestStage.ENTERED ->
+                if (r.canVerify) Button(onClick = { r.onVerify(group.testId) }, enabled = !r.busy) { Text("Verify test") }
+                else Text("Awaiting verification", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            TestStage.VERIFIED ->
+                if (r.canApprove) Button(onClick = { r.onApprove(group.testId) }, enabled = !r.busy) { Text("Approve test") }
+                else Text("Awaiting the pathologist's approval", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            TestStage.APPROVED ->
+                Button(onClick = { r.onPrint(group.testId) }, enabled = !r.busy) { Text("Print report") }
+            TestStage.REPORTED ->
+                OutlinedButton(onClick = { r.onPrint(group.testId) }, enabled = !r.busy) { Text("Print again") }
+        }
     }
 }
 

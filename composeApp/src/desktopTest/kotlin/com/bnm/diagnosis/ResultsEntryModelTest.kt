@@ -11,6 +11,7 @@ import com.bnm.diagnosis.lab.Patient
 import com.bnm.diagnosis.lab.RefRange
 import com.bnm.diagnosis.lab.ResultGraph
 import com.bnm.diagnosis.lab.TestParameter
+import com.bnm.diagnosis.lab.TestStage
 import com.bnm.diagnosis.screens.lab.analyzerAlerts
 import com.bnm.diagnosis.screens.lab.buildEntryGroups
 import com.bnm.diagnosis.screens.lab.initialTestId
@@ -165,6 +166,33 @@ class ResultsEntryModelTest {
         assertTrue(reseedable("cbc|wbc", "cbc|rbc", dirty, pending), "typed earlier but focus moved on: follow the DB")
         assertTrue(reseedable("cbc|rbc", "cbc|rbc", dirty, pending), "focused but untouched: the analyzer's value may land in it")
         assertTrue(reseedable("cbc|plt", null, emptySet(), emptySet()))
+    }
+
+    @Test
+    fun `a group knows how far its test has come and says so`() {
+        val signed = mapOf(
+            "cbc|hb" to res("cbc", "hb", "13.5", "Tech", "2026-09-10T04:45:00Z").copy(
+                verifiedBy = "S. Kumar", verifiedAt = "2026-09-10T05:10:00Z",
+                approvedBy = "Dr. P", approvedAt = "2026-09-10T05:20:00Z"),
+            "cbc|rbc" to res("cbc", "rbc", "4.5", "Tech", "2026-09-10T04:45:00Z").copy(
+                verifiedBy = "S. Kumar", verifiedAt = "2026-09-10T05:10:00Z",
+                approvedBy = "Dr. P", approvedAt = "2026-09-10T05:21:00Z"),
+            "esr|esr" to res("esr", "esr", "12", "Tech", "2026-09-10T04:50:00Z").copy(
+                verifiedBy = "S. Kumar", verifiedAt = "2026-09-10T05:00:00Z"),
+        )
+        val t = listOf(line("cbc", "CBC"), line("esr", "ESR"))
+        val g = buildEntryGroups(t, emptyMap(), listOf("cbc", "cbc", "esr"), listOf("cbc|hb", "cbc|rbc", "esr|esr"), signed, emptySet(), emptyList())
+        assertEquals(TestStage.APPROVED, g[0].stage)
+        assertTrue(g[0].signedOff)
+        assertEquals("Dr. P", g[0].approvedBy)
+        assertEquals("2026-09-10T05:21:00Z", g[0].approvedAt, "the latest stamp on the test")
+        assertEquals("Approved by Dr. P · T", g[0].stageLine { "T" })
+        assertEquals(TestStage.VERIFIED, g[1].stage)
+        assertEquals("Verified by S. Kumar · T", g[1].stageLine { "T" })
+        val reported = g[0].copy(stage = TestStage.REPORTED, reportedAt = "2026-09-10T06:00:00Z")
+        assertEquals("Reported · T", reported.stageLine { "T" })
+        assertNull(g[0].copy(stage = TestStage.ENTERED).stageLine { "T" })
+        assertFalse(g[0].copy(stage = TestStage.ENTERED).signedOff)
     }
 
     @Test

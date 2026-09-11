@@ -665,7 +665,7 @@ private fun WorklistPanel(
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            TestProgressCell(e.doneCount, e.testCount, Modifier.width(96.dp))
+                            TestProgressCell(e.doneCount, e.testCount, Modifier.width(96.dp), reported = e.reportedCount)
                             Box(Modifier.width(120.dp)) {
                                 Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                     LabStatusChip(e.order.status, e.order.priority)
@@ -1032,7 +1032,7 @@ private fun todayLabel(): String {
  * but not how far along it was — this is what the bench actually scans for.
  */
 @Composable
-private fun TestProgressCell(done: Long, total: Long, modifier: Modifier = Modifier) {
+private fun TestProgressCell(done: Long, total: Long, modifier: Modifier = Modifier, reported: Long = 0) {
     val c = AppTheme.colors
     val complete = total > 0 && done >= total
     Column(modifier.padding(end = 8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -1050,5 +1050,9 @@ private fun TestProgressCell(done: Long, total: Long, modifier: Modifier = Modif
             gapSize = 0.dp,
             drawStopIndicator = {},
         )
+        // Per-test release: some of this order has already gone out.
+        if (reported in 1 until total) {
+            Text("$reported reported", style = MaterialTheme.typography.labelSmall, color = c.success, maxLines = 1)
+        }
     }
 }

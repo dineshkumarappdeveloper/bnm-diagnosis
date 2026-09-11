@@ -144,6 +144,7 @@ fun PrintSettingsScreen(
                         PrinterProfileCard(PrintKind.REPORT, onPickBluetooth, Modifier.weight(1f)) {
                             LetterheadBlock(labName)
                             PageLayoutBlock()
+                            ReleaseBlock()
                             ReportPreviewButton(labName)
                         }
                         PrinterProfileCard(PrintKind.BARCODE, onPickBluetooth, Modifier.weight(1f), labName = labName)
@@ -154,6 +155,7 @@ fun PrintSettingsScreen(
                         PrinterProfileCard(PrintKind.REPORT, onPickBluetooth, Modifier.weight(1f)) {
                             LetterheadBlock(labName)
                             PageLayoutBlock()
+                            ReleaseBlock()
                             ReportPreviewButton(labName)
                         }
                     }
@@ -163,6 +165,7 @@ fun PrintSettingsScreen(
                     PrinterProfileCard(PrintKind.REPORT, onPickBluetooth, Modifier.fillMaxWidth()) {
                         LetterheadBlock(labName)
                         PageLayoutBlock()
+                        ReleaseBlock()
                         ReportPreviewButton(labName)
                     }
                     PrinterProfileCard(PrintKind.BARCODE, onPickBluetooth, Modifier.fillMaxWidth(), labName = labName)
@@ -575,6 +578,30 @@ private fun ColumnScope.PageLayoutBlock() {
     }
     Text(layout.blurb, style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
     Text(layout.sheetNote, style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
+}
+
+/**
+ * Per-test release — the one switch that decides whether a finished test may
+ * leave the lab before the rest of its order.
+ */
+@Composable
+private fun ColumnScope.ReleaseBlock() {
+    val c = AppTheme.colors
+    val prefs = remember { ReportPrefs() }
+    var perTest by remember { mutableStateOf(prefs.releasePerTest) }
+    HorizontalDivider(color = c.border)
+    Text("Releasing results", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Release tests separately", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "Each test can be verified, approved and printed on its own, so an outsourced test " +
+                    "no longer holds back the rest of the order. A partial report names the tests still to follow.",
+                style = MaterialTheme.typography.bodySmall, color = c.textSecondary,
+            )
+        }
+        Switch(checked = perTest, onCheckedChange = { perTest = it; prefs.releasePerTest = it })
+    }
 }
 
 /**

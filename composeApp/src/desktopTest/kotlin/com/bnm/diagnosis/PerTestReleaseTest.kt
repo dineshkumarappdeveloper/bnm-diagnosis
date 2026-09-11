@@ -114,6 +114,28 @@ class PerTestReleaseTest {
     }
 
     @Test
+    fun `a partial report prints what is still to follow on the paper`() = runBlocking {
+        val db = freshDb()
+        val repo = LabRepository(db, ApiClient.json)
+        repo.upsertTest(glucose("t-cbc", "Blood Count"))
+        repo.upsertTest(glucose("t-out", "Vitamin D", fulfillment = "outsourced"))
+        val patient = repo.upsertPatient(Patient(id = "p", name = "Paper Patient", sex = "F", ageYears = 40))
+        val order = repo.createLabOrder(patient.id, testIds = listOf("t-cbc", "t-out")).getOrThrow()
+        for (k in listOf("a", "b")) repo.enterResult(order.id, "t-cbc", k, "50").getOrThrow()
+        repo.verifyTest(order.id, "t-cbc", "Tech").getOrThrow()
+        repo.approveTest(order.id, "t-cbc", "Dr. P").getOrThrow()
+        val doc = ReportAssembler(repo, StaffRepository(db, ApiClient.json)).assemble(order.id, "Lab", testIds = setOf("t-cbc"))!!
+        val pdf = com.bnm.diagnosis.report.writeLabReportPdf(doc)
+        val text = org.apache.pdfbox.pdmodel.PDDocument.load(java.io.File(pdf)).use { org.apache.pdfbox.text.PDFTextStripper().getText(it) }
+        assertTrue("To follow in a separate report: Vitamin D" in text, text.take(600))
+        assertTrue("Blood Count" in text && "Vitamin D A" !in text, "only the released test's rows print")
+        val slip = com.bnm.diagnosis.print.renderLabReport("Lab", repo.orderById(order.id)!!, patient,
+            repo.orderTests(order.id).filter { it.testId == "t-cbc" }, repo.resultsForOrder(order.id).filter { it.testId == "t-cbc" },
+            toFollow = listOf("Vitamin D"))
+        assertTrue("To follow : Vitamin D" in slip, slip)
+    }
+
+    @Test
     fun `the whole-order path still works and never overwrites a per-test signature`() = runBlocking {
         val db = freshDb()
         val repo = LabRepository(db, ApiClient.json)
