@@ -23,7 +23,7 @@ actual class DriverFactory actual constructor() {
         //                    one sqlite file. Foreign tables in the copy are inert.
         if (!dbFile.exists()) {
             val parent = dbFile.parentFile.parentFile
-            for (legacyDir in listOf("BNM Lab", "BNMAdmin")) {
+            for (legacyDir in LEGACY_APP_DIRS) {
                 val legacy = File(File(parent, legacyDir), CHAT_DB_NAME)
                 if (!legacy.exists()) continue
                 val copied = runCatching {
@@ -53,6 +53,19 @@ actual class DriverFactory actual constructor() {
     }
 }
 
+/**
+ * Data directories this app has used before, newest first — checked once when
+ * the current one has no database (see [DriverFactory.createDriver]).
+ *
+ * MUST NOT contain the CURRENT directory name: the lookup would find the file
+ * it is standing in and copy nothing, which is how a rename silently orphans a
+ * lab's records. A rename adds the OLD name here; it never renames the entries.
+ */
+internal val LEGACY_APP_DIRS = listOf("BNMDiagnosis", "BNMAdmin")
+
+/** This app's own data directory name — [LEGACY_APP_DIRS] must never list it. */
+internal const val APP_DIR_NAME = "BNMLab"
+
 /** OS-appropriate per-user app data directory; created if missing. */
 private fun appDataDir(): File {
     val os = System.getProperty("os.name").orEmpty().lowercase()
@@ -62,5 +75,5 @@ private fun appDataDir(): File {
         os.contains("mac") -> "$home/Library/Application Support"
         else -> System.getenv("XDG_DATA_HOME") ?: "$home/.local/share"
     }
-    return File(base, "BNMLab").apply { mkdirs() }
+    return File(base, APP_DIR_NAME).apply { mkdirs() }
 }
