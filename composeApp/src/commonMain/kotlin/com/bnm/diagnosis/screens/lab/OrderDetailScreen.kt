@@ -133,6 +133,9 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 
 /** Statuses in which result entry is still open (mirrors the repo's guard). */
 private val ENTRY_OPEN = setOf(LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED)
@@ -1326,7 +1329,8 @@ private fun TestChips(groups: List<EntryGroup>, selectedId: String, onSelect: (S
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
-/** Empty ring → part-filled → full disc; blue when an analyzer filled it. */
+/** Empty ring → part-filled → a green disc with a white tick when every value
+ *  is in; blue instead of green when an analyzer filled it. */
 @Composable
 private fun ProgressDot(g: EntryGroup) {
     val color = when {
@@ -1335,11 +1339,23 @@ private fun ProgressDot(g: EntryGroup) {
         else -> MaterialTheme.colorScheme.outline
     }
     val fraction = if (g.total == 0) 0f else g.entered.toFloat() / g.total.toFloat()
-    Canvas(Modifier.size(12.dp)) {
-        drawCircle(color = color, style = Stroke(width = 2.dp.toPx()))
+    Canvas(Modifier.size(14.dp)) {
         when {
-            fraction >= 1f -> drawCircle(color = color)
-            fraction > 0f -> drawArc(color = color, startAngle = -90f, sweepAngle = 360f * fraction, useCenter = true)
+            fraction >= 1f -> {
+                drawCircle(color = color)
+                val w = size.width
+                val tick = Path().apply {
+                    moveTo(w * 0.28f, w * 0.53f)
+                    lineTo(w * 0.44f, w * 0.69f)
+                    lineTo(w * 0.73f, w * 0.36f)
+                }
+                drawPath(tick, color = Color.White, style = Stroke(width = w * 0.13f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+            }
+            fraction > 0f -> {
+                drawCircle(color = color, style = Stroke(width = 2.dp.toPx()))
+                drawArc(color = color, startAngle = -90f, sweepAngle = 360f * fraction, useCenter = true)
+            }
+            else -> drawCircle(color = color, style = Stroke(width = 2.dp.toPx()))
         }
     }
 }
