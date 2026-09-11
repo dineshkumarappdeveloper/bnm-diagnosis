@@ -160,14 +160,12 @@ fun LabHomeScreen(
     /** Registration shortcut — the Patients screen carries the add form. */
     onNewPatient: () -> Unit = {},
     /** License & devices management (also reachable via Settings). */
-    onLicenseDevices: () -> Unit = {},
     /** Subscription runway notice (null = perpetual or comfortably active). */
     subscriptionNotice: String? = null,
     /** True once the subscription is in grace/expired — renders as danger. */
     subscriptionUrgent: Boolean = false,
-    /** License identity for the header chip + License & sync card. */
+    /** License mode for the header chip (the full License & sync card lives in Settings). */
     licenseMode: String? = null,
-    licenseSeats: Int = 0,
     /** Bills-shortcut "N today" caption counts this business's local invoice docs ("" = standalone). */
     businessId: String = "",
     /** P3: the lab sync spine — last-synced/Sync now; null hides all sync UI. */
@@ -348,17 +346,10 @@ fun LabHomeScreen(
                             if (syncState != null && !syncState.disabled) {
                                 EmrCard(emrPending, onEmrInbox)
                             }
-                            LicenseSyncCard(
-                                labName = labName, licenseMode = licenseMode, licenseSeats = licenseSeats,
-                                syncDisabled = syncState?.disabled,
-                                lastSyncAt = syncState?.lastSyncAt,
-                                syncing = syncState?.syncing == true,
-                                lastError = syncState?.lastError,
-                                onSyncNow = labSync?.let { s -> { scope.launch { s.syncNow() } } },
-                                onLicenseDevices = onLicenseDevices,
-                            )
+                            // License & sync lives in Settings — not repeated here.
                             ShortcutsCard(
                                 billsCaption = billsCaption,
+                                showReferrers = showMoney,
                                 onPatients = onPatients, onReferrers = onReferrers,
                                 onCatalog = onCatalog, onBills = onBills, onSettings = onSettings,
                             )
@@ -432,7 +423,9 @@ fun LabHomeScreen(
                 // ── Navigation cards ──
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     HomeCard("Patients", "Search & manage", Icons.Outlined.PersonAddAlt) { onPatients() }
-                    HomeCard("Referrers", "Doctors & clinics", Icons.Outlined.People) { onReferrers() }
+                    // Owner-only money surface (RouteGuard refuses everyone else): no
+                    // door for people who cannot walk through it.
+                    if (showMoney) HomeCard("Referrers", "Doctors & clinics", Icons.Outlined.People) { onReferrers() }
                     HomeCard("Test catalog", "Tests, panels & prices", Icons.Outlined.Biotech) { onCatalog() }
                     HomeCard("Bills", billsCaption, Icons.AutoMirrored.Outlined.ReceiptLong) { onBills() }
                     HomeCard("Settings", "Printer · License", Icons.Outlined.Settings) { onSettings() }
@@ -876,78 +869,6 @@ private fun EmrCard(pending: Long, onEmrInbox: () -> Unit) {
 }
 
 /** License identity + sync health (wide layout right rail). */
-@Composable
-private fun LicenseSyncCard(
-    labName: String,
-    licenseMode: String?,
-    licenseSeats: Int,
-    syncDisabled: Boolean?,
-    lastSyncAt: String?,
-    syncing: Boolean,
-    lastError: String?,
-    onSyncNow: (() -> Unit)?,
-    onLicenseDevices: () -> Unit,
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Box(Modifier.size(30.dp).background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(9.dp)),
-                    contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.VerifiedUser, contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(17.dp))
-                }
-                Text("License & sync", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            }
-            Text("Licensed to", style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(labName, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                LicenseModeChip(licenseMode)
-                if (licenseSeats > 0) Text(
-                    "$licenseSeats seat${if (licenseSeats == 1) "" else "s"}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            when {
-                syncDisabled == true -> Text(
-                    "Sync off — standalone license (not linked to a BNM business).",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                onSyncNow != null -> {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "Last synced: ${lastSyncAt?.replace('T', ' ')?.take(16) ?: "never"}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = onSyncNow, enabled = !syncing) {
-                            if (syncing) CircularProgressIndicator(
-                                Modifier.padding(end = 6.dp).size(14.dp), strokeWidth = 2.dp)
-                            Text(if (syncing) "Syncing…" else "Sync now")
-                        }
-                    }
-                    lastError?.let {
-                        Text("Last attempt failed: $it", style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.error, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    }
-                }
-            }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-            TextButton(onClick = onLicenseDevices, contentPadding = PaddingValues(horizontal = 4.dp)) {
-                Text("License & devices")
-            }
-        }
-    }
-}
 
 /** Small read-only pill naming the license mode. */
 @Composable
@@ -967,11 +888,14 @@ private fun LicenseModeChip(mode: String?) {
     }
 }
 
-/** Remaining navigation as compact icon+label tiles (wide layout right rail). */
-@OptIn(ExperimentalLayoutApi::class)
+/** Remaining navigation as one full-width row per destination (wide layout
+ *  right rail). [showReferrers]: the referrer hub is owner-only (rate lists,
+ *  payouts) and the route guard refuses everyone else, so the row is only
+ *  offered to someone it will open for. */
 @Composable
 private fun ShortcutsCard(
     billsCaption: String,
+    showReferrers: Boolean,
     onPatients: () -> Unit,
     onReferrers: () -> Unit,
     onCatalog: () -> Unit,
@@ -986,17 +910,15 @@ private fun ShortcutsCard(
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Shortcuts", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                maxItemsInEachRow = 2,
-            ) {
-                ShortcutTile("Patients", Icons.Outlined.PersonAddAlt, Modifier.weight(1f), onClick = onPatients)
-                ShortcutTile("Referrers", Icons.Outlined.People, Modifier.weight(1f), onClick = onReferrers)
-                ShortcutTile("Test catalog", Icons.Outlined.Biotech, Modifier.weight(1f), onClick = onCatalog)
-                ShortcutTile("Bills", Icons.AutoMirrored.Outlined.ReceiptLong, Modifier.weight(1f),
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ShortcutTile("Patients", Icons.Outlined.PersonAddAlt, Modifier.fillMaxWidth(), onClick = onPatients)
+                if (showReferrers) {
+                    ShortcutTile("Referrers", Icons.Outlined.People, Modifier.fillMaxWidth(), onClick = onReferrers)
+                }
+                ShortcutTile("Test catalog", Icons.Outlined.Biotech, Modifier.fillMaxWidth(), onClick = onCatalog)
+                ShortcutTile("Bills", Icons.AutoMirrored.Outlined.ReceiptLong, Modifier.fillMaxWidth(),
                     caption = billsCaption, onClick = onBills)
-                ShortcutTile("Settings", Icons.Outlined.Settings, Modifier.weight(1f), onClick = onSettings)
+                ShortcutTile("Settings", Icons.Outlined.Settings, Modifier.fillMaxWidth(), onClick = onSettings)
             }
         }
     }
