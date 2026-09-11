@@ -97,6 +97,30 @@ fun waReportMessage(
     append("\n\n").append(labName.trim())
 }
 
+/**
+ * The message that goes with a BILL. Same rule as the report: identity and
+ * amounts, never anything clinical — a bill names the tests, so [url] (the
+ * hosted invoice, when the server has one) carries the detail instead.
+ */
+fun waBillMessage(
+    customerName: String?,
+    businessName: String,
+    invoiceNumber: String,
+    total: Double,
+    balance: Double,
+    url: String? = null,
+    money: (Double) -> String,
+): String = buildString {
+    val first = customerName?.trim()?.substringBefore(' ')?.takeIf { it.isNotEmpty() } ?: "there"
+    append("Dear ").append(first).append(", thank you for visiting ").append(businessName.trim()).append(".")
+    append("\n\nBill: ").append(invoiceNumber.trim())
+    append("\nAmount: ").append(money(total))
+    if (balance > 0.005) append("\nBalance due: ").append(money(balance))
+    else append("\nPaid in full — thank you.")
+    if (!url.isNullOrBlank()) append("\n\n").append(url.trim())
+    append("\n\n").append(businessName.trim())
+}
+
 /** Caption for the PDF the Business API sends (the document carries the file). */
 fun waReportCaption(patientName: String, labName: String, accession: String, toDoctor: Boolean = false): String =
     waReportMessage(patientName, labName, accession, url = null, toDoctor = toDoctor)

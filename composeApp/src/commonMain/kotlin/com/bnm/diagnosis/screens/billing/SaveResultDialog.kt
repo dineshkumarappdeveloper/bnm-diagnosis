@@ -42,6 +42,12 @@ import com.bnm.diagnosis.print.printReceipt
 import com.bnm.diagnosis.print.printToNetworkPrinter
 import com.bnm.diagnosis.print.renderReceiptText
 import com.bnm.diagnosis.print.renderStationToken
+import com.bnm.diagnosis.report.ReportPrefs
+import com.bnm.diagnosis.report.WaShareMode
+import com.bnm.diagnosis.report.openUrl
+import com.bnm.diagnosis.report.waBillMessage
+import com.bnm.diagnosis.report.waDeepLink
+import com.bnm.diagnosis.report.waPhone
 import com.bnm.diagnosis.util.formatDecimal2
 import com.bnm.diagnosis.billing.PrintProfiles
 import androidx.compose.runtime.LaunchedEffect
@@ -91,6 +97,12 @@ fun SaveResultDialog(
 ) {
     val scope = rememberCoroutineScope()
     val prefs = remember { BillingPrefs() }
+    // Handing the bill over on WhatsApp sits beside Print — the same act by
+    // another route. The deep link is used here (it needs no server and works
+    // on any edition); the invoice screen keeps the BNM server send.
+    val waMode = remember { ReportPrefs().waShareMode() }
+    val waCountry = remember { ReportPrefs().waCountryCode }
+    val waTo = remember(invoice.id) { waPhone(invoice.customerPhone, waCountry) }
     val repo = LocalBillingRepository.current
     var printMsg by remember { mutableStateOf<String?>(null) }
     var printing by remember { mutableStateOf(false) }
@@ -276,6 +288,26 @@ fun SaveResultDialog(
                 ) {
                     if (printing) CircularProgressIndicator(Modifier.padding(end = 8.dp).size(16.dp), strokeWidth = 2.dp)
                     Text(if (printed) "Printed ✓" else "Print receipt")
+                }
+                if (waMode != WaShareMode.OFF && waTo != null) {
+                    OutlinedButton(
+                        onClick = {
+                            val text = waBillMessage(
+                                customerName = invoice.customerName,
+                                businessName = businessName,
+                                invoiceNumber = invoice.displayNumber,
+                                total = invoice.total,
+                                // partPaid is what the counter just took on an
+                                // advance; otherwise the dialog only ever shows a
+                                // settled bill, so nothing is owed.
+                                balance = partPaid?.let { (invoice.total - it).coerceAtLeast(0.0) } ?: 0.0,
+                                url = invoice.pdfUrl,
+                                money = { "₹ " + formatDecimal2(it) },
+                            )
+                            printMsg = openUrl(waDeepLink(waTo, text))
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Send on WhatsApp") }
                 }
                 extra()
                 OutlinedButton(onClick = onView, modifier = Modifier.fillMaxWidth()) { Text("View details") }

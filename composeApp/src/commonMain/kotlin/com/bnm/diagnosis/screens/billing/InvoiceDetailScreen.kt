@@ -34,6 +34,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.bnm.diagnosis.api.BillingApi
+import com.bnm.diagnosis.report.waPhone
+import com.bnm.diagnosis.report.waDeepLink
+import com.bnm.diagnosis.report.waBillMessage
+import com.bnm.diagnosis.report.openUrl
+import com.bnm.diagnosis.report.WaShareMode
+import com.bnm.diagnosis.report.ReportPrefs
 import com.bnm.diagnosis.chat.LocalBillingRepository
 import com.bnm.diagnosis.print.amountInWords
 import com.bnm.diagnosis.print.placeOfSupplyLabel
@@ -53,6 +59,8 @@ fun InvoiceDetailScreen(api: BillingApi, businessId: String, invoiceId: String, 
     val inv = bill?.invoice
     var busy by remember { mutableStateOf(false) }
     var collecting by remember { mutableStateOf(false) }
+    val waMode = remember { ReportPrefs().waShareMode() }
+    val waCountry = remember { ReportPrefs().waCountryCode }
 
     Scaffold(
         topBar = {
@@ -166,15 +174,30 @@ fun InvoiceDetailScreen(api: BillingApi, businessId: String, invoiceId: String, 
                             Text(if (money.isPartPaid) "Collect balance" else "Collect payment")
                         }
                     }
+                    // Same choice as the report: the lab's WhatsApp Business
+                    // number sends it, or WhatsApp opens with the message ready.
                     OutlinedButton(onClick = {
                         if (!busy) {
-                            busy = true
-                            scope.launch {
-                                api.sendInvoice(businessId, invoiceId, "whatsapp")
-                                runCatching { repo.syncInvoices(businessId) }; busy = false
+                            val waTo = waPhone(inv.customerPhone, waCountry)
+                            if (waMode == WaShareMode.LINK && waTo != null) {
+                                openUrl(waDeepLink(waTo, waBillMessage(
+                                    customerName = inv.customerName,
+                                    businessName = settings?.supplierDisplayName ?: "",
+                                    invoiceNumber = inv.displayNumber,
+                                    total = inv.total,
+                                    balance = money.balance,
+                                    url = inv.pdfUrl,
+                                    money = { "₹ " + formatDecimal2(it) },
+                                )))
+                            } else {
+                                busy = true
+                                scope.launch {
+                                    api.sendInvoice(businessId, invoiceId, "whatsapp")
+                                    runCatching { repo.syncInvoices(businessId) }; busy = false
+                                }
                             }
                         }
-                    }, enabled = !busy) { Text("Send") }
+                    }, enabled = !busy) { Text("Send on WhatsApp") }
                 }
             }
         }

@@ -596,6 +596,11 @@ fun OrderDetailScreen(
                                 },
                                 enabled = !busy,
                             ) { Text("Print released (${readyTestIds.size})") }
+                            if (waMode != WaShareMode.OFF) {
+                                OutlinedButton(onClick = { if (!busy) showWhatsapp = true }, enabled = !busy) {
+                                    Text("WhatsApp")
+                                }
+                            }
                         }
                         ActionBar(
                             status = o.status,
@@ -631,6 +636,10 @@ fun OrderDetailScreen(
                                     else showPrintChooser = true
                                 }
                             },
+                            // Beside Print, because handing the report over on
+                            // WhatsApp is the same act by another route.
+                            canWhatsapp = waMode != WaShareMode.OFF,
+                            onWhatsapp = { if (!busy) showWhatsapp = true },
                         )
                     }
                 }
@@ -1057,14 +1066,6 @@ fun OrderDetailScreen(
                         OutlinedButton(onClick = { run { t -> printThermalSlip(t) } }, modifier = Modifier.fillMaxWidth()) {
                             Text("Thermal slip")
                         }
-                    }
-                    // Handing the report over on WhatsApp is a release like any
-                    // other — it sits with the print options, behind the same gate.
-                    if (waMode != WaShareMode.OFF) {
-                        OutlinedButton(
-                            onClick = { showPrintChooser = false; printTestIds = null; showWhatsapp = true },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) { Text("Send on WhatsApp") }
                     }
                 }
             },
@@ -1914,6 +1915,9 @@ private fun ActionBar(
     onVerify: () -> Unit,
     onApprove: () -> Unit,
     onPrint: () -> Unit,
+    /** WhatsApp sending is switched on in Settings — show it beside Print. */
+    canWhatsapp: Boolean = false,
+    onWhatsapp: () -> Unit = {},
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         when (status) {
@@ -1936,5 +1940,12 @@ private fun ActionBar(
                     Text("Print report again")
                 }
         }
+        // Only where a report exists to send: the same stages that offer Print.
+        if (canWhatsapp && status in REPORT_READY) {
+            OutlinedButton(onClick = onWhatsapp, enabled = !busy) { Text("WhatsApp") }
+        }
     }
 }
+
+/** Stages at which the report exists and may be handed over. */
+private val REPORT_READY = setOf(LabStatus.APPROVED, LabStatus.REPORTED, LabStatus.DELIVERED)

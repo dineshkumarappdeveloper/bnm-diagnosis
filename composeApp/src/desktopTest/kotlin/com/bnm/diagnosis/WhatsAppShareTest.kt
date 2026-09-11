@@ -2,6 +2,7 @@ package com.bnm.diagnosis
 
 import com.bnm.diagnosis.report.WaShareMode
 import com.bnm.diagnosis.report.hasWaPhone
+import com.bnm.diagnosis.report.waBillMessage
 import com.bnm.diagnosis.report.waDeepLink
 import com.bnm.diagnosis.report.waPhone
 import com.bnm.diagnosis.report.waReportCaption
@@ -54,6 +55,21 @@ class WhatsAppShareTest {
         // The API caption is the same words without a link (the PDF is attached).
         assertTrue("http" !in waReportCaption("Kavitha", "SRT Diagnostics", "ACC-S1-00042"))
         assertEquals("ACC-S1-00042 report.pdf", waReportFilename("ACC-S1-00042"))
+    }
+
+    @Test
+    fun `the bill message states the number, the amount and what is still owed`() {
+        val money = { v: Double -> "Rs " + ((v * 100).toLong() / 100.0).toString() }
+        val paid = waBillMessage("Kavitha Subramanian", "SRT Diagnostics", "LAB-L1-0016", 2050.0, 0.0, money = money)
+        assertTrue(paid.startsWith("Dear Kavitha, thank you for visiting SRT Diagnostics."), paid)
+        assertTrue("Bill: LAB-L1-0016" in paid)
+        assertTrue("Paid in full" in paid && "Balance due" !in paid, paid)
+        val owing = waBillMessage("Kavitha", "SRT Diagnostics", "LAB-L1-0016", 2050.0, 900.0, money = money)
+        assertTrue("Balance due: Rs 900.0" in owing, owing)
+        assertTrue("Paid in full" !in owing)
+        // A hosted invoice link rides along when the server has one.
+        val linked = waBillMessage(null, "SRT", "L1", 10.0, 0.0, url = "https://x/inv/1", money = money)
+        assertTrue("Dear there," in linked && "https://x/inv/1" in linked, linked)
     }
 
     @Test
