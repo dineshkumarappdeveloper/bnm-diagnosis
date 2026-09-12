@@ -1,22 +1,27 @@
 package com.bnm.lab.lab
 
 /**
- * NO LONGER SHIPPED — retained as a test fixture only.
+ * A TEST FIXTURE. This file lives in `desktopTest` and is not on the app's
+ * classpath, so it cannot ship and cannot be wired back into App.kt — which is
+ * the point: it used to sit in commonMain, marked unused, one import away from
+ * returning.
  *
- * The app now bootstraps from the GLOBAL master catalog (`lab_test_catalog`,
- * 223 tests) instead: see the catalog bootstrap in App.kt and
- * [com.bnm.lab.sync.MasterCatalogImporter]. This set overlapped the master
- * catalog on 22 codes and was the THINNER copy of each (its CBC carries 13
- * analytes against the master's 22), so seeding it first meant a lab kept the
- * poorer version of every overlapping test. Do not wire it back into App.kt.
+ * The app bootstraps from the GLOBAL master catalog (`lab_test_catalog`, 223
+ * tests) and nothing else: see the catalog bootstrap in App.kt and
+ * [com.bnm.lab.sync.MasterCatalogImporter]. These 40 overlapped the master
+ * catalog on 22 codes and were the THINNER copy of each (this CBC carries 13
+ * analytes against the master's 22), so seeding them first left a lab with the
+ * poorer version of every overlapping test.
  *
- * Starter catalog: ~40 standard Indian diagnostic tests with real parameters,
+ * What remains useful is the shape: a handful of tests with real units,
+ * sex-split and age-banded ranges, which several tests here rely on.
+ *
+ * The set: ~40 standard Indian diagnostic tests with real parameters,
  * units and reference ranges — sex-split where medically standard (Hb, PCV,
  * RBC, uric acid, creatinine, SGOT/SGPT, HDL, ESR) and AGE-BANDED for the six
  * parameters whose paediatric values genuinely differ (see [HB_RANGES] and
  * friends) — plus the five bread-and-butter panels. Seeded once on first run
- * (count==0 guard) so a lab can bill and report on day one; everything remains
- * editable in the catalog's range editor.
+ * (count==0 guard).
  *
  * Ranges are typical intervals from standard Indian lab practice —
  * labs should adjust to their own method/analyzer inserts.

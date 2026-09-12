@@ -43,6 +43,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -62,6 +63,9 @@ import com.bnm.lab.lab.TestParameter
 import com.bnm.lab.util.formatDecimal2
 import kotlin.math.floor
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
+import com.bnm.lab.ui.theme.AppTheme
 
 private val SAMPLE_TYPES = listOf("blood", "serum", "urine", "stool", "swab", "other")
 
@@ -96,10 +100,22 @@ fun CatalogScreen(
     var panels by remember { mutableStateOf<List<LabPanel>>(emptyList()) }
     var refresh by remember { mutableStateOf(0) }
     var editTest by remember { mutableStateOf<LabTest?>(null) }
+    // Pricing the menu. The master catalog ships 223 tests with no prices in
+    // it — clinical content is the dataset's, money is the lab's — so pricing
+    // has to be a bulk act, not 223 trips through the edit sheet.
+    var priceMode by remember { mutableStateOf(false) }
+    var unpricedOnly by remember { mutableStateOf(false) }
+    val priceDrafts = remember { mutableStateMapOf<String, String>() }
+    var bulkPrice by remember { mutableStateOf("") }
+    var savingPrices by remember { mutableStateOf(false) }
     var editPanel by remember { mutableStateOf<LabPanel?>(null) }
 
     LaunchedEffect(refresh) {
+        // Retired starter-catalog rows survive only so an old order can still
+        // resolve its results; they are not part of the menu and never come
+        // back, so the catalog does not list them.
         tests = runCatching { repo.listTests(includeInactive = true) }.getOrDefault(emptyList())
+            .filterNot { it.id.startsWith("seed-") }
         panels = runCatching { repo.listPanels(includeInactive = true) }.getOrDefault(emptyList())
     }
 
@@ -137,10 +153,13 @@ fun CatalogScreen(
                                             when {
                                                 added == 0 && skipped == 0 -> "The master catalog is empty."
                                                 added == 0 -> "Already up to date — all $skipped tests are in your catalog."
-                                                skipped == 0 -> "Added $added tests."
+                                                // The dataset carries no money, so a fresh
+                                                // import is an unpriced menu. Say it here or the
+                                                // lab meets it at the billing counter instead.
+                                                skipped == 0 -> "Added $added tests — set their prices below."
                                                 // Say what was left alone and WHY: a lab that edited
                                                 // a price or a range must not think it was overwritten.
-                                                else -> "Added $added tests. Kept your existing $skipped unchanged."
+                                                else -> "Added $added tests (unpriced). Kept your existing $skipped unchanged."
                                             }
                                         },
                                         onFailure = {
@@ -178,11 +197,37 @@ fun CatalogScreen(
                 )
                 val q = search.trim().lowercase()
                 val visible = tests.filter {
-                    q.isEmpty() || it.name.lowercase().contains(q) || it.code.lowercase().contains(q) ||
-                        (it.category?.lowercase()?.contains(q) == true)
+                    (q.isEmpty() || it.name.lowercase().contains(q) || it.code.lowercase().contains(q) ||
+                        (it.category?.lowercase()?.contains(q) == true)) &&
+                        (!unpricedOnly || it.price <= 0.0)
+                }
+                val unpriced = tests.count { it.price <= 0.0 }
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    FilterChip(
+                        selected = priceMode,
+                        onClick = { priceMode = !priceMode; if (!priceMode) priceDrafts.clear() },
+                        label = { Text("Set prices") },
+                    )
+                    if (unpriced > 0) {
+                        FilterChip(
+                            selected = unpricedOnly,
+                            onClick = { unpricedOnly = !unpricedOnly },
+                            label = { Text("$unpriced without a price") },
+                        )
+                    }
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "${visible.size} shown",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 LazyColumn(
-                    Modifier.fillMaxSize(),
+                    Modifier.fillMaxWidth().weight(1f),
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
@@ -207,8 +252,25 @@ fun CatalogScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
-                                Text("₹ ${formatDecimal2(t.price)}", style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(end = 10.dp))
+                                if (priceMode) {
+                                    OutlinedTextField(
+                                        value = priceDrafts[t.id]
+                                            ?: if (t.price > 0) formatDecimal2(t.price).removeSuffix(".00") else "",
+                                        onValueChange = { v -> priceDrafts[t.id] = v.filter { c -> c.isDigit() || c == '.' }.take(9) },
+                                        label = { Text("₹") },
+                                        singleLine = true,
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                        modifier = Modifier.width(118.dp).padding(end = 10.dp),
+                                    )
+                                } else {
+                                    Text(
+                                        if (t.price > 0) "₹ ${formatDecimal2(t.price)}" else "No price",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (t.price > 0) MaterialTheme.colorScheme.onSurface else AppTheme.colors.warning,
+                                        modifier = Modifier.padding(end = 10.dp),
+                                    )
+                                }
                                 Switch(
                                     checked = t.active,
                                     onCheckedChange = { on ->
@@ -219,6 +281,61 @@ fun CatalogScreen(
                                     },
                                 )
                             }
+                        }
+                    }
+                }
+                if (priceMode) {
+                    val changed = priceDrafts.count { (id, v) ->
+                        val p = v.trim().toDoubleOrNull()
+                        p != null && p != (tests.firstOrNull { it.id == id }?.price ?: -1.0)
+                    }
+                    Surface(tonalElevation = 3.dp) {
+                        Column(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                OutlinedTextField(
+                                    value = bulkPrice,
+                                    onValueChange = { v -> bulkPrice = v.filter { c -> c.isDigit() || c == '.' }.take(9) },
+                                    label = { Text("₹ for all shown") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                    modifier = Modifier.width(160.dp),
+                                )
+                                TextButton(
+                                    enabled = bulkPrice.trim().toDoubleOrNull() != null && visible.isNotEmpty(),
+                                    onClick = { visible.forEach { priceDrafts[it.id] = bulkPrice.trim() } },
+                                ) { Text("Apply to ${visible.size}") }
+                                Spacer(Modifier.weight(1f))
+                                TextButton(
+                                    enabled = priceDrafts.isNotEmpty() && !savingPrices,
+                                    onClick = { priceDrafts.clear() },
+                                ) { Text("Discard") }
+                                Button(
+                                    enabled = changed > 0 && !savingPrices,
+                                    onClick = {
+                                        savingPrices = true
+                                        scope.launch {
+                                            // Price only: a bulk edit must not touch an
+                                            // analyte or a reference range.
+                                            for ((id, v) in priceDrafts.toMap()) {
+                                                val p = v.trim().toDoubleOrNull() ?: continue
+                                                runCatching { repo.setTestPrice(id, p) }
+                                            }
+                                            priceDrafts.clear()
+                                            bulkPrice = ""
+                                            savingPrices = false
+                                            refresh++
+                                        }
+                                    },
+                                ) { Text(if (savingPrices) "Saving…" else "Save $changed price${if (changed == 1) "" else "s"}") }
+                            }
+                            Text(
+                                "Prices are yours: the master catalog carries the tests and their reference ranges, never what you charge.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }

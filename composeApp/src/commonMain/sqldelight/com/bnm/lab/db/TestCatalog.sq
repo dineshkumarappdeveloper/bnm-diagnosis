@@ -62,6 +62,29 @@ SELECT * FROM lab_tests ORDER BY sort_order, name;
 setTestActive:
 UPDATE lab_tests SET active = ? WHERE id = ?;
 
+-- Price ONLY. The master catalog ships clinical content (names, analytes,
+-- ranges) with no money in it, so pricing the menu is the lab's own act and
+-- happens in bulk. A full upsertTest would round-trip parameters_json for
+-- every row just to change a number.
+setTestPrice:
+UPDATE lab_tests SET price = ? WHERE id = ?;
+
+-- How much of the menu still has no price — 223 imported tests all start at 0.
+countUnpriced:
+SELECT count(*) FROM lab_tests WHERE price <= 0;
+
+-- The bundled 40-test starter catalog: every one of its rows carried an id
+-- beginning 'seed-'. It is retired for good — the master catalog is the only
+-- menu — and this is how the one-time sweep finds what is left of it.
+legacySeedTests:
+SELECT * FROM lab_tests WHERE id LIKE 'seed-%';
+
+-- Retire in place, for a legacy row an old order still points at: it must not
+-- be orderable again, and its code must stop squatting a master catalog code
+-- (the starter set's CBC would otherwise block the master's 22-analyte CBC).
+retireTest:
+UPDATE lab_tests SET active = 0, code = ? WHERE id = ?;
+
 deleteTest:
 DELETE FROM lab_tests WHERE id = ?;
 

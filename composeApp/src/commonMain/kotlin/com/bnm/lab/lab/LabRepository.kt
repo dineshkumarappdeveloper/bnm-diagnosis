@@ -518,6 +518,58 @@ class LabRepository(
         tQ.setTestActive(if (active) 1L else 0L, id)
     }
 
+    /**
+     * Set one test's price and nothing else.
+     *
+     * The catalog's clinical content comes from the master dataset; what a lab
+     * charges is the lab's own. Kept as a narrow UPDATE so bulk pricing a
+     * 223-test menu cannot disturb a single analyte or reference range.
+     */
+    suspend fun setTestPrice(id: String, price: Double) = withContext(Dispatchers.Default) {
+        tQ.setTestPrice(price.coerceAtLeast(0.0), id)
+    }
+
+    /** Tests still carrying no price — what a freshly imported menu looks like. */
+    suspend fun countUnpricedTests(): Long = withContext(Dispatchers.Default) {
+        tQ.countUnpriced().executeAsOne()
+    }
+
+    /**
+     * Retire the bundled 40-test starter catalog, once and for all.
+     *
+     * That set shipped inside the app and seeded itself on first launch. It
+     * overlapped the master catalog on 22 codes and was the THINNER copy of
+     * each (its CBC carried 13 analytes against the master's 22), so a lab that
+     * seeded it and then pulled kept the poorer version — and its codes squat
+     * the master's, which is why a rescued row is renamed rather than left.
+     *
+     * A row nothing ever ordered is deleted. A row an old order still names is
+     * kept but deactivated: `lab_order_tests` snapshots the name and price, but
+     * results and graphs are keyed on `test_id`, so deleting it would strand a
+     * finished report. Idempotent — it runs at every launch and does nothing
+     * once the sweep is done, which is what a fresh install sees.
+     */
+    suspend fun retireLegacySeedCatalog(): Pair<Int, Int> = withContext(Dispatchers.Default) {
+        val legacy = tQ.legacySeedTests().executeAsList()
+        if (legacy.isEmpty()) return@withContext 0 to 0
+        var deleted = 0
+        var kept = 0
+        db.transaction {
+            for (row in legacy) {
+                if (oQ.countOrderTestsFor(row.id).executeAsOne() == 0L) {
+                    tQ.deleteTest(row.id)
+                    deleted++
+                } else {
+                    if (row.active == 1L || !row.code.endsWith(RETIRED_SUFFIX)) {
+                        tQ.retireTest(row.code.removeSuffix(RETIRED_SUFFIX) + RETIRED_SUFFIX, row.id)
+                    }
+                    kept++
+                }
+            }
+        }
+        deleted to kept
+    }
+
     suspend fun deleteTest(id: String) = withContext(Dispatchers.Default) { tQ.deleteTest(id) }
 
     suspend fun countTests(): Long = withContext(Dispatchers.Default) { tQ.countTests().executeAsOne() }
@@ -1179,6 +1231,10 @@ class LabRepository(
     )
 
     companion object {
+        /** What a rescued starter-catalog code becomes, so it stops colliding
+         *  with the master catalog's code for the same test. */
+        const val RETIRED_SUFFIX = "-OLD"
+
         /** THE pricing rule, in one place: a referrer override wins, else the
          *  catalog price. Every price the app shows, bills or reports resolves
          *  through here (directly or via [effectivePrice]/[priceList]). */

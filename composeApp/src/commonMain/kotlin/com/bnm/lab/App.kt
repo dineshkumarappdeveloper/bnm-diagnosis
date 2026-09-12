@@ -178,6 +178,13 @@ fun App() {
         }
     }
 
+    // The bundled starter catalog is gone from the app, but not from the
+    // machines that already seeded it — so sweep it out here, at every launch.
+    // Unused rows are deleted; a row an old order still names is deactivated
+    // and its code freed, because results and graphs key on test_id and
+    // deleting it would strand a finished report. No-op on a fresh install.
+    LaunchedEffect(Unit) { runCatching { labRepo.retireLegacySeedCatalog() } }
+
     // ── P3: additive lab sync (push/pull lab_entities + EMR inbox). The app is
     // the system of record — every phase is best-effort and never blocks UI. ──
     // Report publishing rides the normal sync sweep: printing works offline, and

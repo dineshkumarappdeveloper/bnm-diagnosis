@@ -202,6 +202,11 @@ insertOrderTest:
 INSERT INTO lab_order_tests(id, order_id, test_id, test_name, price, status, commission_pct, sent_to_partner_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?);
 
+-- Does any order still name this test? The legacy-seed sweep deletes a
+-- starter-catalog row outright when nothing does, and only then.
+countOrderTestsFor:
+SELECT count(*) FROM lab_order_tests WHERE test_id = ?;
+
 testsForOrder:
 SELECT * FROM lab_order_tests WHERE order_id = ? ORDER BY rowid;
 
