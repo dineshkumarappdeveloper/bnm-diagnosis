@@ -1,5 +1,7 @@
 package com.bnm.lab.db
 
+import com.bnm.lab.diagnostics.AppLog
+
 import app.cash.sqldelight.db.SqlDriver
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import java.io.File
@@ -37,10 +39,21 @@ actual class DriverFactory actual constructor() {
                             side.copyTo(File(dbFile.parentFile, CHAT_DB_NAME + suffix), overwrite = false)
                         }
                     }
+                }.onFailure {
+                    AppLog.e("Database", "copying legacy database from $legacyDir failed", it)
                 }.isSuccess
-                if (copied) break
+                if (copied) {
+                    AppLog.w("Database", "no database in ${dbFile.parentFile.name}; adopted a copy from " +
+                        "$legacyDir (${legacy.length() / 1024} KB)")
+                    break
+                }
             }
+            // The failure mode this block exists to prevent: a brand-new EMPTY
+            // database. When a lab says "all our patients disappeared", this line
+            // is the first thing to look for.
+            if (!dbFile.exists()) AppLog.w("Database", "no existing database found anywhere — starting EMPTY at ${dbFile.absolutePath}")
         }
+        AppLog.i("Database", "opening ${dbFile.absolutePath} (${dbFile.length() / 1024} KB)")
         // Capture freshness BEFORE constructing the driver (which opens/creates the file).
         val driver = JdbcSqliteDriver("jdbc:sqlite:${dbFile.absolutePath}")
         // Self-healing schema: every CREATE is IF NOT EXISTS — create on EVERY
@@ -67,7 +80,7 @@ internal val LEGACY_APP_DIRS = listOf("BNMDiagnosis", "BNMAdmin")
 internal const val APP_DIR_NAME = "BNMLab"
 
 /** OS-appropriate per-user app data directory; created if missing. */
-private fun appDataDir(): File {
+internal fun appDataDir(): File {
     val os = System.getProperty("os.name").orEmpty().lowercase()
     val home = System.getProperty("user.home").orEmpty()
     val base = when {

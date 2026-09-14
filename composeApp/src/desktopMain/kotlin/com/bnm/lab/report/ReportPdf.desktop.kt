@@ -1,5 +1,7 @@
 package com.bnm.lab.report
 
+import com.bnm.lab.diagnostics.AppLog
+
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
 import org.apache.pdfbox.pdmodel.PDPageContentStream
@@ -50,10 +52,16 @@ actual fun writeLabReportPdf(doc: ReportDoc): String {
     val dir = File(System.getProperty("java.io.tmpdir"), "bnm-diagnosis-reports").apply { mkdirs() }
     val safe = doc.accession.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "lab" }
     val file = File(dir, "$safe-report.pdf")
-    PDDocument().use { pdf ->
-        A4ReportWriter(pdf, doc).render()
-        pdf.save(file)
+    try {
+        PDDocument().use { pdf ->
+            A4ReportWriter(pdf, doc).render()
+            pdf.save(file)
+        }
+    } catch (e: Throwable) {
+        AppLog.e("Report", "PDF generation failed for ${doc.accession}", e)
+        throw e
     }
+    AppLog.i("Report", "PDF written for ${doc.accession} (${file.length() / 1024} KB)")
     return file.absolutePath
 }
 
@@ -68,7 +76,7 @@ actual fun openPdf(path: String): String = try {
     }
 } catch (e: Exception) {
     "Open failed: ${e.message}"
-}
+}.also { AppLog.i("Report", "open PDF: $it") }
 
 actual fun printPdf(path: String): String = try {
     val f = File(path)
@@ -80,8 +88,9 @@ actual fun printPdf(path: String): String = try {
         if (job.printDialog()) { job.print(); "Sent to printer" } else "Print cancelled"
     }
 } catch (e: Exception) {
+    AppLog.e("Report", "printing failed", e)
     "Print failed: ${e.message}"
-}
+}.also { AppLog.i("Report", "print: $it") }
 
 // ─────────────────────────────────────────────────────────────────────────────
 

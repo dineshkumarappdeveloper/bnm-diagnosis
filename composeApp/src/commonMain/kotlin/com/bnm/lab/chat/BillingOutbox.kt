@@ -1,5 +1,7 @@
 package com.bnm.lab.chat
 
+import com.bnm.lab.diagnostics.AppLog
+
 import androidx.compose.runtime.staticCompositionLocalOf
 import com.bnm.lab.api.ApiClient
 import com.bnm.lab.api.BillingApi
@@ -20,6 +22,7 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -54,7 +57,10 @@ class BillingOutboxSender(
 
     /** App-lifetime scope so a drain triggered right before navigation isn't
      *  cancelled when the originating screen leaves the composition. */
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default +
+            CoroutineExceptionHandler { _, e -> AppLog.e("Billing", "outbox background task failed", e) },
+    )
 
     fun requeueStuck() {
         runCatching { outboxQ.requeueStuck() }

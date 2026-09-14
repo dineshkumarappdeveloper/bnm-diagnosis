@@ -1,5 +1,10 @@
 package com.bnm.lab.update
 
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.OutlinedButton
+import com.bnm.lab.diagnostics.AppLog
+import com.bnm.lab.diagnostics.SupportReporter
+import com.bnm.lab.diagnostics.SupportUi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -78,6 +83,12 @@ fun AppVersionPanel(
         installNote = null
         scope.launch {
             state = checkNow(platform)
+            AppLog.i("Update", "update check: ${when (val r = state) {
+                is UpdateCheck.Available -> "available ${r.release.version}"
+                is UpdateCheck.UpToDate -> "up to date"
+                is UpdateCheck.Failed -> "failed — ${r.message}"
+                null -> "no result"
+            }}")
             checking = false
         }
     }
@@ -167,7 +178,7 @@ fun AppVersionPanel(
                         Spacer(Modifier.height(4.dp))
                         Text(
                             "The installer opens when the download finishes, and BNM " +
-                                "Diagnosis closes so it can be replaced. Your lab data " +
+                                "Lab closes so it can be replaced. Your lab data " +
                                 "stays on this machine.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -205,6 +216,13 @@ fun AppVersionPanel(
                                     )
                                     downloading = false
                                     when (result) {
+                                        is UpdateInstall.Failed ->
+                                            AppLog.w("Update", "install of ${s.release.version} failed: ${result.message}")
+                                        is UpdateInstall.DownloadedOnly ->
+                                            AppLog.w("Update", "install of ${s.release.version} downloaded only: ${result.reason}")
+                                        else -> AppLog.i("Update", "install of ${s.release.version}: ${result::class.simpleName}")
+                                    }
+                                    when (result) {
                                         is UpdateInstall.LaunchedQuitNow -> onQuitForUpdate()
                                         is UpdateInstall.DownloadedOnly ->
                                             installNote = "${result.reason}\n${result.path}"
@@ -223,6 +241,26 @@ fun AppVersionPanel(
                 Spacer(Modifier.height(8.dp))
                 Text(it, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error)
+            }
+
+            // Next to the version on purpose: "what version are you on?" and
+            // "send us the logs" are the first two things support asks.
+            if (SupportReporter.isAvailable) {
+                Spacer(Modifier.height(12.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(8.dp))
+                Text("Having a problem?", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Send BNM support a report of the app's recent activity. " +
+                        "Also in the Help menu, from any screen.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { SupportUi.open() }) { Text("Report a problem") }
+                    OutlinedButton(onClick = { SupportReporter.openLogsFolder() }) { Text("Open logs folder") }
+                }
             }
         }
     }

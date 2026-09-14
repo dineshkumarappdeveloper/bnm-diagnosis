@@ -1,5 +1,8 @@
 package com.bnm.lab.screens.license
 
+import com.bnm.lab.diagnostics.AppLog
+import com.bnm.lab.diagnostics.logFailure
+
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -172,9 +175,12 @@ fun ActivationScreen(
                 // leaves the device unlicensed-but-clean rather than licensed to
                 // the new lab while still holding the old lab's data. Analyzer
                 // listeners are stopped first for the same reason.
-                runCatching { onBeforeTenantWipe() }
-                runCatching { labRepo.resetForNewTenant() }
+                AppLog.w("Licence", "tenant switch confirmed — erasing this device's lab data before activating")
+                runCatching { onBeforeTenantWipe() }.logFailure("Licence", "stopping analyzers before tenant wipe")
+                runCatching { labRepo.resetForNewTenant() }.logFailure("Licence", "tenant wipe")
             }
+            // The key itself is never logged — only that an attempt happened.
+            AppLog.i("Licence", "activation attempt (replacing device: ${replaceDeviceId != null})")
             labApi.activate(
                 key = k,
                 deviceId = licenseManager.deviceId,
@@ -200,15 +206,22 @@ fun ActivationScreen(
                         seatsFull = null
                         replaceCandidate = null
                         activated = a
+                        AppLog.i("Licence", "activated: edition=${if (a.businessId == null) "standalone" else "connected"} " +
+                            "mode=${a.mode} seats=${a.seats} expires=${a.expiresAt} deviceRow=${a.deviceRowId}")
                         onActivated(a)
                     }
-                    is LabActivateResult.SeatsFull -> seatsFull = outcome
+                    is LabActivateResult.SeatsFull -> {
+                        AppLog.w("Licence", "activation refused: all seats in use (${outcome.devices.size} devices)")
+                        seatsFull = outcome
+                    }
                     is LabActivateResult.ReplaceCooldown -> {
+                        AppLog.w("Licence", "activation refused: replace cooldown — ${outcome.message}")
                         seatsFull = null
                         errorMessage = outcome.message
                     }
                 }
             }.onFailure {
+                AppLog.w("Licence", "activation failed", it)
                 loading = false
                 errorMessage = it.message ?: "Activation failed — check your connection"
             }

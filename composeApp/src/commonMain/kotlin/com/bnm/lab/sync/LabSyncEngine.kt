@@ -1,5 +1,8 @@
 package com.bnm.lab.sync
 
+import com.bnm.lab.diagnostics.AppLog
+import com.bnm.lab.diagnostics.logFailure
+
 import com.bnm.lab.api.LabApi
 import com.bnm.lab.api.LabSyncDisabledException
 import com.bnm.lab.api.LabSyncPullRow
@@ -122,6 +125,8 @@ class LabSyncEngine(
         }
         mutex.withLock {
             _state.value = _state.value.copy(syncing = true, lastError = null)
+            val started = kotlin.time.TimeSource.Monotonic.markNow()
+            AppLog.i("Sync", "sweep started")
             try {
                 withContext(Dispatchers.Default) {
                     pushAll()
@@ -134,17 +139,20 @@ class LabSyncEngine(
                     // additive. A failed upload must not mark the whole sweep failed
                     // and must not roll back the watermarks the pushes just advanced.
                     runCatching { drainReports?.invoke() }
-                        .onFailure { println("[LabSync] report upload deferred: ${'$'}{it.message}") }
+                        .logFailure("Sync", "report upload (deferred to next sweep)")
                 }
                 if (prefs.syncDisabled) prefs.syncDisabled = false
                 prefs.lastSyncAt = nowIso()
                 _state.value = LabSyncState(syncing = false, lastSyncAt = prefs.lastSyncAt)
+                AppLog.i("Sync", "sweep finished in ${started.elapsedNow().inWholeMilliseconds} ms")
             } catch (e: LabSyncDisabledException) {
+                AppLog.i("Sync", "server reports a standalone licence — sync switched off")
                 // Standalone license: silent, no retries this run, note-only UI.
                 prefs.syncDisabled = true
                 _state.value = _state.value.copy(syncing = false, disabled = true)
             } catch (e: Throwable) {
-                println("[LabSync] sweep failed (will retry next trigger): ${e.message}")
+                AppLog.w("Sync", "sweep failed after ${started.elapsedNow().inWholeMilliseconds} ms " +
+                    "(will retry next trigger)", e)
                 _state.value = _state.value.copy(syncing = false, lastError = e.message)
             }
         }
@@ -276,19 +284,28 @@ class LabSyncEngine(
     private suspend fun pullAll() {
         var cursor = prefs.pullCursor
         var appliedCatalog = false
+        var skipped = 0
         while (true) {
             val rows = api.syncPull(cursor, PULL_PAGE).getOrThrow()
             if (rows.isEmpty()) break
             for (row in rows) {
                 // Malformed rows are skipped, never fatal — the cursor still advances.
-                runCatching { applyRow(row) }
-                    .onFailure { println("[LabSync] skip ${row.entity}/${row.id}: ${it.message}") }
+                runCatching { applyRow(row) }.onFailure { e ->
+                    skipped++
+                    // One full trace per sweep is diagnostic; a thousand identical
+                    // ones is a storm that pushes the real errors out of the log.
+                    when {
+                        skipped == 1 -> AppLog.w("Sync", "applying pulled ${row.entity}/${row.id} failed (skipped, cursor advances)", e)
+                        skipped <= 20 -> AppLog.w("Sync", "applying pulled ${row.entity}/${row.id} failed: ${e::class.simpleName}")
+                    }
+                }
                 if (row.entity == E_TEST || row.entity == E_PANEL) appliedCatalog = true
                 if (row.seq > cursor) cursor = row.seq
             }
             prefs.pullCursor = cursor
             if (rows.size < PULL_PAGE) break
         }
+        if (skipped > 20) AppLog.w("Sync", "$skipped pulled rows could not be applied this sweep (first 20 listed above)")
         // Applying remote catalog rows changes the local fingerprint — refresh
         // it so the next push sweep doesn't bounce the same content back.
         if (appliedCatalog) {

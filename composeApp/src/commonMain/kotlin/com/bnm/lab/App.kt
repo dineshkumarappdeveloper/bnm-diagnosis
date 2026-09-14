@@ -1,5 +1,10 @@
 package com.bnm.lab
 
+import com.bnm.lab.diagnostics.AppLog
+import com.bnm.lab.diagnostics.DiagnosticsContext
+import com.bnm.lab.diagnostics.ReportProblemDialog
+import com.bnm.lab.diagnostics.SupportUi
+import com.bnm.lab.diagnostics.logFailure
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -127,6 +132,10 @@ fun App() {
     val staffRepo = remember { StaffRepository(database, ApiClient.json) }
     val staffSession = remember { StaffSession() }
     val licenseState by licenseManager.state.collectAsState()
+    LaunchedEffect(licenseState.licensed, licenseState.blocked, licenseState.edition, licenseState.expiresAt) {
+        AppLog.i("Licence", "licensed=${licenseState.licensed} blocked=${licenseState.blocked} " +
+            "edition=${licenseState.edition} mode=${licenseState.mode} expires=${licenseState.expiresAt}")
+    }
 
     // Old result rows carry only the signatory's NAME; give them the person's
     // id so a reprint follows a rename (the seeded "Lab Owner" above all).
@@ -172,10 +181,12 @@ fun App() {
         if (!licenseState.licensed || !licenseState.isStandalone) return@LaunchedEffect
         if (licenseManager.deviceToken().isNullOrEmpty()) return@LaunchedEffect
         if (runCatching { labRepo.countTests() }.getOrDefault(1L) > 0L) return@LaunchedEffect
+        AppLog.i("Catalog", "catalog empty on an offline licence — bootstrapping from the master catalog")
         runCatching {
             MasterCatalogImporter(database, ApiClient.json)
                 .apply(labApi.masterCatalog().getOrThrow())
-        }
+        }.onSuccess { AppLog.i("Catalog", "master catalog bootstrap: added ${it.added}, skipped ${it.skipped}") }
+            .logFailure("Catalog", "master catalog bootstrap")
     }
 
     // The bundled starter catalog is gone from the app, but not from the
@@ -203,6 +214,39 @@ fun App() {
     // instrument results (and measured histograms) straight into lab orders.
     // Purely local: no licence/connectivity gate, results sync later as usual.
     val instrumentEngine = remember { InstrumentEngine(database, labRepo, ApiClient.json) }
+
+    // ── Support report context: the questions support asks first, answered at
+    // the top of the report. Flags, counts and IDs ONLY — the report is emailed,
+    // so no patient, no result, no token, no licence key ever goes in here. ──
+    LaunchedEffect(Unit) {
+        DiagnosticsContext.setHeadline {
+            val st = licenseManager.state.value
+            listOfNotNull(
+                st.labName,
+                if (st.isStandalone) "offline edition" else "connected edition",
+                "device ${licenseManager.deviceId.take(8)}",
+            ).joinToString(" · ")
+        }
+        DiagnosticsContext.register("Licence") {
+            val st = licenseManager.state.value
+            "licensed=${st.licensed} blocked=${st.blocked} edition=${st.edition} mode=${st.mode} " +
+                "seats=${st.seats}\nexpires=${st.expiresAt} lab=${st.labName}\n" +
+                "business=${st.businessId} deviceRow=${st.deviceRowId} install=${licenseManager.deviceId}"
+        }
+        DiagnosticsContext.register("Data on this computer") {
+            val c = labRepo.tenantRowCounts()
+            "patients=${c.patients} orders=${c.orders} results=${c.results} staff=${c.staff} tests=${c.tests}"
+        }
+        DiagnosticsContext.register("Sync") {
+            val st = labSync.state.value
+            "syncing=${st.syncing} disabled=${st.disabled} lastSyncAt=${st.lastSyncAt}\nlastError=${st.lastError}"
+        }
+        DiagnosticsContext.register("Analyzers") {
+            instrumentEngine.status.value.entries
+                .joinToString("\n") { (id, s) -> "$id: ${s.state} lastFrame=${s.lastFrameAt} ${s.detail.orEmpty()}" }
+                .ifBlank { "none configured" }
+        }
+    }
     LaunchedEffect(Unit) { instrumentEngine.start() }
     // A tenant switch stops the listeners before wiping (ActivationScreen's
     // onBeforeTenantWipe); bring them back once a (new) licence is in place.
@@ -231,12 +275,17 @@ fun App() {
             ) {
                 labApi.heartbeat().onSuccess { hb ->
                     when (hb) {
-                        is LabHeartbeatResult.Ok ->
+                        is LabHeartbeatResult.Ok -> {
+                            AppLog.i("Licence", "heartbeat ok (mode=${hb.mode} seats=${hb.seats} expires=${hb.expiresAt})")
                             licenseManager.applyHeartbeat(hb.licenseJwt, hb.mode, hb.seats, hb.expiresAt, hb.labName)
-                        is LabHeartbeatResult.Blocked -> licenseManager.setBlocked(true)
-                        LabHeartbeatResult.InvalidSession -> Unit
+                        }
+                        is LabHeartbeatResult.Blocked -> {
+                            AppLog.w("Licence", "heartbeat: this device's licence is BLOCKED — new work gated")
+                            licenseManager.setBlocked(true)
+                        }
+                        LabHeartbeatResult.InvalidSession -> AppLog.w("Licence", "heartbeat: device session rejected (401)")
                     }
-                }
+                }.logFailure("Licence", "heartbeat")
             }
             first = false
             wasOnline = online
@@ -338,11 +387,19 @@ fun App() {
         ) {
             val licState by licenseManager.state.collectAsState()
 
+            val supportRequest by SupportUi.request.collectAsState()
+            supportRequest?.let { ReportProblemDialog(it, onDismiss = { SupportUi.close() }) }
+
             // Entry gate (P2): unlicensed → ActivationScreen. The old billing
             // counter-pairing screen (LoginScreen) is intentionally UNREACHABLE
             // from the entry flow — license activation replaces pairing.
             key(isLoggedIn) {
                 val navController = rememberNavController()
+                LaunchedEffect(navController) {
+                    navController.currentBackStackEntryFlow.collect { entry ->
+                        AppLog.i("Nav", entry.destination.route ?: "(unnamed screen)")
+                    }
+                }
                 // Accession of the order just registered (P1b) — shown as the
                 // confirmation snackbar once LabHome is back on screen.
                 var lastAccession by remember { mutableStateOf<String?>(null) }
@@ -687,6 +744,8 @@ fun App() {
                                 {
                                     val pulled = labApi.masterCatalog().getOrThrow()
                                     val outcome = MasterCatalogImporter(database, ApiClient.json).apply(pulled)
+                                    AppLog.i("Catalog", "master catalog pull: ${pulled.size} received, " +
+                                        "added ${outcome.added}, kept ${outcome.skipped}")
                                     outcome.added to outcome.skipped
                                 }
                             } else null,

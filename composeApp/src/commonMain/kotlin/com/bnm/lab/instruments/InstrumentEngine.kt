@@ -1,5 +1,7 @@
 package com.bnm.lab.instruments
 
+import com.bnm.lab.diagnostics.AppLog
+
 import app.cash.sqldelight.coroutines.asFlow
 import app.cash.sqldelight.coroutines.mapToList
 import com.bnm.lab.db.AppDatabase
@@ -19,6 +21,7 @@ import io.ktor.utils.io.readAvailable
 import io.ktor.utils.io.writeFully
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -74,7 +77,13 @@ class InstrumentEngine(
     private val json: Json,
     private val prefs: DiagnosisPrefs = DiagnosisPrefs(),
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default +
+            // Last line of defence for a failure no call site caught: log it, keep
+            // the other listeners running, and never let it reach the JVM's
+            // uncaught handler (which would treat it as a crash).
+            CoroutineExceptionHandler { _, e -> AppLog.e("Analyzer", "background task failed", e) },
+    )
     private val q get() = db.instrumentsQueries
     private val restartMutex = Mutex()
     private val listeners = mutableMapOf<String, ListenerHandle>()
@@ -199,6 +208,14 @@ class InstrumentEngine(
                                 if (n < 0) break
                                 if (n > 0) assembler.submit(buf.copyOf(n))
                             }
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            // An analyzer dropping its connection mid-send is routine,
+                            // not a crash. Record it against the instrument and let the
+                            // listener keep serving — escaping here would reach the
+                            // JVM's uncaught handler.
+                            logRow(cfg, "info", "connection closed: ${e::class.simpleName}", null)
                         } finally {
                             // Drain BEFORE closing: the last chunk may complete a
                             // message whose ACK still has to go out on this socket.
@@ -220,7 +237,13 @@ class InstrumentEngine(
     }
 
     private fun setStatus(id: String, s: InstrumentStatus) {
+        val before = _status.value[id]
         _status.value = _status.value + (id to s)
+        // Transitions only — lastFrameAt moves on every frame and would drown the log.
+        if (before?.state != s.state || before.detail != s.detail) {
+            if (s.state == "error") AppLog.w("Analyzer", "$id -> ${s.state}: ${s.detail.orEmpty()}")
+            else AppLog.i("Analyzer", "$id -> ${s.state}: ${s.detail.orEmpty()}")
+        }
     }
 
     /**
@@ -617,6 +640,12 @@ class InstrumentEngine(
     // ── internals ──
 
     private suspend fun logRow(cfg: InstrumentConfig, direction: String, summary: String, raw: String?) {
+        // Onto the activity log as well — the SUMMARY only, which every call site
+        // writes as specimen id + counts. `raw` is the analyzer frame itself
+        // (patient names, values) and stays in the local instrument_log table;
+        // it must never reach a file that is emailed.
+        if (direction == "error") AppLog.w("Analyzer", "${cfg.name}: $summary")
+        else AppLog.i("Analyzer", "${cfg.name} [$direction]: $summary")
         runCatching {
             withContext(Dispatchers.Default) {
                 q.insertLog(Uuid.random().toString(), cfg.id.ifBlank { null }, cfg.name,

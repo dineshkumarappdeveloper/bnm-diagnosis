@@ -1,5 +1,7 @@
 package com.bnm.lab.staff
 
+import com.bnm.lab.diagnostics.AppLog
+
 import androidx.compose.runtime.staticCompositionLocalOf
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -34,12 +36,15 @@ class StaffSession {
         _current.value?.name?.takeIf { it.isNotBlank() } ?: fallback
 
     fun signIn(staff: Staff) {
+        // Role and id, not the name: the log is emailed, and staff are people too.
+        AppLog.i("Staff", "signed in: role=${staff.role} id=${staff.id.take(8)}")
         _current.value = staff
         lastActiveAt = nowMs()
     }
 
     /** "Sign out" and "Switch user" are the same thing: drop back to the grid. */
     fun signOut() {
+        _current.value?.let { AppLog.i("Staff", "signed out: role=${it.role} id=${it.id.take(8)}") }
         _current.value = null
         lastActiveAt = nowMs()
     }
