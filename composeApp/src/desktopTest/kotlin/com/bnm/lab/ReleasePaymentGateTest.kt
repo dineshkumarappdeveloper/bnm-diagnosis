@@ -62,6 +62,13 @@ class ReleasePaymentGateTest {
     }
 
     @Test
+    fun `an offline bill's queued tender still releases, without claiming to await a sync`() {
+        val b = InvoiceBalance(Invoice(id = "i1", total = 500.0), paidAmount = 0.0, queuedAmount = 500.0, offlineArchive = true)
+        assertTrue(b.isSettled, "the offline queue is the payment record")
+        assertFalse(b.hasQueuedPayment, "nothing is waiting for a server that does not exist")
+    }
+
+    @Test
     fun `a cancelled bill never blocks`() {
         assertTrue(bill(1000.0, 0.0, status = "cancelled").isSettled,
             "a cancelled bill owes nothing and must not trap the report")

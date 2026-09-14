@@ -65,6 +65,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.bnm.lab.api.BillingApi
+import com.bnm.lab.billing.BillingScope
 import com.bnm.lab.auth.AuthRepository
 import com.bnm.lab.billing.BillingPrefs
 import com.bnm.lab.billing.PrintProfiles
@@ -137,6 +138,10 @@ fun BillingSettingsScreen(
 
     // ── Counter series ──
     var currentSeries by remember { mutableStateOf<String?>(null) }
+    // Offline-edition bills: numbered on this PC, held nowhere else. Registering a
+    // series or saving a GSTIN are server writes, and "Clear & re-sync" would wipe
+    // bills that have nothing to re-sync from.
+    val offlineBilling = BillingScope.isOffline(businessId)
     LaunchedEffect(businessId) {
         currentSeries = repo.deviceSeries(businessId)?.let { "${it.prefix}-${it.series} (FY ${it.fy}, last #${it.highWater})" }
     }
@@ -204,18 +209,23 @@ fun BillingSettingsScreen(
                         icon = Icons.Outlined.Numbers,
                         tint = MaterialTheme.colorScheme.primary,
                         title = "Counter series",
-                        subtitle = currentSeries ?: "Not registered on this device",
-                        onClick = { seriesMsg = null; showSeriesDialog = true },
+                        subtitle = if (offlineBilling) {
+                            (currentSeries ?: "Numbered on this computer") + " · offline edition"
+                        } else currentSeries ?: "Not registered on this device",
+                        // The offline edition numbers its own bills on first use.
+                        onClick = if (offlineBilling) null else ({ seriesMsg = null; showSeriesDialog = true }),
                     )
                     RowDivider()
-                    SettingsRow(
-                        icon = Icons.Outlined.Percent,
-                        tint = MaterialTheme.colorScheme.primary,
-                        title = "Business GST",
-                        subtitle = taxId.ifBlank { "GSTIN not set" },
-                        onClick = { gstMsg = null; showGstDialog = true },
-                    )
-                    RowDivider()
+                    if (!offlineBilling) {
+                        SettingsRow(
+                            icon = Icons.Outlined.Percent,
+                            tint = MaterialTheme.colorScheme.primary,
+                            title = "Business GST",
+                            subtitle = taxId.ifBlank { "GSTIN not set" },
+                            onClick = { gstMsg = null; showGstDialog = true },
+                        )
+                        RowDivider()
+                    }
                     SettingsRow(
                         icon = Icons.Outlined.Print,
                         tint = MaterialTheme.colorScheme.primary,
@@ -260,9 +270,9 @@ fun BillingSettingsScreen(
                         // Self-contained: the row, its state and its dialog share
                         // one collectAsState rather than hoisting a nullable flow.
                         LabSyncRow(labSync)
-                        RowDivider()
+                        if (!offlineBilling) RowDivider()
                     }
-                    SettingsRow(
+                    if (!offlineBilling) SettingsRow(
                         icon = Icons.Outlined.DeleteSweep,
                         tint = MaterialTheme.colorScheme.tertiary,
                         title = "Clear local data & re-sync",

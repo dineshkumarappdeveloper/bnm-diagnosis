@@ -1,5 +1,7 @@
 package com.bnm.lab.screens.billing
 
+import com.bnm.lab.license.LicenseManager
+import com.bnm.lab.billing.BillingScope
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -79,6 +81,12 @@ fun PaymentSheet(
     onPartPayment: ((PartPayment) -> Unit)? = null,
 ) {
     var mode by remember { mutableStateOf("cash") }
+    // A payment link is a Razorpay link minted by the server for a bill the server
+    // holds. The offline edition has neither, and the desktop always reports
+    // itself online, so "online" alone used to offer it — the bill was saved, and
+    // then the link call went out with a key no server knows.
+    val offlineEdition = remember { LicenseManager().state.value.isStandalone }
+    val linkAvailable = isOnline && !offlineEdition
     val allowPart = onPartPayment != null
     val emitPart: (PartPayment) -> Unit = onPartPayment ?: { _ -> }
 
@@ -93,16 +101,16 @@ fun PaymentSheet(
                     FilterChip(selected = mode == "cash", onClick = { mode = "cash" }, label = { Text("Cash") })
                     FilterChip(selected = mode == "upi", onClick = { mode = "upi" }, label = { Text("UPI") })
                     FilterChip(selected = mode == "card", onClick = { mode = "card" }, label = { Text("Card") })
-                    FilterChip(selected = mode == "link", onClick = { mode = "link" }, label = { Text("Payment link") }, enabled = isOnline)
+                    if (linkAvailable) FilterChip(selected = mode == "link", onClick = { mode = "link" }, label = { Text("Payment link") })
                 }
-                if (!isOnline) {
+                if (!isOnline && !offlineEdition) {
                     Text("Payment link needs internet", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 when (mode) {
                     "cash" -> CashPane(total, allowPart, onConfirm, emitPart)
                     "upi" -> UpiPane(total, upiVpa, businessName, allowPart, onConfirm, emitPart)
                     "card" -> CardPane(total, allowPart, onConfirm, emitPart)
-                    "link" -> LinkPane(isOnline, onPaymentLink)
+                    "link" -> LinkPane(linkAvailable, onPaymentLink)
                 }
                 TextButton(onClick = { onConfirm(PaymentChoice(method = null, markPaid = false)) }, modifier = Modifier.fillMaxWidth()) {
                     Text("Save without payment", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
@@ -314,6 +322,12 @@ fun PaymentLinkDialog(businessId: String, invoice: Invoice, onDone: () -> Unit) 
     var paidRef by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(invoice.id) {
+        // Belt and braces behind the sheet hiding the option: an offline bill has
+        // no server copy to link, so never call out for one.
+        if (BillingScope.isOffline(businessId) || LicenseManager().state.value.isStandalone) {
+            error = "Payment links need the connected edition — collect cash, UPI or card instead."
+            return@LaunchedEffect
+        }
         // The link endpoint needs the invoice server-side — push the outbox first.
         runCatching { outbox.drain() }
         repo.createPaymentLink(businessId, invoice.id)

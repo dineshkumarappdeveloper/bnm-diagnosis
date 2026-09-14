@@ -1,5 +1,7 @@
 package com.bnm.lab.license
 
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonNull
 import com.russhwolf.settings.Settings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -300,8 +302,7 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private fun JsonObject.str(key: String): String? =
-        runCatching { this[key]?.jsonPrimitive?.content }.getOrNull()
+    private fun JsonObject.str(key: String): String? = claimString(this, key)
 
     @OptIn(ExperimentalEncodingApi::class)
     private fun decodeJwtPayload(jwt: String): JsonObject? = try {
@@ -326,3 +327,16 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
             "${hex.substring(16, 20)}-${hex.substring(20)}"
     }
 }
+
+/**
+ * A string claim, or null when it is absent OR JSON `null`.
+ *
+ * `jsonPrimitive.content` of JSON null is the four-letter string "null". The
+ * licence server writes `biz: null` into every offline-edition licence, so every
+ * offline install read its business id as "null": bills were filed under a
+ * phantom business called "null", the invoice-series bootstrap asked the server
+ * about it, and the first-visit bill sync called the server with it — from an
+ * edition whose promise is that nothing leaves the computer.
+ */
+internal fun claimString(payload: JsonObject, key: String): String? =
+    runCatching { (payload[key] as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content }.getOrNull()

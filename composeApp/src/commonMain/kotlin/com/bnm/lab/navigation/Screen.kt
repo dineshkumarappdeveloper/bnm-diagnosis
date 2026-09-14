@@ -37,6 +37,8 @@ sealed class Screen(val route: String) {
     data object Patients : Screen("patients")
     data object Referrers : Screen("referrers")
     data object Catalog : Screen("catalog")
+    /** Revenue dashboard: billed, collected and due over a period (owner only). */
+    data object Revenue : Screen("revenue")
 
     // ── Billing (kept; reachable via Home ▸ Bills and Settings only) ──
     /** Legacy billing home (product grid + cart) — NOT registered in the nav

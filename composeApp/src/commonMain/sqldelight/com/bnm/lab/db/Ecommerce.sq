@@ -20,8 +20,21 @@ SELECT json FROM ecom_entity
 WHERE entity = ? AND business_id = ?
 ORDER BY created_at DESC;
 
+-- Several businesses at once — a balance read spans the lab's business AND the
+-- offline archive (BillingScope.readScopes), so bills issued before a move to
+-- the connected edition stay visible after it.
+selectEntityIn:
+SELECT business_id, json FROM ecom_entity
+WHERE entity = :entity AND business_id IN :businessIds
+ORDER BY created_at DESC;
+
 selectById:
 SELECT json FROM ecom_entity WHERE entity = ? AND id = ?;
+
+-- The server seq a stored row carries (0 for a row written optimistically on
+-- this device). A pull compares against it so it never replaces a newer row.
+seqOf:
+SELECT seq FROM ecom_entity WHERE entity = ? AND id = ?;
 
 upsertEntity:
 INSERT OR REPLACE INTO ecom_entity(entity, id, business_id, seq, created_at, json)
@@ -32,6 +45,16 @@ DELETE FROM ecom_entity WHERE entity = ? AND id = ?;
 
 clearAllEntities:
 DELETE FROM ecom_entity;
+
+-- Offline installs filed their bills under the literal business id 'null' (a
+-- licence-claim parsing bug); move them to the offline archive key.
+rekeyNullBusinessEntities:
+UPDATE ecom_entity SET business_id = ? WHERE business_id = 'null';
+
+-- "Clear & re-sync" keeps rows no server holds a copy of: an offline-edition
+-- bill wiped here is gone for good, because there is nothing to re-sync from.
+clearEntitiesExcept:
+DELETE FROM ecom_entity WHERE business_id != ?;
 
 countEntity:
 SELECT count(*) FROM ecom_entity WHERE entity = ? AND business_id = ?;

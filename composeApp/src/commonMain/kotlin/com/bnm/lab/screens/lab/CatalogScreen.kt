@@ -1,5 +1,9 @@
 package com.bnm.lab.screens.lab
 
+import androidx.compose.runtime.collectAsState
+import com.bnm.lab.staff.allows
+import com.bnm.lab.staff.LocalStaffSession
+import com.bnm.lab.staff.LabPermission
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -92,6 +96,10 @@ fun CatalogScreen(
 ) {
     val repo = LocalLabRepository.current
     val scope = rememberCoroutineScope()
+    // What a patient is charged is the owner's call (LabPermission.EDIT_CATALOG):
+    // everyone can look tests up, only the owner sees price editors.
+    val signedIn by LocalStaffSession.current.current.collectAsState()
+    val canPrice = signedIn.allows(LabPermission.EDIT_CATALOG)
     var pulling by remember { mutableStateOf(false) }
     var pullResult by remember { mutableStateOf<String?>(null) }
     var tab by remember { mutableStateOf(0) }
@@ -207,7 +215,7 @@ fun CatalogScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    FilterChip(
+                    if (canPrice) FilterChip(
                         selected = priceMode,
                         onClick = { priceMode = !priceMode; if (!priceMode) priceDrafts.clear() },
                         label = { Text("Set prices") },
@@ -252,7 +260,7 @@ fun CatalogScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
-                                if (priceMode) {
+                                if (priceMode && canPrice) {
                                     OutlinedTextField(
                                         value = priceDrafts[t.id]
                                             ?: if (t.price > 0) formatDecimal2(t.price).removeSuffix(".00") else "",
@@ -284,7 +292,7 @@ fun CatalogScreen(
                         }
                     }
                 }
-                if (priceMode) {
+                if (priceMode && canPrice) {
                     val changed = priceDrafts.count { (id, v) ->
                         val p = v.trim().toDoubleOrNull()
                         p != null && p != (tests.firstOrNull { it.id == id }?.price ?: -1.0)
@@ -373,10 +381,10 @@ fun CatalogScreen(
     }
 
     editTest?.let { t ->
-        TestEditDialog(t, onDismiss = { editTest = null }, onSaved = { editTest = null; refresh++ })
+        TestEditDialog(t, onDismiss = { editTest = null }, onSaved = { editTest = null; refresh++ }, canPrice = canPrice)
     }
     editPanel?.let { p ->
-        PanelEditDialog(p, onDismiss = { editPanel = null }, onSaved = { editPanel = null; refresh++ })
+        PanelEditDialog(p, onDismiss = { editPanel = null }, onSaved = { editPanel = null; refresh++ }, canPrice = canPrice)
     }
 }
 
@@ -389,7 +397,7 @@ fun CatalogScreen(
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-private fun TestEditDialog(test: LabTest, onDismiss: () -> Unit, onSaved: () -> Unit) {
+private fun TestEditDialog(test: LabTest, onDismiss: () -> Unit, onSaved: () -> Unit, canPrice: Boolean) {
     val repo = LocalLabRepository.current
     val scope = rememberCoroutineScope()
     var price by remember { mutableStateOf(formatDecimal2(test.price).removeSuffix(".00")) }
@@ -415,6 +423,8 @@ private fun TestEditDialog(test: LabTest, onDismiss: () -> Unit, onSaved: () -> 
                     value = price,
                     onValueChange = { price = it.filter { c -> c.isDigit() || c == '.' }.take(9) },
                     label = { Text("Price (₹)") }, singleLine = true,
+                    enabled = canPrice,
+                    supportingText = if (canPrice) null else ({ Text(LabPermission.EDIT_CATALOG.title) }),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -803,7 +813,7 @@ private fun rangeWarnings(ranges: List<RefRange>): List<String> {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PanelEditDialog(panel: LabPanel, onDismiss: () -> Unit, onSaved: () -> Unit) {
+private fun PanelEditDialog(panel: LabPanel, onDismiss: () -> Unit, onSaved: () -> Unit, canPrice: Boolean) {
     val repo = LocalLabRepository.current
     val scope = rememberCoroutineScope()
     var price by remember { mutableStateOf(formatDecimal2(panel.price).removeSuffix(".00")) }
@@ -821,6 +831,8 @@ private fun PanelEditDialog(panel: LabPanel, onDismiss: () -> Unit, onSaved: () 
                     value = price,
                     onValueChange = { price = it.filter { c -> c.isDigit() || c == '.' }.take(9) },
                     label = { Text("Panel price (₹)") }, singleLine = true,
+                    enabled = canPrice,
+                    supportingText = if (canPrice) null else ({ Text(LabPermission.EDIT_CATALOG.title) }),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     modifier = Modifier.fillMaxWidth(),
                 )

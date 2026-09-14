@@ -43,3 +43,17 @@ SELECT high_water FROM counter_series WHERE business_id = ? AND series = ? AND f
 -- C1 after re-pairing to C2). Rows for the SAME series across financial years are kept.
 deleteOtherSeries:
 DELETE FROM counter_series WHERE business_id = ? AND series != ?;
+
+-- The series an install used under the phantom 'null' business is kept, but
+-- parked under a key nothing issues from: future offline bills get a per-device
+-- series, and a later connected series continues past what was printed.
+parkNullBusinessSeries:
+UPDATE OR IGNORE counter_series SET business_id = ? WHERE business_id = 'null';
+
+-- The highest number this device printed under a series code in a financial
+-- year while it had NO business (the parked phantom-'null' series, or the
+-- offline archive). Only that history carries over into a connected series: a
+-- licence moved from one business to another starts the new one's own serial.
+maxHighWaterFor:
+SELECT coalesce(max(high_water), 0) FROM counter_series
+WHERE series = :series AND fy = :fy AND business_id IN :historyKeys;

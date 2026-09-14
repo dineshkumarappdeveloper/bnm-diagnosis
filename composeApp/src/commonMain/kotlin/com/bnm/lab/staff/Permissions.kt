@@ -21,6 +21,13 @@ enum class LabPermission(val title: String, val explanation: String) {
             "referrers stays available from the registration desk.",
     ),
 
+    /** What the lab takes in: billed, collected and still owed, by day, test and referrer. */
+    REVENUE(
+        title = "Revenue is owner-only",
+        explanation = "Takings, collections and dues are the lab owner's to see. " +
+            "Bills stay available from the desk so payments can still be collected.",
+    ),
+
     /** What a patient is charged: catalog test/panel prices. */
     EDIT_CATALOG(
         title = "Prices are owner-only",
@@ -50,6 +57,7 @@ fun Staff?.allows(permission: LabPermission): Boolean = when {
     !active -> false
     else -> when (permission) {
         LabPermission.MONEY -> canSeeMoney
+        LabPermission.REVENUE -> canSeeMoney
         LabPermission.EDIT_CATALOG -> canEditCatalog
         LabPermission.MANAGE_STAFF -> canManageStaff
     }

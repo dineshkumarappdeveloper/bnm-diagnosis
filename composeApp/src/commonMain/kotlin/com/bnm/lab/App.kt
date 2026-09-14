@@ -1,5 +1,7 @@
 package com.bnm.lab
 
+import com.bnm.lab.revenue.RevenueRepository
+import com.bnm.lab.screens.lab.RevenueScreen
 import com.bnm.lab.diagnostics.AppLog
 import com.bnm.lab.diagnostics.DiagnosticsContext
 import com.bnm.lab.diagnostics.ReportProblemDialog
@@ -39,6 +41,7 @@ import com.bnm.lab.api.LabHeartbeatResult
 import com.bnm.lab.api.LocalLabApi
 import com.bnm.lab.billing.CartStore
 import com.bnm.lab.billing.LocalCart
+import com.bnm.lab.billing.BillingScope
 import com.bnm.lab.billing.ensureLabBillingSeries
 import com.bnm.lab.auth.AuthRepository
 import com.bnm.lab.auth.FirebaseAuthManager
@@ -126,6 +129,15 @@ fun App() {
     }
     val database = remember { createAppDatabase() }
     val repo = remember { BillingRepository(database, api) }
+    // Offline installs used to file bills under a phantom business "null";
+    // move them to the offline archive before anything reads or bills.
+    LaunchedEffect(Unit) {
+        runCatching { repo.adoptNullBusinessBills() }
+            .onSuccess { if (it > 0) AppLog.i("Billing", "moved $it offline bill(s) off the 'null' business key") }
+            .logFailure("Billing", "adopt null-business bills")
+    }
+    // Revenue dashboard: reads the same bills and orders, never writes.
+    val revenueRepo = remember { RevenueRepository(database, repo) }
     val labRepo = remember { LabRepository(database, ApiClient.json) }
     // ── P4: staff accounts + local RBAC. The session is in-memory ONLY — a
     // restarted seat comes back to the sign-in grid. ──
@@ -154,7 +166,9 @@ fun App() {
     }
     val connectivity = remember { ConnectivityMonitor() }
     val cart = remember { CartStore() }
-    val outboxSender = remember { BillingOutboxSender(database, api) }
+    val outboxSender = remember {
+        BillingOutboxSender(database, api, paymentToken = { licenseManager.deviceToken() ?: authRepository.getAuthToken() })
+    }
     val billingSync = remember { BillingSyncManager(outboxSender, connectivity) }
 
     // ── License (P2): activation + device management via admin-lab
@@ -305,7 +319,7 @@ fun App() {
                 // (no-op once bound) so billing works even if the operator's
                 // first bill happens offline later.
                 licenseManager.state.value.businessId?.takeIf { it.isNotBlank() }?.let { biz ->
-                    runCatching { ensureLabBillingSeries(labApi, repo, biz) }
+                    runCatching { ensureLabBillingSeries(labApi, repo, biz, licenseManager) }
                 }
                 labSync.syncNow()
             }
@@ -317,9 +331,27 @@ fun App() {
     LaunchedEffect(Unit) {
         while (true) {
             delay(5 * 60_000L)
-            if (licenseManager.deviceToken() != null &&
-                OfflinePolicy.allowsSync(licenseManager.state.value.isStandalone)
-            ) labSync.syncNow()
+            val st = licenseManager.state.value
+            if (licenseManager.deviceToken() != null && OfflinePolicy.allowsSync(st.isStandalone)) {
+                labSync.syncNow()
+                // Bills ride a different spine from orders. Orders converge across
+                // seats on this sweep, but bills used to arrive only on a seat's
+                // first visit, a manual re-sync or a reconnect — and the desktop
+                // never sees a reconnect (its connectivity monitor is always
+                // online). So one seat's revenue and dues never included another
+                // seat's bills or collections. The delta is cursor-based: an idle
+                // pull costs one small request.
+                if (OfflinePolicy.allowsBillingSync(st.isStandalone)) {
+                    val biz = BillingScope.issuingBusinessId(authRepository.getSelectedBusinessId(), st.businessId)
+                    if (!BillingScope.isOffline(biz)) {
+                        // Under the outbox lock, after a drain: a pull racing a
+                        // drain can write back a pre-tender row over the fresh one.
+                        runCatching {
+                            outboxSender.drainThen { syncEngine.sync(biz, setOf(BillingRepository.INVOICE)).getOrThrow() }
+                        }.logFailure("Billing", "periodic invoice pull")
+                    }
+                }
+            }
         }
     }
 
@@ -386,6 +418,12 @@ fun App() {
             LocalLabApi provides labApi,
         ) {
             val licState by licenseManager.state.collectAsState()
+            // The business every bill on this seat is filed under. An offline lab
+            // has none, and resolving it to "" used to leave it unable to bill at
+            // all — BillingScope files those bills under a key that never leaves
+            // this computer instead.
+            fun billingBusinessId(): String =
+                BillingScope.issuingBusinessId(authRepository.getSelectedBusinessId(), licState.businessId)
 
             val supportRequest by SupportUi.request.collectAsState()
             supportRequest?.let { ReportProblemDialog(it, onDismiss = { SupportUi.close() }) }
@@ -552,17 +590,21 @@ fun App() {
                         // Licensed devices don't need a business pick: a licensed
                         // standalone lab runs fully offline-first (blank id) and a
                         // BNM-bound license carries its business_id.
-                        val businessId = authRepository.getSelectedBusinessId()
-                            ?: licState.businessId
-                            ?: ""
+                        val businessId = billingBusinessId()
                         val labName = licState.labName
                             ?: authRepository.getSelectedBusinessName()
                             ?: "BNM Lab"
 
                         // First-sync once per device per business, gated on the invoice cursor.
-                        LaunchedEffect(businessId) {
-                            if (businessId.isBlank()) return@LaunchedEffect
-                            val everSynced = repo.lastSyncedFlow(BillingRepository.INVOICE, businessId).first()
+                        LaunchedEffect(businessId, licState.isStandalone) {
+                            if (businessId.isBlank() || BillingScope.isOffline(businessId)) return@LaunchedEffect
+                            if (!OfflinePolicy.allowsBillingSync(licState.isStandalone)) return@LaunchedEffect
+                            // Keyed on the invoice-SETTINGS cursor, which only a full
+                            // sync writes. The five-minute loop pulls invoices alone and
+                            // stamps the invoice cursor, so a seat left on the sign-in
+                            // grid past its first sweep would otherwise never download
+                            // its settings, tax rates, products or customers.
+                            val everSynced = repo.lastSyncedFlow(BillingRepository.INVOICE_SETTING, businessId).first()
                             if (everSynced == null) runCatching { syncEngine.syncAll(businessId) }
                         }
 
@@ -599,6 +641,8 @@ fun App() {
                                     signedInStaff = signedInStaff,
                                     onSwitchUser = { lockSeat() },
                                     onSignOut = { lockSeat() },
+                                    revenue = revenueRepo,
+                                    onRevenue = { navController.navigate(Screen.Revenue.route) },
                                 )
                             }
                         }
@@ -617,7 +661,7 @@ fun App() {
                             return@composable
                         }
                         val emrId = backStack.arguments?.let { NavType.StringType.get(it, "emrId") }
-                        val businessId = authRepository.getSelectedBusinessId() ?: licState.businessId ?: ""
+                        val businessId = billingBusinessId()
                         val labName = licState.labName ?: authRepository.getSelectedBusinessName() ?: "BNM Lab"
                         NewOrderScreen(
                             businessId = businessId,
@@ -657,11 +701,23 @@ fun App() {
                         val labName = licState.labName ?: authRepository.getSelectedBusinessName() ?: "BNM Lab"
                         OrderDetailScreen(
                             orderId = orderId,
-                            businessId = authRepository.getSelectedBusinessId() ?: licState.businessId ?: "",
+                            businessId = billingBusinessId(),
                             labName = labName,
                             onBack = { navController.popBackStack() },
                             onOpenInvoice = { id -> navController.navigate(Screen.InvoiceDetail.createRoute(id)) },
                         )
+                    }
+
+                    composable(Screen.Revenue.route) {
+                        GuardedRoute(Screen.Revenue.route, signedInStaff,
+                            onBack = { navController.popBackStack() }) {
+                            RevenueScreen(
+                                revenue = revenueRepo,
+                                businessId = billingBusinessId(),
+                                offlineEdition = licState.isStandalone,
+                                onBack = { navController.popBackStack() },
+                            )
+                        }
                     }
 
                     composable(Screen.Patients.route) {
@@ -673,7 +729,7 @@ fun App() {
                             onBack = { navController.popBackStack() }) {
                             ReferrersScreen(
                                 onBack = { navController.popBackStack() },
-                                businessId = licState.businessId.orEmpty(),
+                                businessId = billingBusinessId(),
                             )
                         }
                     }
@@ -757,7 +813,7 @@ fun App() {
                             LicenseBlockedNotice(onBack = { navController.popBackStack() })
                             return@composable
                         }
-                        val businessId = authRepository.getSelectedBusinessId() ?: licState.businessId ?: ""
+                        val businessId = billingBusinessId()
                         CreateInvoiceScreen(
                             businessId = businessId,
                             onBack = { navController.popBackStack() },
@@ -770,7 +826,7 @@ fun App() {
                     }
 
                     composable(Screen.Bills.route) {
-                        val businessId = authRepository.getSelectedBusinessId() ?: licState.businessId ?: ""
+                        val businessId = billingBusinessId()
                         BillsScreen(
                             businessId = businessId,
                             onBack = { navController.popBackStack() },
@@ -783,7 +839,7 @@ fun App() {
                             LicenseBlockedNotice(onBack = { navController.popBackStack() })
                             return@composable
                         }
-                        val businessId = authRepository.getSelectedBusinessId() ?: licState.businessId ?: ""
+                        val businessId = billingBusinessId()
                         CartScreen(
                             businessId = businessId,
                             businessName = authRepository.getSelectedBusinessName() ?: "Business",
@@ -800,7 +856,7 @@ fun App() {
                             LicenseBlockedNotice(onBack = { navController.popBackStack() })
                             return@composable
                         }
-                        val businessId = authRepository.getSelectedBusinessId() ?: licState.businessId ?: ""
+                        val businessId = billingBusinessId()
                         CustomerDetailsScreen(
                             businessId = businessId,
                             businessName = authRepository.getSelectedBusinessName() ?: "Business",
@@ -816,12 +872,13 @@ fun App() {
                         arguments = listOf(navArgument("invoiceId") { type = NavType.StringType })
                     ) { backStack ->
                         val invoiceId = NavType.StringType.get(backStack.arguments!!, "invoiceId") ?: return@composable
-                        val businessId = authRepository.getSelectedBusinessId() ?: licState.businessId ?: ""
-                        InvoiceDetailScreen(api = api, businessId = businessId, invoiceId = invoiceId, onBack = { navController.popBackStack() })
+                        val businessId = billingBusinessId()
+                        InvoiceDetailScreen(api = api, businessId = businessId, invoiceId = invoiceId, onBack = { navController.popBackStack() },
+                            labName = licState.labName ?: authRepository.getSelectedBusinessName() ?: "BNM Lab")
                     }
 
                     composable(Screen.Settings.route) {
-                        val businessId = authRepository.getSelectedBusinessId() ?: licState.businessId ?: ""
+                        val businessId = billingBusinessId()
                         val instStatuses by instrumentEngine.status.collectAsState()
                         BillingSettingsScreen(
                             onQuitForUpdate = { quitForUpdate() },

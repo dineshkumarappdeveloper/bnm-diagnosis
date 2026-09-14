@@ -207,6 +207,23 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?);
 countOrderTestsFor:
 SELECT count(*) FROM lab_order_tests WHERE test_id = ?;
 
+-- Revenue dashboard: every test line of every order registered in a window.
+-- Callers pass a window WIDER than the days they report on and trim by LOCAL
+-- date in Kotlin. created_at strings carry variable sub-second precision, so a
+-- lexical bound of '…T18:30:00Z' sorts AFTER '…T18:30:00.807Z' and would push
+-- the first order of an IST day into the day before.
+revenueLines:
+SELECT o.id AS order_id, o.created_at, o.status, o.referrer_id, o.invoice_id,
+       t.test_id, t.test_name, t.price, t.commission_pct
+FROM lab_orders o JOIN lab_order_tests t ON t.order_id = o.id
+WHERE o.created_at >= :fromInstant AND o.created_at < :toInstant;
+
+-- Which bills are LAB bills: anything an order links to, whenever it was made.
+-- A connected lab's business can also hold counter (C1) and sales (S1) bills
+-- from BNM Billing and BNM Admin, and those are not the lab's revenue.
+linkedInvoiceIds:
+SELECT DISTINCT invoice_id FROM lab_orders WHERE invoice_id IS NOT NULL;
+
 testsForOrder:
 SELECT * FROM lab_order_tests WHERE order_id = ? ORDER BY rowid;
 

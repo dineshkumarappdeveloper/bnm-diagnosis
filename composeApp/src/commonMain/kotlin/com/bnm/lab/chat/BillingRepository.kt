@@ -11,6 +11,7 @@ import com.bnm.lab.api.models.InvoiceCreateRequest
 import com.bnm.lab.api.models.InvoiceSettings
 import com.bnm.lab.api.models.Product
 import com.bnm.lab.api.models.TaxRate
+import com.bnm.lab.billing.BillingScope
 import com.bnm.lab.billing.GstLine
 import com.bnm.lab.billing.GstTaxEngine
 import com.bnm.lab.db.AppDatabase
@@ -78,33 +79,63 @@ class BillingRepository(
      */
     fun invoiceBalancesFlow(businessId: String): Flow<List<InvoiceBalance>> =
         combine(
-            q.selectEntity(INVOICE, businessId).asFlow().mapToList(Dispatchers.Default),
+            // The lab's own bills plus the offline archive: a lab that moved to
+            // the connected edition keeps seeing the bills it issued before.
+            q.selectEntityIn(INVOICE, BillingScope.readScopes(businessId)).asFlow().mapToList(Dispatchers.Default),
             outboxQ.pendingPayments().asFlow().mapToList(Dispatchers.Default),
         ) { rows, queued ->
-            val queuedByInvoice = HashMap<String, Double>()
+            // Each queued tender keeps its own method: a ₹300 cash advance and a
+            // ₹700 UPI balance are two different drawers, not one bill-level mode.
+            val queuedByInvoice = HashMap<String, MutableMap<String?, Double>>()
             for (p in queued) {
-                val amt = runCatching {
-                    json.decodeFromString(InvoicePaymentRequest.serializer(), p.payload).amount
+                val req = runCatching {
+                    json.decodeFromString(InvoicePaymentRequest.serializer(), p.payload)
                 }.getOrNull() ?: continue
-                queuedByInvoice[p.aggregate_id] = (queuedByInvoice[p.aggregate_id] ?: 0.0) + amt
+                val byMethod = queuedByInvoice.getOrPut(p.aggregate_id) { LinkedHashMap() }
+                byMethod[req.paymentMethod] = (byMethod[req.paymentMethod] ?: 0.0) + req.amount
             }
-            rows.mapNotNull { raw -> parseBalance(raw, queuedByInvoice) }
+            rows.mapNotNull { row -> parseBalance(row.json, row.business_id, queuedByInvoice) }
         }.catch { emit(emptyList()) }
 
     /** One invoice's balance (bill detail). Same brain as the list. */
     fun invoiceBalanceFlow(businessId: String, invoiceId: String): Flow<InvoiceBalance?> =
         invoiceBalancesFlow(businessId).map { list -> list.firstOrNull { it.invoice.id == invoiceId } }
 
-    private fun parseBalance(raw: String, queued: Map<String, Double>): InvoiceBalance? {
+    private fun parseBalance(raw: String, filedUnder: String, queued: Map<String, Map<String?, Double>>): InvoiceBalance? {
         val o = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return null
         val inv = runCatching { json.decodeFromJsonElement(Invoice.serializer(), o) }.getOrNull() ?: return null
-        // `paid_amount` is server-side only. Rows written before it existed — and
-        // every bill created locally — have no such field, so infer from the
-        // status: without this a settled bill would read as owing its whole total.
-        val paid = runCatching {
-            o["paid_amount"]?.takeIf { it !is JsonNull }?.jsonPrimitive?.doubleOrNull
-        }.getOrNull() ?: if (inv.status == "paid") inv.total else 0.0
-        return InvoiceBalance(inv, paid, queued[inv.id] ?: 0.0)
+        val byMethod = queued[inv.id].orEmpty()
+        return InvoiceBalance(
+            invoice = inv,
+            paidAmount = paidAmountOf(inv.status, inv.total, o["paid_amount"]),
+            queuedAmount = byMethod.values.sum(),
+            queuedByMethod = byMethod,
+            offlineArchive = BillingScope.isOffline(filedUnder),
+        )
+    }
+
+    /**
+     * One-time repair for offline installs that filed bills under the business id
+     * "null" (see LicenseManager.claimString). Bills and their queued tenders move
+     * to the offline archive, keeping their numbers; the old series is parked so
+     * new bills get a per-device series. Idempotent — nothing matches once done.
+     * @return how many bills moved.
+     */
+    suspend fun adoptNullBusinessBills(): Long = withContext(Dispatchers.Default) {
+        var moved = 0L
+        db.transaction {
+            moved = q.countEntity(INVOICE, "null").executeAsOne()
+            q.rekeyNullBusinessEntities(BillingScope.OFFLINE_BUSINESS_ID)
+            outboxQ.rekeyNullBusinessOutbox(BillingScope.OFFLINE_BUSINESS_ID)
+            seriesQ.parkNullBusinessSeries(BillingScope.PARKED_SERIES_KEY)
+        }
+        moved
+    }
+
+    /** The highest number this device printed under [series] in [fy] while it had no business. */
+    suspend fun maxHighWater(series: String, fy: String): Long = withContext(Dispatchers.Default) {
+        seriesQ.maxHighWaterFor(series, fy, listOf(BillingScope.OFFLINE_BUSINESS_ID, BillingScope.PARKED_SERIES_KEY, "null"))
+            .executeAsOne()
     }
 
     suspend fun invoiceById(id: String): Invoice? = withContext(Dispatchers.Default) {
@@ -316,10 +347,13 @@ class BillingRepository(
      * login, the device counter series, and any un-synced bills in the outbox.
      * Fixes stale rows that linger after a server-side hard-delete / re-import
      * (delta sync only removes soft-deleted rows).
+     *
+     * Offline-edition bills are NOT cache: no server holds a copy, so they are
+     * kept. Wiping them would erase a lab's billing history with no way back.
      */
     suspend fun clearLocalData() = withContext(Dispatchers.Default) {
         db.transaction {
-            q.clearAllEntities()
+            q.clearEntitiesExcept(BillingScope.OFFLINE_BUSINESS_ID)
             syncQ.clearAllState()
         }
     }
@@ -367,6 +401,9 @@ class BillingRepository(
         fromZero: Boolean = false,
         fetch: suspend (Long) -> Result<List<JsonElement>>,
     ): Result<Unit> {
+        // The offline archive has no server side. Refusing here covers every
+        // caller — the engine, a screen's "refresh", a WhatsApp send's re-pull.
+        if (BillingScope.isOffline(businessId) || businessId.isBlank()) return Result.success(Unit)
         val key = cursorKey(entity, businessId)
         // fromZero re-pulls the whole entity (heals stale rows whose seq is below
         // the saved cursor); otherwise resume from the saved delta cursor.
@@ -374,27 +411,60 @@ class BillingRepository(
             syncQ.getState(key).executeAsOneOrNull()?.cursor?.toLongOrNull() ?: 0L
         }
         return fetch(cursor).map { page ->
-            var maxSeq = cursor
-            if (page.isNotEmpty()) {
-                withContext(Dispatchers.Default) {
-                    db.transaction {
-                        for (el in page) {
-                            val o = el.jsonObject
-                            val id = o["id"]?.jsonPrimitive?.contentOrNull ?: continue
-                            val seq = o["seq"]?.jsonPrimitive?.longOrNull ?: 0L
-                            val deleted = (o["deleted_at"] ?: o["deletedAt"])
-                                ?.takeIf { it !is JsonNull }?.jsonPrimitive?.contentOrNull
-                            val createdAt = (o["created_at"] ?: o["createdAt"])
-                                ?.takeIf { it !is JsonNull }?.jsonPrimitive?.contentOrNull
-                            if (deleted != null) q.deleteEntity(entity, id)
-                            else q.upsertEntity(entity, id, businessId, seq, createdAt, el.toString())
-                            if (seq > maxSeq) maxSeq = seq
+            // The cursor moves past a held-back bill: the drain stores that bill's
+            // current server row itself when its tender is acknowledged, so there
+            // is nothing to come back for — and pinning the cursor re-downloaded
+            // the whole business every sweep behind a tender that never landed.
+            val written = storeDeltaPage(entity, businessId, page)
+            withContext(Dispatchers.Default) { syncQ.upsertState(key, maxOf(cursor, written.maxSeq).toString(), nowIso()) }
+        }
+    }
+
+    /** What [storeDeltaPage] wrote: the page's highest seq, and the lowest seq it held back (if any). */
+    internal data class DeltaWrite(val maxSeq: Long, val heldBackFromSeq: Long?)
+
+    /**
+     * Write one pulled page; returns the highest seq in it (0 when empty).
+     *
+     * Never replaces a NEWER row. A pull's page can be fetched before a tender
+     * lands and written after the drain has already stored the post-tender row
+     * (the drain keeps the server's seq), and the payment would vanish from the
+     * balance until the next pull. Optimistic local rows carry seq 0, so any
+     * server row still replaces them.
+     */
+    internal suspend fun storeDeltaPage(entity: String, businessId: String, page: List<JsonElement>): DeltaWrite {
+        if (page.isEmpty()) return DeltaWrite(0L, null)
+        var maxSeq = 0L
+        var heldBack: Long? = null
+        withContext(Dispatchers.Default) {
+            db.transaction {
+                // Bills with a queued tender keep their local row (see
+                // pendingTenderInvoiceIds) — unless there IS no local row, e.g.
+                // after Clear & re-sync: an invisible bill is worse than one that
+                // briefly counts a tender twice.
+                val tenderQueued = if (entity == INVOICE) outboxQ.pendingTenderInvoiceIds().executeAsList().toHashSet() else emptySet()
+                for (el in page) {
+                    val o = el.jsonObject
+                    val id = o["id"]?.jsonPrimitive?.contentOrNull ?: continue
+                    val seq = o["seq"]?.jsonPrimitive?.longOrNull ?: 0L
+                    val deleted = (o["deleted_at"] ?: o["deletedAt"])
+                        ?.takeIf { it !is JsonNull }?.jsonPrimitive?.contentOrNull
+                    val createdAt = (o["created_at"] ?: o["createdAt"])
+                        ?.takeIf { it !is JsonNull }?.jsonPrimitive?.contentOrNull
+                    val stored = q.seqOf(entity, id).executeAsOneOrNull()
+                    when {
+                        deleted != null -> q.deleteEntity(entity, id)
+                        id in tenderQueued && stored != null -> {
+                            if (seq > 0) heldBack = minOf(heldBack ?: seq, seq)
                         }
+                        seq > 0 && seq < (stored ?: -1L) -> Unit
+                        else -> q.upsertEntity(entity, id, businessId, seq, createdAt, el.toString())
                     }
+                    if (seq > maxSeq) maxSeq = seq
                 }
             }
-            withContext(Dispatchers.Default) { syncQ.upsertState(key, maxSeq.toString(), nowIso()) }
         }
+        return DeltaWrite(maxSeq, heldBack)
     }
 
     companion object {
@@ -437,6 +507,14 @@ data class InvoiceBalance(
     val invoice: Invoice,
     val paidAmount: Double,
     val queuedAmount: Double,
+    /** [queuedAmount] split by each queued tender's method (null = not recorded). */
+    val queuedByMethod: Map<String?, Double> = emptyMap(),
+    /**
+     * Filed under the offline archive key: an offline-edition bill that exists
+     * only on this computer. It never syncs by design, so "pending sync" and
+     * "payment queued" are not states it can be in — they are its permanent record.
+     */
+    val offlineArchive: Boolean = false,
 ) {
     val collected: Double get() = paidAmount + queuedAmount
     /** Never negative: an over-tender is change in the drawer, not a credit. */
@@ -445,8 +523,11 @@ data class InvoiceBalance(
     /** Half a paisa is settled: a summed float total never lands exactly on 0. */
     val isSettled: Boolean get() = isCancelled || balance <= 0.005
     val isPartPaid: Boolean get() = !isSettled && collected > 0.005
-    /** True while some of [collected] hasn't reached the server yet. */
-    val hasQueuedPayment: Boolean get() = queuedAmount > 0.005
+    /** True while some of [collected] hasn't reached the server yet. Never for an
+     *  offline-archive bill, whose tenders are not waiting for anything. */
+    val hasQueuedPayment: Boolean get() = !offlineArchive && queuedAmount > 0.005
+    /** The bill's own "not uploaded yet" flag, false where there is nothing to upload to. */
+    val isPendingSync: Boolean get() = !offlineArchive && invoice.isPendingSync
 
     /** Operator-facing state. Server writes 'partial' (there is no 'unpaid'). */
     val label: String get() = when {
@@ -482,6 +563,24 @@ fun Map<String, String>.resolveCustomerName(customerId: String?, phone: String?)
 }
 
 private fun nowIso(): String = kotlin.time.Clock.System.now().toString()
+
+/**
+ * Money already collected on a bill, as the synced row states it.
+ *
+ * `paid_amount` is maintained ONLY by the server's invoice-payment rollup, and a
+ * bill paid in full at the counter never gets a payment row: the create path
+ * writes `status = 'paid'` and leaves `paid_amount` at its default 0. Trusting
+ * the column whenever it was present turned every such bill that came back
+ * through a pull (a new seat, "Clear & re-sync", a WhatsApp send) into "Unpaid,
+ * full amount due" — blocking its report and inviting the desk to collect twice.
+ * A paid bill is therefore never worth less than its total. Other statuses keep
+ * trusting the column, and a local row that has no column at all has collected
+ * nothing yet.
+ */
+internal fun paidAmountOf(status: String, total: Double, paidAmount: JsonElement?): Double {
+    val column = runCatching { paidAmount?.takeIf { it !is JsonNull }?.jsonPrimitive?.doubleOrNull }.getOrNull()
+    return if (status == "paid") maxOf(total, column ?: 0.0) else column ?: 0.0
+}
 
 /** This device's numbering series (from counter_series). */
 data class SeriesInfo(val series: String, val fy: String, val prefix: String, val numberFormat: String, val highWater: Long)

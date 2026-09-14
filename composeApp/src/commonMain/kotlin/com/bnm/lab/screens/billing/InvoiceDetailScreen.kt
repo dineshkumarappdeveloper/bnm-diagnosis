@@ -1,5 +1,6 @@
 package com.bnm.lab.screens.billing
 
+import com.bnm.lab.billing.BillingScope
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -48,14 +49,21 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun InvoiceDetailScreen(api: BillingApi, businessId: String, invoiceId: String, onBack: () -> Unit) {
+fun InvoiceDetailScreen(
+    api: BillingApi,
+    businessId: String,
+    invoiceId: String,
+    onBack: () -> Unit,
+    /** Printed as the supplier when the bill has no business settings behind it (offline edition). */
+    labName: String = "BNM Lab",
+) {
     val repo = LocalBillingRepository.current
     val scope = rememberCoroutineScope()
     // The balance view, not the raw invoice: a part payment still sitting in the
     // outbox is money the operator has already taken, and this screen is where
     // they check it.
     val bill by repo.invoiceBalanceFlow(businessId, invoiceId).collectAsState(null)
-    val settings by repo.invoiceSettingsFlow(businessId).collectAsState(null)
+    val businessSettings by repo.invoiceSettingsFlow(businessId).collectAsState(null)
     val inv = bill?.invoice
     var busy by remember { mutableStateOf(false) }
     var collecting by remember { mutableStateOf(false) }
@@ -74,6 +82,12 @@ fun InvoiceDetailScreen(api: BillingApi, businessId: String, invoiceId: String, 
             Text("Invoice not found", modifier = Modifier.padding(inner).padding(16.dp))
             return@Scaffold
         }
+        // An offline-archive bill was issued with no business behind it: no GSTIN,
+        // no address. After a move to the connected edition the business HAS
+        // settings, and printing them on an old offline bill would put a GSTIN on
+        // a document that was never issued under it.
+        val settings = if (money.offlineArchive) null else businessSettings
+        val supplierName = settings?.supplierDisplayName ?: labName
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(inner),
             contentPadding = PaddingValues(16.dp),
@@ -83,7 +97,7 @@ fun InvoiceDetailScreen(api: BillingApi, businessId: String, invoiceId: String, 
             item {
                 val gstin = settings?.taxId?.takeIf { it.isNotBlank() }
                 Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                    Text(settings?.supplierDisplayName ?: "Business", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text(supplierName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     settings?.supplierAddress?.takeIf { it.isNotBlank() }?.let {
                         Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -107,7 +121,7 @@ fun InvoiceDetailScreen(api: BillingApi, businessId: String, invoiceId: String, 
                         buildString {
                             append(money.label)
                             if (money.hasQueuedPayment) append(" · payment queued")
-                            if (inv.isPendingSync) append(" · pending sync")
+                            if (money.isPendingSync) append(" · pending sync")
                         },
                     )
                     // Money collected, then what is still owed — the two numbers a
@@ -158,7 +172,7 @@ fun InvoiceDetailScreen(api: BillingApi, businessId: String, invoiceId: String, 
                         AmountRow("Total", inv.total, bold = true)
                         HorizontalDivider(Modifier.padding(vertical = 2.dp))
                         Text(amountInWords(inv.total), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("For ${settings?.supplierDisplayName ?: "Business"} · Authorised Signatory",
+                        Text("For $supplierName · Authorised Signatory",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 6.dp))
                     }
@@ -176,20 +190,25 @@ fun InvoiceDetailScreen(api: BillingApi, businessId: String, invoiceId: String, 
                     }
                     // Same choice as the report: the lab's WhatsApp Business
                     // number sends it, or WhatsApp opens with the message ready.
+                    val waTo = waPhone(inv.customerPhone, waCountry)
+                    // An offline-edition bill has no server copy to send from, so it
+                    // only ever opens WhatsApp on this PC. Decided by where THIS bill
+                    // is filed, not by the screen: a connected lab still opens the
+                    // bills it issued offline.
+                    val offlineBill = money.offlineArchive || BillingScope.isOffline(businessId)
                     OutlinedButton(onClick = {
                         if (!busy) {
-                            val waTo = waPhone(inv.customerPhone, waCountry)
-                            if (waMode == WaShareMode.LINK && waTo != null) {
+                            if ((waMode == WaShareMode.LINK || offlineBill) && waTo != null) {
                                 openUrl(waDeepLink(waTo, waBillMessage(
                                     customerName = inv.customerName,
-                                    businessName = settings?.supplierDisplayName ?: "",
+                                    businessName = supplierName,
                                     invoiceNumber = inv.displayNumber,
                                     total = inv.total,
                                     balance = money.balance,
                                     url = inv.pdfUrl,
                                     money = { "₹ " + formatDecimal2(it) },
                                 )))
-                            } else {
+                            } else if (!offlineBill) {
                                 busy = true
                                 scope.launch {
                                     api.sendInvoice(businessId, invoiceId, "whatsapp")
@@ -197,7 +216,11 @@ fun InvoiceDetailScreen(api: BillingApi, businessId: String, invoiceId: String, 
                                 }
                             }
                         }
-                    }, enabled = !busy) { Text("Send on WhatsApp") }
+                    },
+                        // No phone on an offline bill: nothing to open and nowhere to
+                        // send from, so the button says so instead of doing nothing.
+                        enabled = !busy && !(offlineBill && waTo == null),
+                    ) { Text(if (offlineBill && waTo == null) "No phone to WhatsApp" else "Send on WhatsApp") }
                 }
             }
         }

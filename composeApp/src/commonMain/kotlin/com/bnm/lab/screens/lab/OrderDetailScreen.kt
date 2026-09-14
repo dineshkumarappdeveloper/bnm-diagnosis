@@ -1,5 +1,7 @@
 package com.bnm.lab.screens.lab
 
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.flowOf
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -280,10 +282,32 @@ fun OrderDetailScreen(
     var billBusy by remember { mutableStateOf(false) }
     // Null when the order has no bill at all (nothing to owe) — the gate then
     // stays out of the way rather than blocking a report that was never billed.
-    val bill by billing.invoiceBalanceFlow(businessId, order?.invoiceId.orEmpty())
-        .collectAsState(null)
+    //
+    // Null means "still looking"; a lookup that finished and found nothing is the
+    // other case this gate has to handle. An order can link a bill this computer
+    // does not hold — issued on another seat and not pulled yet, or issued on a
+    // computer that ran the offline edition, whose bills never leave it. Reading
+    // that as "nothing owed" released reports for bills nobody here could see.
+    val linkedInvoiceId = order?.invoiceId
+    val billLookup by remember(billing, businessId, linkedInvoiceId) {
+        if (linkedInvoiceId == null) flowOf(BillLookup(null, null))
+        else billing.invoiceBalanceFlow(businessId, linkedInvoiceId).map { BillLookup(linkedInvoiceId, it) }
+    }.collectAsState(null)
+    // collectAsState keeps its last value when the key changes (an order loading
+    // its bill id, or "Create bill" linking a new one), so a lookup only counts
+    // once it is about THIS bill id. Until then the bill is still being checked.
+    val lookupCurrent = billLookup?.takeIf { it.invoiceId == linkedInvoiceId }
+    val bill = lookupCurrent?.balance
+    val billLoading = linkedInvoiceId != null && lookupCurrent == null
+    val billElsewhere = linkedInvoiceId != null && lookupCurrent != null && bill == null
+    // Someone at this desk has confirmed the bill on the other computer is settled.
+    var releaseWithoutLocalBill by remember(orderId) { mutableStateOf(false) }
     val amountDue: Double = bill?.takeIf { !it.isSettled }?.balance ?: 0.0
-    val paymentBlocksRelease: Boolean = amountDue > 0.005
+    val paymentBlocksRelease: Boolean = amountDue > 0.005 || billLoading || (billElsewhere && !releaseWithoutLocalBill)
+    val releaseBlockedMessage: String =
+        if (billLoading) "Checking this order's bill — try again in a moment."
+        else if (billElsewhere && amountDue <= 0.005) "This order's bill is on another computer — confirm it is paid to release the report."
+        else "Balance of ₹ ${formatDecimal2(amountDue)} due — settle the bill to release this report."
 
     /** Retro-bill an order registered without one (e.g. billing wasn't set up
      *  yet at registration): same snapshot lines as at registration — names and
@@ -477,7 +501,7 @@ fun OrderDetailScreen(
         // unsettled between opening the chooser and tapping, and a future caller
         // might not know to check. Refusing here is what actually holds.
         if (paymentBlocksRelease) {
-            message = "Balance of ₹ ${formatDecimal2(amountDue)} due — settle the bill to release this report."
+            message = releaseBlockedMessage
             showPaymentDue = true
             return false
         }
@@ -508,7 +532,7 @@ fun OrderDetailScreen(
         // unsettled between opening the chooser and tapping, and a future caller
         // might not know to check. Refusing here is what actually holds.
         if (paymentBlocksRelease) {
-            message = "Balance of ₹ ${formatDecimal2(amountDue)} due — settle the bill to release this report."
+            message = releaseBlockedMessage
             showPaymentDue = true
             return false
         }
@@ -956,13 +980,15 @@ fun OrderDetailScreen(
                         ) {
                             Column(Modifier.padding(10.dp)) {
                                 Text(
-                                    "Balance due ₹ ${formatDecimal2(amountDue)}",
+                                    if (billLoading) "Checking the bill…"
+                                    else if (billElsewhere && amountDue <= 0.005) "Bill is on another computer"
+                                    else "Balance due ₹ ${formatDecimal2(amountDue)}",
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onErrorContainer,
                                 )
                                 Text(
                                     "You can approve now, but the report cannot be printed " +
-                                        "or shared until the bill is settled.",
+                                        "or shared until the bill is confirmed settled.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onErrorContainer,
                                 )
@@ -1012,7 +1038,34 @@ fun OrderDetailScreen(
 
     // ── Print chooser: styled A4 PDF (open / print) + optional thermal slip ──
     // ── Payment due: blocks RELEASE, offers to settle right here ──────────────
-    if (showPaymentDue && o != null) {
+    if (showPaymentDue && billLoading) {
+        // Nothing to decide yet: the message line says the bill is being checked.
+        LaunchedEffect(Unit) {
+            message = releaseBlockedMessage
+            showPaymentDue = false
+        }
+    } else if (showPaymentDue && o != null && billElsewhere && amountDue <= 0.005) {
+        AlertDialog(
+            onDismissRequest = { showPaymentDue = false },
+            title = { Text("Bill is not on this computer") },
+            text = {
+                Text(
+                    "This order was billed on another computer" +
+                        ", or its bill has not synced here yet, so this computer cannot " +
+                        "check whether it has been paid.\n\nRelease the report only if you know the bill is settled.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    releaseWithoutLocalBill = true
+                    showPaymentDue = false
+                    message = "Confirmed as paid — you can print or share the report now."
+                }) { Text("It is paid — release") }
+            },
+            dismissButton = { TextButton(onClick = { showPaymentDue = false }) { Text("Not now") } },
+        )
+    } else if (showPaymentDue && o != null) {
         val due = amountDue
         AlertDialog(
             onDismissRequest = { showPaymentDue = false },
@@ -2023,3 +2076,6 @@ private fun ActionBar(
 
 /** Stages at which the report exists and may be handed over. */
 private val REPORT_READY = setOf(LabStatus.APPROVED, LabStatus.REPORTED, LabStatus.DELIVERED)
+
+/** A finished bill lookup for [invoiceId]: [balance] null means this computer does not hold that bill. */
+private data class BillLookup(val invoiceId: String?, val balance: com.bnm.lab.chat.InvoiceBalance?)

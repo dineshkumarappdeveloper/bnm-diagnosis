@@ -1,5 +1,6 @@
 package com.bnm.lab.screens.lab
 
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -30,6 +31,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.automirrored.outlined.ReceiptLong
+import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.Biotech
 import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.CloudOff
@@ -81,6 +83,10 @@ import com.bnm.lab.lab.CriticalResult
 import com.bnm.lab.lab.LabStatus
 import com.bnm.lab.lab.LocalLabRepository
 import com.bnm.lab.lab.WorklistEntry
+import com.bnm.lab.revenue.RevenueRange
+import com.bnm.lab.revenue.RevenueReport
+import com.bnm.lab.revenue.RevenueRepository
+import com.bnm.lab.revenue.inr
 import com.bnm.lab.staff.LabPermission
 import com.bnm.lab.staff.Staff
 import com.bnm.lab.staff.allows
@@ -184,6 +190,10 @@ fun LabHomeScreen(
     onSwitchUser: () -> Unit = {},
     /** Header chip ▸ "Sign out" — same session drop, different intent. */
     onSignOut: () -> Unit = {},
+    /** Revenue dashboard source; null hides the revenue tile and shortcut. */
+    revenue: RevenueRepository? = null,
+    /** Opens the revenue dashboard (owner-only route). */
+    onRevenue: () -> Unit = {},
 ) {
     val repo = LocalLabRepository.current
     // A lab that has just been moved between editions is told once, in plain
@@ -249,6 +259,17 @@ fun LabHomeScreen(
         commission = if (!showMoney) null
         else runCatching { repo.commissionRollup(monthFrom, monthTo) }.getOrNull()
     }
+
+    // ── Revenue today (owner-only, same gate as the Revenue route) ──
+    // Reactive: a bill saved or a balance collected at the desk moves the tile
+    // without a refresh. Today's date is re-read each composition so the tile
+    // rolls over at midnight in a session left open.
+    val showRevenue = revenue != null && signedInStaff.allows(LabPermission.REVENUE)
+    val todayRange = todayLocal().let { RevenueRange(it, it) }
+    val revenueToday by remember(revenue, showRevenue, businessId, todayRange) {
+        if (revenue == null || !showRevenue) kotlinx.coroutines.flow.flowOf(null)
+        else revenue.reportFlow(businessId, todayRange)
+    }.collectAsState(null)
 
     // Bills-shortcut live caption ("N today"); null/0 falls back to the static label.
     var billsToday by remember { mutableStateOf<Long?>(null) }
@@ -367,6 +388,7 @@ fun LabHomeScreen(
                         Column(Modifier.weight(0.35f).fillMaxHeight().verticalScroll(rememberScrollState()),
                             verticalArrangement = Arrangement.spacedBy(16.dp)) {
                             CriticalsCard(criticals, onOpenOrder)
+                            if (showRevenue) RevenueTodayCard(revenueToday, onRevenue)
                             if (showMoney) CommissionCard(commission, onReferrers)
                             if (syncState != null && !syncState.disabled) {
                                 EmrCard(emrPending, onEmrInbox)
@@ -375,6 +397,8 @@ fun LabHomeScreen(
                             ShortcutsCard(
                                 billsCaption = billsCaption,
                                 showReferrers = showMoney,
+                                showRevenue = showRevenue,
+                                onRevenue = onRevenue,
                                 onPatients = onPatients, onReferrers = onReferrers,
                                 onCatalog = onCatalog, onBills = onBills, onSettings = onSettings,
                             )
@@ -442,6 +466,9 @@ fun LabHomeScreen(
                 // ── Critical results today ──
                 CriticalsCard(criticals, onOpenOrder)
 
+                // ── Revenue today ──
+                if (showRevenue) RevenueTodayCard(revenueToday, onRevenue)
+
                 // ── Commission, month to date ──
                 if (showMoney) CommissionCard(commission, onReferrers)
 
@@ -451,6 +478,7 @@ fun LabHomeScreen(
                     // Owner-only money surface (RouteGuard refuses everyone else): no
                     // door for people who cannot walk through it.
                     if (showMoney) HomeCard("Referrers", "Doctors & clinics", Icons.Outlined.People) { onReferrers() }
+                    if (showRevenue) HomeCard("Revenue", "Billed · collected · due", Icons.Outlined.BarChart) { onRevenue() }
                     HomeCard("Test catalog", "Tests, panels & prices", Icons.Outlined.Biotech) { onCatalog() }
                     HomeCard("Bills", billsCaption, Icons.AutoMirrored.Outlined.ReceiptLong) { onBills() }
                     HomeCard("Settings", "Printer · License", Icons.Outlined.Settings) { onSettings() }
@@ -801,6 +829,59 @@ private fun CriticalsCard(criticals: List<CriticalResult>, onOpenOrder: (String)
 }
 
 /**
+ * Today's takings at a glance — billed, collected, still due — from the same
+ * report the Revenue screen builds, so the tile and the screen can never quote
+ * different numbers. Tapping it opens the full dashboard.
+ */
+@Composable
+private fun RevenueTodayCard(report: RevenueReport?, onOpen: () -> Unit) {
+    val c = AppTheme.colors
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Box(Modifier.size(30.dp).background(c.accentSoft, RoundedCornerShape(9.dp)),
+                    contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.BarChart, contentDescription = null,
+                        tint = c.accent, modifier = Modifier.size(17.dp))
+                }
+                Text("Revenue", style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Text("Today", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            val t = report?.current
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                RevenueFigure("Billed", t?.let { inr(it.billed) } ?: "—", Modifier.weight(1f))
+                RevenueFigure("Collected", t?.let { inr(it.collected) } ?: "—", Modifier.weight(1f))
+                RevenueFigure("Due", t?.let { inr(it.due) } ?: "—", Modifier.weight(1f),
+                    tone = if ((t?.due ?: 0.0) > 0.005) c.warning else null)
+            }
+            report?.let { r ->
+                Text(
+                    "${r.current.orders} order${if (r.current.orders == 1) "" else "s"} today" +
+                        if (r.outstandingAll > 0.005) " · ${inr(r.outstandingAll)} to collect overall" else "",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RevenueFigure(label: String, value: String, modifier: Modifier, tone: androidx.compose.ui.graphics.Color? = null) {
+    Column(modifier) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        FittedAmount(value, MaterialTheme.typography.titleSmall, tone ?: MaterialTheme.colorScheme.onSurface, minSize = 10.sp)
+    }
+}
+
+/**
  * Referrer commission, month to date (feedback item 7 asked for commission on
  * the dashboard). Every figure is summed from the frozen order lines — the same
  * arithmetic as the statement, through the same repository rollup, so the tile
@@ -933,6 +1014,8 @@ private fun LicenseModeChip(mode: String?) {
 private fun ShortcutsCard(
     billsCaption: String,
     showReferrers: Boolean,
+    showRevenue: Boolean,
+    onRevenue: () -> Unit,
     onPatients: () -> Unit,
     onReferrers: () -> Unit,
     onCatalog: () -> Unit,
@@ -951,6 +1034,9 @@ private fun ShortcutsCard(
                 ShortcutTile("Patients", Icons.Outlined.PersonAddAlt, Modifier.fillMaxWidth(), onClick = onPatients)
                 if (showReferrers) {
                     ShortcutTile("Referrers", Icons.Outlined.People, Modifier.fillMaxWidth(), onClick = onReferrers)
+                }
+                if (showRevenue) {
+                    ShortcutTile("Revenue", Icons.Outlined.BarChart, Modifier.fillMaxWidth(), onClick = onRevenue)
                 }
                 ShortcutTile("Test catalog", Icons.Outlined.Biotech, Modifier.fillMaxWidth(), onClick = onCatalog)
                 ShortcutTile("Bills", Icons.AutoMirrored.Outlined.ReceiptLong, Modifier.fillMaxWidth(),

@@ -26,6 +26,11 @@ SELECT * FROM referrers WHERE id = ?;
 list:
 SELECT * FROM referrers WHERE deleted_at IS NULL ORDER BY name;
 
+-- Names for reports, soft-deleted included: a referrer removed today still sent
+-- last month's patients, and "Unknown" beside their revenue helps nobody.
+allNames:
+SELECT id, name FROM referrers;
+
 softDelete:
 UPDATE referrers SET deleted_at = ? WHERE id = ?;
 

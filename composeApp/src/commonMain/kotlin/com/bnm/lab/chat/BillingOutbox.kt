@@ -1,5 +1,7 @@
 package com.bnm.lab.chat
 
+import kotlinx.serialization.json.longOrNull
+import com.bnm.lab.billing.BillingScope
 import com.bnm.lab.diagnostics.AppLog
 
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -45,6 +47,14 @@ import kotlinx.serialization.json.jsonPrimitive
 class BillingOutboxSender(
     private val db: AppDatabase,
     private val api: BillingApi,
+    /**
+     * The token tenders are posted with — the SAME one bills are created with.
+     * It used to read only a BNM Studio sign-in, which a licence-activated lab
+     * computer never has: every advance and every balance collected on a
+     * connected lab seat failed "Not signed in" and never reached the server,
+     * while the bill it belonged to synced fine.
+     */
+    private val paymentToken: suspend () -> String? = { SessionManager().getSessionToken() },
 ) {
     private val json = ApiClient.json
     private val outboxQ get() = db.billingOutboxQueries
@@ -53,7 +63,7 @@ class BillingOutboxSender(
 
     /** Built on first use — a device that never takes a part payment never
      *  creates a second http client. */
-    private val payments by lazy { InvoicePaymentClient() }
+    private val payments by lazy { InvoicePaymentClient(tokenProvider = paymentToken) }
 
     /** App-lifetime scope so a drain triggered right before navigation isn't
      *  cancelled when the originating screen leaves the composition. */
@@ -72,10 +82,28 @@ class BillingOutboxSender(
         scope.launch { runCatching { drain() } }
     }
 
-    suspend fun drain() = mutex.withLock {
+    suspend fun drain() = mutex.withLock { drainLocked() }
+
+    /**
+     * Drain, then run [pull] while still holding the drain lock. A bill pull that
+     * runs beside a drain can fetch a row from before a tender, then write it
+     * back AFTER the drain has already stored the fresh row and dropped the
+     * queued tender — the money disappears from the balance until the next pull.
+     */
+    suspend fun <T> drainThen(pull: suspend () -> T): T = mutex.withLock {
+        drainLocked()
+        pull()
+    }
+
+    private suspend fun drainLocked() {
         withContext(Dispatchers.Default) {
             val pending = outboxQ.selectPending().executeAsList()
             for (row in pending) {
+                // The offline archive's rows are its permanent ledger — a queued
+                // tender there IS the record of money taken — and no server
+                // knows the key. A lab that moves to the connected edition must
+                // not start firing them at a business they were never part of.
+                if (BillingScope.isOffline(row.business_id)) continue
                 // Respect dependencies: skip until the prerequisite mutation has drained.
                 val dep = row.depends_on
                 if (dep != null && outboxQ.countByIdempotency(dep).executeAsOne() > 0) continue
@@ -107,6 +135,12 @@ class BillingOutboxSender(
                             // instead of a second debit.
                             val server = payments.recordPayment(row.business_id, row.aggregate_id, row.payload)
                                 ?: payments.invoiceRaw(row.business_id, row.aggregate_id)
+                                // Recorded, but no bill came back to adopt. Keep the
+                                // tender queued: the retry is a no-op on the server
+                                // (client_id) and returns the bill this time. Dropping
+                                // it here would leave the bill showing its pre-tender
+                                // balance, because pulls hold such bills back.
+                                ?: error("Payment recorded; waiting to read the bill back")
                             // Store the server row VERBATIM. Round-tripping it through
                             // the Invoice model would silently drop `paid_amount` (an
                             // unknown key) — the one field every balance is read from.
@@ -118,10 +152,13 @@ class BillingOutboxSender(
                                 // between dropping the queued tender and adopting the
                                 // server row, a balance would read it twice (or not
                                 // at all). The outer deleteById then finds nothing.
+                                // Keep the server's seq: a pull fetched before this
+                                // tender compares against it and leaves this row be.
+                                val seq = server["seq"]?.takeIf { it !is JsonNull }?.jsonPrimitive?.longOrNull ?: 0L
                                 db.transaction {
                                     outboxQ.deleteById(row.id)
                                     q.upsertEntity(
-                                        BillingRepository.INVOICE, id, row.business_id, 0L, createdAt, server.toString(),
+                                        BillingRepository.INVOICE, id, row.business_id, seq, createdAt, server.toString(),
                                     )
                                 }
                             }
@@ -179,14 +216,14 @@ class BillingOutboxSender(
  */
 private class InvoicePaymentClient(
     private val http: HttpClient = ApiClient.create(),
-    private val session: SessionManager = SessionManager(),
+    private val tokenProvider: suspend () -> String?,
 ) {
     private val json = ApiClient.json
 
     /** Throwing (rather than posting anonymously) leaves the row queued for the
      *  next drain — a signed-out seat must not lose the tender. */
-    private fun bearer(): String =
-        session.getSessionToken()?.takeIf { it.isNotEmpty() }?.let { "Bearer $it" }
+    private suspend fun bearer(): String =
+        tokenProvider()?.takeIf { it.isNotEmpty() }?.let { "Bearer $it" }
             ?: error("Not signed in")
 
     private suspend fun body(resp: HttpResponse): JsonObject {

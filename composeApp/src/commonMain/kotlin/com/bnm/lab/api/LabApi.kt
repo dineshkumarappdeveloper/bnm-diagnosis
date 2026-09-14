@@ -1,5 +1,7 @@
 package com.bnm.lab.api
 
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonNull
 import com.bnm.lab.lab.TestParameter
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
@@ -226,8 +228,10 @@ class LabApi(
         return "Authorization" to "Bearer $token"
     }
 
+    /** JSON null is absent, not the string "null" (a perpetual licence's
+     *  `expires_at` is null — see license.claimString for the same trap). */
     private fun JsonObject?.strField(key: String): String? =
-        runCatching { this?.get(key)?.jsonPrimitive?.content }.getOrNull()
+        runCatching { (this?.get(key) as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content }.getOrNull()
 
     /**
      * `POST admin-lab/activate` (no auth). Returns a typed outcome for the

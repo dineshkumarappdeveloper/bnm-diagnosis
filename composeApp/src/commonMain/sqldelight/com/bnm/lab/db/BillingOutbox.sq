@@ -65,5 +65,21 @@ pendingCreateKeyFor:
 SELECT idempotency_key FROM billing_outbox
 WHERE op = 'create_invoice' AND aggregate_id = ? LIMIT 1;
 
+-- Same move for the queued rows — on an offline install they are the payment record.
+rekeyNullBusinessOutbox:
+UPDATE billing_outbox SET business_id = ? WHERE business_id = 'null';
+
+-- Bills with a TENDER still queued. A pull must not adopt the server copy of
+-- such a bill: when the tender's POST landed but its reply was lost, the server
+-- row already holds the money the queue is still counting, and adopting it
+-- counts that tender twice (a part-paid bill reads Paid and its report
+-- releases). The drain adopts the server row itself, in the same transaction
+-- that drops the queued tender. A tender that has failed five times stops
+-- holding its bill back: a bill frozen behind a tender that will never land
+-- would hide a cancellation or a balance collected on another seat.
+pendingTenderInvoiceIds:
+SELECT DISTINCT aggregate_id FROM billing_outbox
+WHERE op = 'record_payment' AND status IN ('pending','failed','sending') AND attempts < 5;
+
 pendingCount:
 SELECT count(*) FROM billing_outbox WHERE status IN ('pending','failed','sending');

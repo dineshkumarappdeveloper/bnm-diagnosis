@@ -111,11 +111,11 @@ object StaffRole {
 
     /** One-line "what this person may do", shown under the role dropdown. */
     fun describe(role: String): String = when (role) {
-        OWNER -> "Everything — commission, prices, staff & roles included."
-        PATHOLOGIST -> "Approves results and signs reports. No commission or prices."
-        TECHNICIAN -> "Enters and verifies results. No commission or prices."
-        RECEPTIONIST -> "Registers patients, orders and bills. No commission or prices."
-        else -> "Registers patients, orders and bills. No commission or prices."
+        OWNER -> "Everything — revenue, commission, prices, staff & roles included."
+        PATHOLOGIST -> "Approves results and signs reports. No revenue, commission or prices."
+        TECHNICIAN -> "Enters and verifies results. No revenue, commission or prices."
+        RECEPTIONIST -> "Registers patients, orders and bills. No revenue, commission or prices."
+        else -> "Registers patients, orders and bills. No revenue, commission or prices."
     }
 }
 

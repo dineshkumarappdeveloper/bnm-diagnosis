@@ -9,7 +9,8 @@
 # downloadable from one place. Published as TWO releases:
 #   • lab-v<x.y.z>        versioned history
 #   • lab-latest          rolling tag whose assets are replaced each release —
-#                         bnmapp.com links /releases/download/diagnosis-latest/…
+#                         bnmapp.com links /releases/download/lab-latest/…
+#                         (diagnosis-latest stays published for old links)
 #                         so the website never needs editing for a new version.
 # NEITHER is ever marked "latest". The repo's /releases/latest belongs to
 # BNMAdmin, whose site links use /releases/latest/download/ — stealing it would
@@ -230,7 +231,7 @@ jobs:
           fail_on_unmatched_files: true
 
       # Rolling release — the STABLE URLs bnmapp.com links to:
-      #   /releases/download/diagnosis-latest/BNM Lab-<platform>.<ext>
+      #   /releases/download/lab-latest/BNMLab-<platform>.<ext>
       # Same-named assets are replaced on each publish, so the website never
       # needs editing for a new version. Same pattern as billing-latest.
       - name: Update rolling lab-latest release
@@ -251,13 +252,13 @@ jobs:
       # The tag prefix and asset filenames are COMPILED INTO every shipped build
       # (UpdateChecker.TAG_PREFIXES / UpdatePlatform.assetNames). A copy
       # installed before the BNM Lab rename only knows `diagnosis-v*` and
-      # `BNM Lab-*`, and no server-side change can teach it otherwise — so
+      # `BNMDiagnosis-*`, and no server-side change can teach it otherwise — so
       # dropping these names would make those installs report "you are up to
       # date" forever, silently. Publishing the same binaries under the old
       # names too gives them one more update, which is the one that teaches them
       # the new names. Retire this block only once no install predating the
       # rename remains (check `lab_devices.last_seen` on both refs).
-      - name: Duplicate artifacts under the legacy BNM Lab-* names
+      - name: Duplicate artifacts under the legacy BNMDiagnosis-* names
         run: |
           set -euo pipefail
           cp dist/BNMLab-windows-x64.msi  dist/BNMDiagnosis-windows-x64.msi
@@ -267,7 +268,11 @@ jobs:
           # checksums.txt must cover BOTH names or the old client's verification
           # step finds no line for its filename and reports UNVERIFIED.
           cd dist
-          sha256sum BNM Lab-* >> checksums.txt
+          # (The rename's find-and-replace once turned this into `BNM Lab-*` —
+          # two words, so sha256sum found neither and set -e failed the step. The
+          # lab-v* releases above had already published, which is why 1.1.0's run
+          # went red with installers live and the legacy channel never updated.)
+          sha256sum BNMDiagnosis-* >> checksums.txt
           cat checksums.txt
 
       - name: Publish legacy alias release (diagnosis-v*)
