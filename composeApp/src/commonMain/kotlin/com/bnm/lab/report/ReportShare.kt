@@ -1,17 +1,16 @@
 package com.bnm.lab.report
 
-import com.bnm.lab.api.Constants
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
 /**
- * The report-download link that the printed QR encodes.
+ * The report link that the printed QR encodes.
  *
  * OFFLINE-FIRST, and that is the whole design constraint: the paper is printed
  * the moment the pathologist approves, often on a lab PC that has not seen the
  * internet in days. So the token is minted HERE, locally, written to
- * `lab_reports`, and the PDF is uploaded later by [ReportUploader] whenever
- * connectivity returns. Nothing on the printing path waits on a server.
+ * `lab_reports`, and the report DATA is published later by [ReportUploader]
+ * whenever connectivity returns. Nothing on the printing path waits on a server.
  *
  * The token is the ONLY thing protecting a piece of PHI, so:
  *  - it is never derived from the accession number (`ACC-S1-00042` is per-seat
@@ -24,7 +23,7 @@ import kotlin.uuid.Uuid
 object ReportShare {
 
     /** Printed under the code. A patient must be able to tell what it is. */
-    const val CAPTION = "Scan to download this report"
+    const val CAPTION = "Scan to view this report"
 
     /** Second line, smaller: this is a private link, not a public page. */
     const val NOTE = "Private link - keep it to yourself"
@@ -45,13 +44,23 @@ object ReportShare {
         token != null && token.length >= 40 && token.all { it in '0'..'9' || it in 'a'..'f' }
 
     /**
-     * The PUBLIC resolver `admin-lab` serves: it 302s to a 60-second signed URL
-     * for the private `lab-reports` object, and answers an identical 404 for
-     * unknown / malformed / revoked / expired so the endpoint is not an
-     * enumeration oracle.
+     * The report page on BNMClient's site. It reads the token from the
+     * FRAGMENT, fetches the published snapshot from `admin-lab /reports/view`
+     * and draws the report (and its PDF) in the patient's browser — the server
+     * keeps the data, never a PDF.
+     *
+     * The token rides after `#` on purpose: a browser never sends the fragment,
+     * so it stays out of Cloudflare's logs and every Referer header.
+     *
+     * Paper printed before this link existed encodes the backend resolver
+     * (`…/functions/v1/admin-lab/reports/r/<token>`). That route redirects here
+     * and has to live for as long as those sheets do.
      */
-    fun resolveUrl(token: String): String =
-        "${Constants.EDGE_FUNCTIONS_BASE_URL}/admin-lab/reports/r/$token"
+    fun resolveUrl(token: String): String = "$REPORT_PAGE_URL#$token"
+
+    /** Where [resolveUrl] points. Printed paper is permanent: never change it
+     *  to a page that is not live in production. */
+    const val REPORT_PAGE_URL = "https://app.bnmapp.com/r/"
 
     /**
      * Build the printable QR block for [token], or null if the payload somehow
@@ -60,8 +69,9 @@ object ReportShare {
      *
      * ECC level M (15% recovery): the code is printed at ~20 mm on paper that
      * gets folded into an envelope, and M is the level every consumer scanner is
-     * tuned for. H would push the payload from a 49-module symbol to a 65-module
-     * one, i.e. smaller modules in the same 20 mm — worse, not better.
+     * tuned for. The 90-byte link fits a 41-module symbol at M; H would push it
+     * to a 53-module one, i.e. smaller modules in the same 20 mm — worse, not
+     * better.
      */
     fun qrFor(token: String): ReportQr? {
         val url = resolveUrl(token)

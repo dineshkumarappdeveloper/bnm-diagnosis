@@ -122,6 +122,7 @@ import com.bnm.lab.report.buildReportDoc
 import com.bnm.lab.report.openPdf
 import com.bnm.lab.report.printPdf
 import com.bnm.lab.report.writeLabReportPdf
+import com.bnm.lab.report.readReportBase64
 import com.bnm.lab.staff.LocalStaffSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -1302,11 +1303,22 @@ fun OrderDetailScreen(
                                     if (token == null) {
                                         note = "This edition cannot send the file — use the link option."
                                     } else {
+                                        // The server keeps no report PDFs, so the file
+                                        // Meta sends is the one this PC renders — the
+                                        // same document the link option attaches.
+                                        val released = repo.approvedTestIds(o.id)
+                                        val doc = assembler.assemble(o.id, labName, testIds = released.ifEmpty { null })
+                                        val pdfBase64 = doc?.let {
+                                            withContext(Dispatchers.Default) {
+                                                writeLabReportPdf(it).takeIf { pdfPath -> pdfPath.isNotBlank() }?.let { pdfPath -> readReportBase64(pdfPath) }
+                                            }
+                                        }
                                         labApi.sendReportWhatsapp(
                                             token = token, to = phone,
                                             filename = waReportFilename(o.accessionNo),
                                             caption = waReportCaption(recipientName, labName, o.accessionNo, doctor),
                                             idempotencyKey = "labrep-$token-$phone",
+                                            pdfBase64 = pdfBase64,
                                         ).onSuccess {
                                             note = "Sent to $phone"
                                             markReported(null)

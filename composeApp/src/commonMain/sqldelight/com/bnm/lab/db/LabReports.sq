@@ -1,4 +1,4 @@
--- Round-1 feedback · QR code on the printed report → patient downloads the PDF.
+-- Round-1 feedback · QR code on the printed report → patient opens the report.
 --
 -- WHY A LOCAL TABLE AT ALL: the printed QR must be correct with ZERO network
 -- (CLAUDE.md: SQLDelight is the system of record, every workflow works offline
@@ -9,7 +9,7 @@
 --
 -- WHY A RANDOM TOKEN AND NOT THE ACCESSION: a lab report is PHI, and accession
 -- numbers are per-seat sequential (ACC-S1-00042) — trivially enumerable. The
--- token is 160 bits of randomness, the same reasoning the Studio invoice
+-- token is 64 hex characters of CSPRNG output, the same reasoning the Studio invoice
 -- share-link uses. It is the ONLY secret protecting the document, so it is never
 -- derived from patient data and never reused across reports.
 --
@@ -20,16 +20,22 @@
 
 CREATE TABLE IF NOT EXISTS lab_reports (
     order_id TEXT NOT NULL PRIMARY KEY,
-    token TEXT NOT NULL,                       -- 160-bit hex, the capability
+    token TEXT NOT NULL,                       -- 64-hex capability (ReportShare.newToken)
     accession_no TEXT NOT NULL,
     -- Lifecycle: 'pending' minted but not uploaded · 'uploaded' resolvable
     -- · 'revoked' link killed (wrong patient, corrected report)
     state TEXT NOT NULL DEFAULT 'pending',
     published_at TEXT,                         -- when the server confirmed the upload
     expires_at TEXT,                           -- null = no expiry
-    sha256 TEXT,                               -- of the uploaded bytes, so a reprint can skip re-upload
+    sha256 TEXT,                               -- of the published snapshot, so an unchanged report skips re-upload
     created_at TEXT NOT NULL,
-    updated_at TEXT
+    updated_at TEXT,
+    -- Upload retries (2026-09-15). APPENDED LAST: every query here is SELECT *
+    -- and maps positionally, and AppDatabaseFactory adds them in this order to
+    -- devices that already have the table. A row that keeps failing backs off
+    -- and sinks below fresh ones, so it can never block the queue.
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT                       -- ISO instant; null = due now
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS lab_reports_token ON lab_reports(token);
@@ -45,29 +51,58 @@ SELECT * FROM lab_reports WHERE order_id = ?;
 reportByToken:
 SELECT * FROM lab_reports WHERE token = ?;
 
+-- The drain's outcomes below all name the TOKEN they worked on and touch only a
+-- still-pending row: a revoke, or a new token minted over a revoked one, that
+-- lands while an upload is in flight must not be marked with that upload's result.
 markUploaded:
-UPDATE lab_reports SET state = 'uploaded', published_at = ?, sha256 = ?, updated_at = ? WHERE order_id = ?;
+UPDATE lab_reports SET state = 'uploaded', published_at = :publishedAt, sha256 = :sha256, updated_at = :publishedAt,
+    attempts = 0, next_attempt_at = NULL
+WHERE order_id = :orderId AND token = :token AND state = 'pending';
+
+-- Requeued, but the rebuilt snapshot is the one the server already has: back to
+-- `uploaded` with no upload, and published_at still says when it last went out.
+markUnchanged:
+UPDATE lab_reports SET state = 'uploaded', attempts = 0, next_attempt_at = NULL
+WHERE order_id = :orderId AND token = :token AND state = 'pending';
+
+-- An upload that failed (or a row that could not be built): try again later.
+deferUpload:
+UPDATE lab_reports SET attempts = attempts + 1, next_attempt_at = :nextAttemptAt
+WHERE order_id = :orderId AND token = :token AND state = 'pending';
 
 revokeReport:
 UPDATE lab_reports SET state = 'revoked', updated_at = ? WHERE order_id = ?;
 
 -- A report that grew (another test released under the same token) goes back
 -- in the upload queue so the server copy catches up. Same token, same QR.
+-- The content changed, so a fresh attempt is due at once. sha256 is KEPT: it
+-- is how the drain notices when the rebuilt report is the same after all.
 requeueReport:
-UPDATE lab_reports SET state = 'pending', updated_at = ? WHERE order_id = ? AND state = 'uploaded';
+UPDATE lab_reports SET state = 'pending', updated_at = ?, attempts = 0, next_attempt_at = NULL
+WHERE order_id = ? AND state = 'uploaded';
 
 -- A signer's NAME changed (the seeded "Lab Owner" entering their real name
 -- above all): every report they signed goes back in the upload queue, so the
 -- QR link and WhatsApp copies stop showing the old name. Same token, same QR.
 requeueReportsSignedBy:
-UPDATE lab_reports SET state = 'pending', updated_at = :now
+UPDATE lab_reports SET state = 'pending', updated_at = :now, attempts = 0, next_attempt_at = NULL
 WHERE state = 'uploaded' AND order_id IN (
     SELECT DISTINCT order_id FROM lab_results WHERE verified_by_id = :staffId OR approved_by_id = :staffId
 );
 
--- Drain queue: everything minted but not yet on the server.
+-- One-time switch from PDF uploads to the report snapshot: everything the
+-- server holds as a PDF goes back in the queue and republishes as data (same
+-- token, same QR). sha256 is cleared so nothing is skipped as "unchanged".
+requeueAllUploaded:
+UPDATE lab_reports SET state = 'pending', sha256 = NULL, updated_at = :now, attempts = 0, next_attempt_at = NULL
+WHERE state = 'uploaded';
+
+-- Drain queue: everything minted but not yet on the server. Fewest failures
+-- first, so rows that keep failing never crowd out a fresh report; the
+-- next_attempt_at backoff is applied by the caller (ISO instants do not
+-- compare reliably as text).
 pendingUploads:
-SELECT * FROM lab_reports WHERE state = 'pending' ORDER BY created_at;
+SELECT * FROM lab_reports WHERE state = 'pending' ORDER BY attempts, created_at;
 
 reportsChangedSince:
 SELECT * FROM lab_reports WHERE coalesce(updated_at, created_at) > :since;

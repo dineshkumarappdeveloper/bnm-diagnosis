@@ -263,7 +263,7 @@ class ReportPdfTest {
         assertTrue(text.lines().none { longApprover in it }, "the approver name must be wrapped onto more than one line")
         assertTrue(text.lines().none { longVerifier in it }, "the verifier name must be wrapped onto more than one line")
         assertTrue("Krishnamoorthy" in text && "Counter 2" in text, "no part of either name may be dropped")
-        assertTrue("Scan to download" in text, "the QR caption still prints between them")
+        assertTrue("Scan to view" in text, "the QR caption still prints between them")
     }
 
     @Test
