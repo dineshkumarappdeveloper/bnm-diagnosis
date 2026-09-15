@@ -57,6 +57,9 @@ class ReportSnapshotTest {
         byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A).copyInto(it)
     }
 
+    /** A BMP-signatured blob — the Mindray scattergram, uncompressed and heavy. */
+    private fun bigBmp(size: Int) = ByteArray(size).also { "BM".encodeToByteArray().copyInto(it) }
+
     @Test
     fun `the snapshot carries exactly the v1 keys`() {
         val s = buildReportSnapshot(sampleReportDoc(), generatedAt = "2026-09-15T08:30:00Z")
@@ -114,12 +117,21 @@ class ReportSnapshotTest {
     }
 
     @Test
-    fun `a bitmap that is not a PNG stays on the paper only`() {
+    fun `the analyzer BMP scattergram rides as sent, and bytes no browser draws stay on paper`() {
+        // Mindray BC-5x: the DIFF scattergram is a base64 BMP, drawn on the PDF —
+        // so the web copy carries it too; r/report.js reads "Qk" as image/bmp.
         val bmp = "BM".encodeToByteArray() + ByteArray(64)
-        val doc = sampleReportDoc().copy(sections = listOf(ReportSection("CBC", rows = emptyList(),
+        val scatter = sampleReportDoc().copy(sections = listOf(ReportSection("CBC", rows = emptyList(),
             graphs = listOf(ReportGraph("diff", "DIFF", emptyList(), image = bmp)))))
-        assertEquals(JsonArray(emptyList()), buildReportSnapshot(doc).arr("sections")[0].jsonObject.arr("graphs"),
-            "a graph with nothing drawable is left out, not sent as an empty box")
+        val g = buildReportSnapshot(scatter).arr("sections")[0].jsonObject.arr("graphs").single().jsonObject
+        assertEquals("diff", g.str("kind"))
+        assertTrue(g.str("imagePng")!!.startsWith("Qk"))
+        assertEquals(bmp.toList(), Base64.Default.decode(g.str("imagePng")!!).toList(), "the bitmap is not re-encoded")
+
+        val unknown = scatter.copy(sections = listOf(ReportSection("CBC", rows = emptyList(),
+            graphs = listOf(ReportGraph("diff", "DIFF", emptyList(), image = "GIF89a".encodeToByteArray() + ByteArray(64))))))
+        assertEquals(JsonArray(emptyList()), buildReportSnapshot(unknown).arr("sections")[0].jsonObject.arr("graphs"),
+            "a graph with nothing drawable is left out, not sent as a broken picture")
     }
 
     @Test
@@ -137,7 +149,7 @@ class ReportSnapshotTest {
     fun `over the cap, graph images go first and signature images next`() {
         val base = sampleReportDoc()
         val cbcWithBigScatter = base.sections[0].copy(graphs = base.sections[0].graphs.map {
-            if (it.kind == "diff") ReportGraph("diff", "DIFF", emptyList(), image = bigPng(200_000)) else it
+            if (it.kind == "diff") ReportGraph("diff", "DIFF", emptyList(), image = bigBmp(200_000)) else it
         })
         val heavyGraph = base.copy(sections = listOf(cbcWithBigScatter) + base.sections.drop(1))
         val full = buildReportSnapshot(heavyGraph, maxBytes = Int.MAX_VALUE)

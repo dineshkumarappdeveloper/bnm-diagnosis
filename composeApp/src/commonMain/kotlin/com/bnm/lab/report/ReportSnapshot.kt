@@ -133,15 +133,18 @@ private fun snapshotOf(
                     // else the image — so a curve never carries its bitmap. A
                     // graph left with neither (its bitmap dropped) would only be
                     // an empty box on the page, so it is left out.
-                    val png = if (graphImages && !g.hasCurve) pngBase64(g.image) else null
-                    if (!g.hasCurve && png == null) continue
+                    val image = if (graphImages && !g.hasCurve) webImageBase64(g.image) else null
+                    if (!g.hasCurve && image == null) continue
                     addJsonObject {
                         put("kind", g.kind)
                         put("title", g.title)
                         put("xLabel", g.xLabel)
                         put("points", compactSeries(g.points))
                         put("lines", compactSeries(g.lines))
-                        put("imagePng", png)
+                        // The v1 key says PNG; the bytes are the analyzer's own
+                        // (Mindray's DIFF scattergram is a BMP) and the page
+                        // reads the format from them.
+                        put("imagePng", image)
                     }
                 }
             }
@@ -161,14 +164,14 @@ private fun snapshotOf(
 /** A signatory's credentials + ink, or JSON null when there is nothing to show. */
 private fun signerOf(sig: ReportSignature?, withImage: Boolean): JsonElement {
     if (sig == null) return JsonNull
-    val png = if (withImage) pngBase64(sig.imagePng) else null
+    val ink = if (withImage) webImageBase64(sig.imagePng) else null
     val quals = sig.qualifications?.trim()?.takeIf { it.isNotEmpty() }
     val reg = sig.registrationNo?.trim()?.takeIf { it.isNotEmpty() }
-    if (png == null && quals == null && reg == null) return JsonNull
+    if (ink == null && quals == null && reg == null) return JsonNull
     return buildJsonObject {
         put("qualifications", quals)
         put("registrationNo", reg)
-        put("signaturePng", png)
+        put("signaturePng", ink)
     }
 }
 
@@ -176,18 +179,31 @@ private fun signerOf(sig: ReportSignature?, withImage: Boolean): JsonElement {
 private fun accentHex(rgb: Int): String =
     "#" + (rgb and 0xFFFFFF).toString(16).padStart(6, '0').uppercase()
 
-private val PNG_MAGIC = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
+/**
+ * The image formats the page tells apart by their first bytes (`r/report.js`
+ * imageDataUrl: `iVBOR`, `/9j/`, `Qk` in base64) and every browser draws. The
+ * analyzers send PNG or BMP — Mindray's DIFF scattergram is a BMP — and the
+ * signature pad writes PNG.
+ */
+private val WEB_IMAGE_MAGIC = listOf(
+    byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A), // PNG
+    byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte()),              // JPEG
+    byteArrayOf(0x42, 0x4D),                                                // BMP "BM"
+)
 
 /**
- * Base64 of [bytes] when they ARE a PNG, else null. The page shows the field as
- * `data:image/png`, and the analyzer's own scattergram is a BMP (Mindray) that
- * would arrive mislabelled — so a non-PNG image stays on the paper only.
+ * Base64 of [bytes] as sent, when they are an image the page can show, else
+ * null. Anything else would arrive labelled as a PNG and draw as a broken
+ * picture, so it stays on the paper only. Nothing is re-encoded here: a BMP is
+ * large, and the size cap in [buildReportSnapshot] is what sheds it.
  */
 @OptIn(ExperimentalEncodingApi::class)
-private fun pngBase64(bytes: ByteArray?): String? {
-    if (bytes == null || bytes.size <= PNG_MAGIC.size) return null
-    for (i in PNG_MAGIC.indices) if (bytes[i] != PNG_MAGIC[i]) return null
-    return Base64.Default.encode(bytes)
+private fun webImageBase64(bytes: ByteArray?): String? {
+    if (bytes == null) return null
+    val known = WEB_IMAGE_MAGIC.any { magic ->
+        bytes.size > magic.size && magic.indices.all { bytes[it] == magic[it] }
+    }
+    return if (known) Base64.Default.encode(bytes) else null
 }
 
 /**
