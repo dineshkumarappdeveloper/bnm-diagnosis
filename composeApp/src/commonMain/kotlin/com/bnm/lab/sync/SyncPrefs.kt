@@ -30,6 +30,17 @@ class SyncPrefs {
         get() = s.getLong(K_PULL_CURSOR, 0L)
         set(v) = s.putLong(K_PULL_CURSOR, v)
 
+    /**
+     * Whether this install has re-read the lab's shared records once since the
+     * staff pathologist tick existed. A seat that pulled a staff doc BEFORE it
+     * had the column dropped the tick on the floor, and its cursor had already
+     * moved past that doc — without one full re-pull it would show the owner as
+     * unable to approve, and then push that "no" to every other seat.
+     */
+    var pathologistTickRepulled: Boolean
+        get() = s.getBoolean(K_TICK_REPULL, false)
+        set(v) = s.putBoolean(K_TICK_REPULL, v)
+
     /** `clinical_lab_orders` EMR-inbox cursor (server seq). */
     var emrCursor: Long
         get() = s.getLong(K_EMR_CURSOR, 0L)
@@ -53,5 +64,6 @@ class SyncPrefs {
         const val K_EMR_CURSOR = "sync_emr_cursor"
         const val K_LAST_SYNC = "sync_last_at"
         const val K_DISABLED = "sync_disabled_no_business"
+        const val K_TICK_REPULL = "sync_pathologist_tick_repulled"
     }
 }

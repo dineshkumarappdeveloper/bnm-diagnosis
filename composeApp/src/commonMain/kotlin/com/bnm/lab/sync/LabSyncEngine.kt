@@ -283,6 +283,13 @@ class LabSyncEngine(
     // ── DOWNSTREAM ───────────────────────────────────────────────────────────
 
     private suspend fun pullAll() {
+        // Once per install: re-read everything, so staff docs pulled before the
+        // pathologist tick existed are applied again with it (LWW keeps the
+        // rest a no-op). A fresh install starts at 0 anyway.
+        if (!prefs.pathologistTickRepulled) {
+            prefs.pullCursor = 0L
+            prefs.pathologistTickRepulled = true
+        }
         var cursor = prefs.pullCursor
         var appliedCatalog = false
         var skipped = 0

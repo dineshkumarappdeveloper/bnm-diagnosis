@@ -130,7 +130,8 @@ fun StaffScreen(onBack: () -> Unit) {
             item {
                 Text(
                     "Everyone who works this lab. Roles decide what they may do — only a " +
-                        "pathologist (or the owner) can approve results, and only the owner sees " +
+                        "pathologist can approve results (an owner who is the lab's pathologist: turn on " +
+                        "\"Also the lab's pathologist\" when editing them), and only the owner sees " +
                         "commission, payouts and prices. People who leave are deactivated, never " +
                         "deleted, so their name stays readable on old reports.",
                     style = MaterialTheme.typography.bodySmall,

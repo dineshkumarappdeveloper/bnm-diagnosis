@@ -670,12 +670,17 @@ fun OrderDetailScreen(
                             // when owners approved by default. Say so plainly, and let the
                             // owner who IS the pathologist claim it in one tap. Never granted
                             // silently: owning the lab is not being its pathologist.
-                            if (!canApprove && approversInLab == 0L && (o.status == LabStatus.VERIFIED || hasVerifiedTest)) {
+                            if (!canApprove && approversInLab == 0L &&
+                                (o.status == LabStatus.VERIFIED || (hasVerifiedTest && o.status in ENTRY_OPEN))
+                            ) {
                                 NoApproverNotice(
                                     me = me,
                                     onClaim = { owner ->
                                         scope.launch {
-                                            staffRepo.save(owner.copy(alsoPathologist = true))
+                                            // Save onto the stored row, not the sign-in copy, so a PIN or
+                                            // signature changed since sign-in is not written back over.
+                                            val current = staffRepo.byId(owner.id) ?: owner
+                                            staffRepo.save(current.copy(alsoPathologist = true))
                                                 .onSuccess { saved ->
                                                     session.refresh(saved)
                                                     approversInLab = staffRepo.countApprovers()
