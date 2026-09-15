@@ -1,7 +1,9 @@
 package com.bnm.lab.navigation
 
 sealed class Screen(val route: String) {
-    /** License activation — the app's entry when this device isn't licensed. */
+    /** License activation — the app's entry ONLY when this computer holds no
+     *  genuine licence (never activated, or deactivated). A lapsed or blocked
+     *  licence opens on [StaffSignIn] read-only instead — see [LicenceGate]. */
     data object Activation : Screen("activation")
     /** License & devices management (reached from Settings). */
     data object LicenseDevices : Screen("license_devices")

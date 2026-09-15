@@ -4,12 +4,17 @@ package com.bnm.lab.license
  * Subscription lifecycle for the licence card + renewal nag (P4).
  *
  * Perpetual licences never enter any of the warning states — they are sold
- * outright and MUST keep working forever offline. Subscriptions get a long
- * runway: a soft "renew soon" notice inside [EXPIRING_WINDOW_DAYS] of expiry,
- * then a 45-day offline GRACE in which everything still works (the lab is
- * never stopped mid-day by a billing date), and only past that does
- * [LicenseManager.isLicensed] fail — and even then lab data stays readable
- * and exportable.
+ * outright and MUST keep working forever offline. Subscriptions get a soft
+ * "renew soon" notice inside [EXPIRING_WINDOW_DAYS] of expiry, then the offline
+ * GRACE the server signed into the licence (`gr` — 45 days for an annual
+ * subscription, 0 for a trial key) in which everything still works, and only
+ * past that does the lab go READ-ONLY ([LicenseStanding.LAPSED]): staff still
+ * sign in and every record stays readable, printable and exportable; only
+ * registering new orders and raising new bills is refused until renewal.
+ *
+ * EXPIRED here is exactly LAPSED there — both come from the same term end and
+ * the same guarded clock — so the notice can never promise grace to a lab that
+ * is already read-only.
  */
 enum class SubscriptionState { PERPETUAL, ACTIVE, EXPIRING_SOON, IN_GRACE, EXPIRED }
 
@@ -17,71 +22,108 @@ data class SubscriptionStatus(
     val state: SubscriptionState,
     /** Whole days until expiry (negative once expired); null when unknown. */
     val daysToExpiry: Long? = null,
-    /** Days left in the post-expiry grace window (only when IN_GRACE). */
+    /** Whole days left in the post-expiry grace window (only when IN_GRACE). */
     val graceDaysLeft: Long? = null,
     /** Expiry as an ISO instant string, for display. */
     val expiresAt: String? = null,
+    /** The grace this licence grants past expiry, in seconds (0 = hard stop). */
+    val graceSeconds: Long = LicenseManager.DEFAULT_GRACE_SECONDS,
 ) {
     val isSubscription: Boolean get() = state != SubscriptionState.PERPETUAL
+
+    /** In grace or read-only — shown as danger rather than a warning. */
+    val urgent: Boolean
+        get() = state == SubscriptionState.IN_GRACE || state == SubscriptionState.EXPIRED
 
     /** One-line operator message; null when nothing needs saying. */
     val notice: String?
         get() = when (state) {
             SubscriptionState.PERPETUAL, SubscriptionState.ACTIVE -> null
-            SubscriptionState.EXPIRING_SOON ->
-                "Subscription renews in ${daysToExpiry ?: 0} day${plural(daysToExpiry)}"
+            // No grace: expiry IS the moment new orders stop, so say so rather
+            // than implying a runway the licence does not have.
+            SubscriptionState.EXPIRING_SOON -> if (graceSeconds == 0L) {
+                "Subscription ends ${inDays(daysToExpiry)} — new orders stop then. Renew to keep registering orders."
+            } else {
+                "Subscription renews ${inDays(daysToExpiry)}"
+            }
             SubscriptionState.IN_GRACE ->
-                "Subscription expired — ${graceDaysLeft ?: 0} day${plural(graceDaysLeft)} of grace left. Renew to keep registering orders."
+                "Subscription expired — ${graceLeftLabel()} of grace left. Renew to keep registering orders."
             SubscriptionState.EXPIRED ->
                 "Subscription expired. Existing records stay readable and printable; renew to register new orders."
         }
 
-    private fun plural(n: Long?): String = if (n == 1L) "" else "s"
+    private fun inDays(days: Long?): String {
+        val n = days ?: 0L
+        return if (n < 1) "within a day" else "in $n day${plural(n)}"
+    }
+
+    private fun graceLeftLabel(): String {
+        val n = graceDaysLeft ?: 0L
+        return if (n < 1) "less than a day" else "$n day${plural(n)}"
+    }
+
+    private fun plural(n: Long): String = if (n == 1L) "" else "s"
 }
 
 /** Soft-notice window before expiry. */
 const val EXPIRING_WINDOW_DAYS = 14L
-private const val GRACE_DAYS = 45L
 private const val DAY_SECONDS = 24L * 60 * 60
 
 /**
- * Evaluate the stored licence. Reads the expiry from (in order) the signed
- * `lic_exp` claim — tolerating BOTH epoch-seconds and ISO-string forms, since
- * early builds signed it as a timestamp string — then the persisted
- * `expires_at`, then the JWS `exp` (which the server mints as expiry + grace).
+ * Evaluate the stored licence against the monotonic-guarded clock — the same
+ * clock [LicenseManager.isLicensed] judges by, so winding the system clock back
+ * revives neither the lock nor the grace countdown.
  */
-fun LicenseManager.subscriptionStatus(): SubscriptionStatus {
-    val s = state.value
-    val c = claims()
-    val mode = c?.mode ?: s.mode
+fun LicenseManager.subscriptionStatus(): SubscriptionStatus = subscriptionStatusOf(
+    claims = claims(),
+    storedMode = state.value.mode,
+    storedExpiresAt = state.value.expiresAt,
+    nowSeconds = trustedNowSeconds(),
+)
+
+/**
+ * Pure core of [subscriptionStatus].
+ *
+ * Expiry comes from the SIGNED token first — `lic_exp`, then the JWS `exp`
+ * minus the signed grace (the server mints `exp` as expiry + grace) — and only
+ * then from the persisted `expires_at` (tolerating a bare date), which is all
+ * early builds had when they signed `lic_exp` as a timestamp string. Reading the
+ * signed numbers first keeps the warning on the same arithmetic as the lock.
+ */
+internal fun subscriptionStatusOf(
+    claims: LicenseClaims?,
+    storedMode: String?,
+    storedExpiresAt: String?,
+    nowSeconds: Long,
+): SubscriptionStatus {
+    val mode = claims?.mode ?: storedMode
     if (mode != LicenseManager.MODE_SUBSCRIPTION) {
         return SubscriptionStatus(SubscriptionState.PERPETUAL)
     }
+    val grace = LicenseManager.graceSecondsOf(claims)
 
-    val expirySeconds = c?.licExp
-        ?: parseIsoSeconds(s.expiresAt)
-        ?: c?.exp?.minus(GRACE_DAYS * DAY_SECONDS)
-        ?: return SubscriptionStatus(SubscriptionState.ACTIVE, expiresAt = s.expiresAt)
+    val expirySeconds = claims?.licExp
+        ?: claims?.exp?.minus(grace)
+        ?: parseIsoSeconds(storedExpiresAt)
+        ?: return SubscriptionStatus(SubscriptionState.ACTIVE, expiresAt = storedExpiresAt, graceSeconds = grace)
 
-    val now = kotlin.time.Clock.System.now().epochSeconds
-    val secondsLeft = expirySeconds - now
-    val days = floorDivDays(secondsLeft)
+    val secondsLeft = expirySeconds - nowSeconds
+    // In term through the last second of grace, exactly as LicenseManager.standingOf.
+    val graceSecondsLeft = secondsLeft + grace
 
     val state = when {
+        graceSecondsLeft < 0 -> SubscriptionState.EXPIRED
         secondsLeft > EXPIRING_WINDOW_DAYS * DAY_SECONDS -> SubscriptionState.ACTIVE
         secondsLeft > 0 -> SubscriptionState.EXPIRING_SOON
-        secondsLeft > -(GRACE_DAYS * DAY_SECONDS) -> SubscriptionState.IN_GRACE
-        else -> SubscriptionState.EXPIRED
+        else -> SubscriptionState.IN_GRACE
     }
-    val graceLeft = if (state == SubscriptionState.IN_GRACE) {
-        floorDivDays(secondsLeft + GRACE_DAYS * DAY_SECONDS)
-    } else null
 
     return SubscriptionStatus(
         state = state,
-        daysToExpiry = days,
-        graceDaysLeft = graceLeft,
-        expiresAt = s.expiresAt,
+        daysToExpiry = floorDivDays(secondsLeft),
+        graceDaysLeft = if (state == SubscriptionState.IN_GRACE) floorDivDays(graceSecondsLeft) else null,
+        expiresAt = storedExpiresAt,
+        graceSeconds = grace,
     )
 }
 

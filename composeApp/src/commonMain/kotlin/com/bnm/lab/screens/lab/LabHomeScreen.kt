@@ -158,7 +158,9 @@ private fun tabCount(tab: HomeWorklistTab, counts: Map<String, Long>): Long =
 @Composable
 fun LabHomeScreen(
     labName: String,
-    licenseBlocked: Boolean,
+    /** Why this seat may not register new orders (licence lapsed or blocked);
+     *  null = allowed. Shown beside the disabled New order button. */
+    newWorkLockedNote: String?,
     accessionNotice: String?,
     onNoticeShown: () -> Unit,
     onNewOrder: () -> Unit,
@@ -346,15 +348,15 @@ fun LabHomeScreen(
                         Spacer(Modifier.width(12.dp))
                         Button(
                             onClick = onNewOrder,
-                            enabled = !licenseBlocked,
+                            enabled = newWorkLockedNote == null,
                             contentPadding = PaddingValues(horizontal = 24.dp, vertical = 14.dp),
                         ) {
                             Icon(Icons.Default.Add, contentDescription = null)
                             Text("  New order", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                         }
                     }
-                    if (licenseBlocked) Text(
-                        "License deactivated — registering new orders is disabled. Everything else stays available.",
+                    if (newWorkLockedNote != null) Text(
+                        newWorkLockedNote,
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
                     )
 
@@ -428,16 +430,16 @@ fun LabHomeScreen(
                 // ── Primary action: register a new order (full-width is fine on phones) ──
                 Button(
                     onClick = onNewOrder,
-                    enabled = !licenseBlocked,
+                    enabled = newWorkLockedNote == null,
                     modifier = Modifier.fillMaxWidth().widthIn(max = 560.dp),
                     contentPadding = PaddingValues(vertical = 18.dp),
                 ) {
                     Icon(Icons.Default.Add, contentDescription = null)
                     Text("  New order", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 }
-                if (licenseBlocked) {
+                if (newWorkLockedNote != null) {
                     Text(
-                        "License deactivated — registering new orders is disabled. Everything else stays available.",
+                        newWorkLockedNote,
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
                     )
                 }

@@ -29,12 +29,35 @@ data class LicenseClaims(
     val licExp: Long?,       // subscription license expiry (epoch seconds)
     val graceSeconds: Long?, // gr — offline grace past licExp; absent = 45d default
     val issuedAt: Long?,     // iat
-    val exp: Long?,          // JWS exp (subscription only: expiry + 45d grace)
+    val exp: Long?,          // JWS exp (subscription only: expiry + the signed grace)
 )
+
+/**
+ * Where the licence stored on this computer stands. The ONE answer behind the
+ * entry screen, [LicenseManager.isLicensed] and the subscription warning, so
+ * the three can never disagree about whether a lab has lapsed.
+ */
+enum class LicenseStanding {
+    /** No genuine licence here: never activated, deactivated, or the stored
+     *  token fails verification. The only standing that shows Activation. */
+    NONE,
+    /** Genuine and in term: perpetual, or a subscription within lic_exp + gr. */
+    CURRENT,
+    /** A genuine subscription past lic_exp + gr. The lab keeps its records —
+     *  sign-in, reading, printing and export all work — but cannot start new
+     *  work until a renewed licence arrives. */
+    LAPSED,
+}
+
+/** Why this seat may not start new work; null when it may. */
+enum class ReadOnlyReason { NOT_ACTIVATED, EXPIRED, DEACTIVATED }
 
 /** Snapshot of the persisted license, exposed as a StateFlow for the UI. */
 data class LicenseState(
+    /** Genuine and in term ([LicenseStanding.CURRENT]). */
     val licensed: Boolean = false,
+    /** Genuine but past lic_exp + gr ([LicenseStanding.LAPSED]). */
+    val lapsed: Boolean = false,
     val blocked: Boolean = false,
     val labName: String? = null,
     val mode: String? = null,
@@ -48,6 +71,25 @@ data class LicenseState(
 ) {
     /** Sold as offline-only: never sync, never nag about being offline. */
     val isStandalone: Boolean get() = edition == LicenseManager.EDITION_STANDALONE
+
+    /** A genuine licence is on this computer — in term, lapsed, or blocked by
+     *  BNM. Decides the entry screen: only a computer WITHOUT one activates. */
+    val activated: Boolean get() = licensed || lapsed
+
+    /**
+     * Why new work (registering orders, raising bills) is refused; null when it
+     * is allowed. A block from BNM outranks a lapse: renewing does not undo a
+     * revoked device, so "contact BNM" is the message that gets the lab moving.
+     */
+    val readOnlyReason: ReadOnlyReason?
+        get() = when {
+            blocked -> ReadOnlyReason.DEACTIVATED
+            licensed -> null
+            lapsed -> ReadOnlyReason.EXPIRED
+            else -> ReadOnlyReason.NOT_ACTIVATED
+        }
+
+    val canStartNewWork: Boolean get() = readOnlyReason == null
 }
 
 /**
@@ -56,16 +98,33 @@ data class LicenseState(
  * - Storage: multiplatform-settings (license_jwt, device_token, device_row_id,
  *   lab name/mode/seats/expiry, a once-minted stable device_id, and the
  *   `license_blocked` heartbeat flag).
- * - `isLicensed()` = stored JWT present + ES256 signature valid (embedded
- *   public key) + issuer check + (perpetual: always; subscription:
- *   now <= lic_exp + 45d grace) using a monotonic clock guard — we persist
+ * - [standing] = stored JWT present + ES256 signature valid (embedded public
+ *   key) + issuer check → [LicenseStanding.NONE] otherwise; then perpetual is
+ *   always CURRENT, and a subscription is CURRENT while now <= lic_exp + the
+ *   SIGNED grace (`gr`; 45 days only for tokens minted before the claim) and
+ *   LAPSED after. "Now" is the monotonic-guarded clock — we persist
  *   max(now, lastSeenNow) so winding the system clock back can't extend a
- *   subscription.
- * - Perpetual licenses NEVER lock; lab data stays readable/exportable
- *   regardless of license state (clearing the license never touches lab data).
+ *   subscription. `isLicensed()` = CURRENT; `isActivated()` = not NONE.
+ * - Perpetual licenses NEVER lock. A LAPSED subscription is READ-ONLY, not
+ *   locked out: it still reaches staff sign-in and every record stays
+ *   readable/printable/exportable — only starting new work is refused.
+ *   Clearing the license never touches lab data.
+ *
+ * The internal constructor is the test seam: an in-memory settings store (on
+ * JVM the no-arg store is the operator's REAL preferences), a signature
+ * verdict, and a wall clock. Production always uses the no-arg constructor.
  */
-class LicenseManager {
-    private val settings: Settings = Settings()
+class LicenseManager internal constructor(
+    private val settings: Settings,
+    private val verifySignature: (String) -> Boolean,
+    private val wallClockSeconds: () -> Long,
+) {
+    constructor() : this(
+        Settings(),
+        ::verifyLicenseSignature,
+        { kotlin.time.Clock.System.now().epochSeconds },
+    )
+
     private val json = Json { ignoreUnknownKeys = true }
 
     companion object {
@@ -109,7 +168,41 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
          * days is right for a lapsed annual subscription and absurd for a
          * 24-hour trial key (it would outlive the term 45x).
          */
-        private const val GRACE_SECONDS = 45L * 24 * 60 * 60
+        internal const val DEFAULT_GRACE_SECONDS = 45L * 24 * 60 * 60
+
+        /** The grace a token grants: its signed `gr`, or the default for tokens
+         *  minted before the claim existed (a negative value is malformed). */
+        internal fun graceSecondsOf(claims: LicenseClaims?): Long =
+            claims?.graceSeconds?.takeIf { it >= 0 } ?: DEFAULT_GRACE_SECONDS
+
+        /**
+         * The last second a subscription token is in term: lic_exp + its grace,
+         * else the JWS exp (which the server mints as that same sum). Null when
+         * the token carries no expiry at all — such a licence cannot lapse.
+         */
+        internal fun termEndSeconds(claims: LicenseClaims): Long? =
+            claims.licExp?.plus(graceSecondsOf(claims)) ?: claims.exp
+
+        /**
+         * Pure decision core behind [standing] — no Settings, no crypto, no
+         * clock, so every branch is testable.
+         *
+         * [storedMode] backs up a token without a `mode` claim; [nowSeconds]
+         * must already be the monotonic-guarded clock.
+         */
+        internal fun standingOf(
+            claims: LicenseClaims?,
+            signatureValid: Boolean,
+            storedMode: String?,
+            nowSeconds: Long,
+        ): LicenseStanding {
+            if (claims == null || !signatureValid) return LicenseStanding.NONE
+            if (claims.issuer != null && claims.issuer != ISSUER) return LicenseStanding.NONE
+            val mode = claims.mode ?: storedMode ?: MODE_PERPETUAL
+            if (mode != MODE_SUBSCRIPTION) return LicenseStanding.CURRENT // perpetual never locks
+            val end = termEndSeconds(claims) ?: return LicenseStanding.CURRENT
+            return if (nowSeconds <= end) LicenseStanding.CURRENT else LicenseStanding.LAPSED
+        }
     }
 
     private val _state = MutableStateFlow(snapshot())
@@ -242,55 +335,63 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
     }
 
     /**
-     * Full local license check: JWT present + signature valid + issuer ok +
-     * (perpetual: always; subscription: within lic_exp + 45d grace, judged
-     * against the monotonic-guarded clock).
+     * Full local license check: JWT present + signature valid + issuer ok, then
+     * the term (perpetual: always; subscription: lic_exp + the signed grace,
+     * judged against the monotonic-guarded clock). See [standingOf].
      */
-    fun isLicensed(): Boolean {
-        val jwt = licenseJwt() ?: return false
-        if (!verifyLicenseSignature(jwt)) return false
-        val c = claims(jwt) ?: return false
-        if (c.issuer != null && c.issuer != ISSUER) return false
-        val mode = c.mode ?: settings.getStringOrNull(KEY_MODE) ?: MODE_PERPETUAL
-        if (mode != MODE_SUBSCRIPTION) return true // perpetual never locks
-        // Subscription: lic_exp + the grace the server signed (legacy tokens
-        // carry no `gr` claim → the 45-day default); fall back to the JWS exp,
-        // which the server already mints as expiry + that same grace.
-        val grace = c.graceSeconds?.takeIf { it >= 0 } ?: GRACE_SECONDS
-        val gate = c.licExp?.plus(grace) ?: c.exp ?: return true
-        return trustedNowSeconds() <= gate
+    fun standing(): LicenseStanding {
+        val jwt = licenseJwt() ?: return LicenseStanding.NONE
+        return standingOf(
+            claims = claims(jwt),
+            signatureValid = verifySignature(jwt),
+            storedMode = settings.getStringOrNull(KEY_MODE),
+            nowSeconds = trustedNowSeconds(),
+        )
     }
+
+    /** In term: may start new work (unless BNM has also [isBlocked] it). */
+    fun isLicensed(): Boolean = standing() == LicenseStanding.CURRENT
+
+    /** A genuine licence is on this computer, lapsed or not — decides whether
+     *  the app opens on Activation (false) or on staff sign-in (true). */
+    fun isActivated(): Boolean = standing() != LicenseStanding.NONE
 
     /** Refresh the exposed state (e.g. after external settings changes). */
     fun refresh() {
         _state.value = snapshot()
     }
 
-    private fun snapshot(): LicenseState = LicenseState(
-        licensed = isLicensed(),
-        blocked = isBlocked(),
-        labName = settings.getStringOrNull(KEY_LAB_NAME),
-        mode = settings.getStringOrNull(KEY_MODE),
-        seats = settings.getInt(KEY_SEATS, 0),
-        expiresAt = settings.getStringOrNull(KEY_EXPIRES_AT),
-        // Both of these ride in the SIGNED licence token, so a licence check
-        // is all a lab needs to move from the offline edition to the connected
-        // one: the new token carries the new edition AND the business it now
-        // syncs with. The stored value is the fallback for tokens minted
-        // before `biz` was a claim.
-        businessId = claims()?.businessId?.takeIf { it.isNotBlank() }
-            ?: settings.getStringOrNull(KEY_BUSINESS_ID),
-        edition = claims()?.edition?.takeIf { it.isNotBlank() } ?: EDITION_CONNECTED,
-        deviceRowId = settings.getStringOrNull(KEY_DEVICE_ROW_ID),
-    )
+    private fun snapshot(): LicenseState {
+        val standing = standing()
+        return LicenseState(
+            licensed = standing == LicenseStanding.CURRENT,
+            lapsed = standing == LicenseStanding.LAPSED,
+            blocked = isBlocked(),
+            labName = settings.getStringOrNull(KEY_LAB_NAME),
+            mode = settings.getStringOrNull(KEY_MODE),
+            seats = settings.getInt(KEY_SEATS, 0),
+            expiresAt = settings.getStringOrNull(KEY_EXPIRES_AT),
+            // Both of these ride in the SIGNED licence token, so a licence check
+            // is all a lab needs to move from the offline edition to the connected
+            // one: the new token carries the new edition AND the business it now
+            // syncs with. The stored value is the fallback for tokens minted
+            // before `biz` was a claim.
+            businessId = claims()?.businessId?.takeIf { it.isNotBlank() }
+                ?: settings.getStringOrNull(KEY_BUSINESS_ID),
+            edition = claims()?.edition?.takeIf { it.isNotBlank() } ?: EDITION_CONNECTED,
+            deviceRowId = settings.getStringOrNull(KEY_DEVICE_ROW_ID),
+        )
+    }
 
     // ── Clock guard ──────────────────────────────────────────────────────────
     // Persist the highest wall-clock we've ever seen and judge expiry against
     // max(now, lastSeenNow) — turning the system clock back can't revive an
     // expired subscription.
 
-    private fun trustedNowSeconds(): Long {
-        val wall = kotlin.time.Clock.System.now().epochSeconds
+    /** Also what the subscription warning reads, so its day counts cannot be
+     *  revived by the same clock trick the lock refuses. */
+    internal fun trustedNowSeconds(): Long {
+        val wall = wallClockSeconds()
         val guarded = maxOf(wall, settings.getLong(KEY_LAST_SEEN_NOW, 0L))
         settings.putLong(KEY_LAST_SEEN_NOW, guarded)
         return guarded

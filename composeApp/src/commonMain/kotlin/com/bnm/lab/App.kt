@@ -11,11 +11,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -25,10 +20,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -62,7 +54,11 @@ import com.bnm.lab.lab.LabRepository
 import com.bnm.lab.lab.LocalLabRepository
 import com.bnm.lab.license.LicenseManager
 import com.bnm.lab.license.OfflinePolicy
+import com.bnm.lab.license.ReadOnlyCopy
 import com.bnm.lab.navigation.GuardedRoute
+import com.bnm.lab.navigation.LicenceGate
+import com.bnm.lab.navigation.LicenceGatedRoute
+import com.bnm.lab.navigation.ReadOnlyBanner
 import com.bnm.lab.navigation.RouteGuardEffect
 import com.bnm.lab.navigation.Screen
 import com.bnm.lab.screens.billing.BillingSettingsScreen
@@ -144,9 +140,19 @@ fun App() {
     val staffRepo = remember { StaffRepository(database, ApiClient.json) }
     val staffSession = remember { StaffSession() }
     val licenseState by licenseManager.state.collectAsState()
-    LaunchedEffect(licenseState.licensed, licenseState.blocked, licenseState.edition, licenseState.expiresAt) {
-        AppLog.i("Licence", "licensed=${licenseState.licensed} blocked=${licenseState.blocked} " +
+    LaunchedEffect(licenseState.licensed, licenseState.lapsed, licenseState.blocked, licenseState.edition, licenseState.expiresAt) {
+        AppLog.i("Licence", "licensed=${licenseState.licensed} lapsed=${licenseState.lapsed} blocked=${licenseState.blocked} " +
             "edition=${licenseState.edition} mode=${licenseState.mode} expires=${licenseState.expiresAt}")
+    }
+    // A subscription can lapse while the app is open — a trial key signed with
+    // no grace, or the last day of grace — and nothing else re-reads the term on
+    // a desktop that stays up for days. Re-evaluate once a minute; the state only
+    // emits on a real change, so this costs a signature check and no recomposition.
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(LICENCE_RECHECK_MS)
+            licenseManager.refresh()
+        }
     }
 
     // Old result rows carry only the signatory's NAME; give them the person's
@@ -243,7 +249,7 @@ fun App() {
         }
         DiagnosticsContext.register("Licence") {
             val st = licenseManager.state.value
-            "licensed=${st.licensed} blocked=${st.blocked} edition=${st.edition} mode=${st.mode} " +
+            "licensed=${st.licensed} lapsed=${st.lapsed} blocked=${st.blocked} edition=${st.edition} mode=${st.mode} " +
                 "seats=${st.seats}\nexpires=${st.expiresAt} lab=${st.labName}\n" +
                 "business=${st.businessId} deviceRow=${st.deviceRowId} install=${licenseManager.deviceId}"
         }
@@ -428,9 +434,11 @@ fun App() {
             val supportRequest by SupportUi.request.collectAsState()
             supportRequest?.let { ReportProblemDialog(it, onDismiss = { SupportUi.close() }) }
 
-            // Entry gate (P2): unlicensed → ActivationScreen. The old billing
-            // counter-pairing screen (LoginScreen) is intentionally UNREACHABLE
-            // from the entry flow — license activation replaces pairing.
+            // Entry gate (P2): no genuine licence on this computer → Activation.
+            // A lapsed or blocked licence is NOT that: it signs staff in and runs
+            // read-only (LicenceGate). The old billing counter-pairing screen
+            // (LoginScreen) is intentionally UNREACHABLE from the entry flow —
+            // license activation replaces pairing.
             key(isLoggedIn) {
                 val navController = rememberNavController()
                 LaunchedEffect(navController) {
@@ -442,12 +450,12 @@ fun App() {
                 // confirmation snackbar once LabHome is back on screen.
                 var lastAccession by remember { mutableStateOf<String?>(null) }
                 // P4: who is at this seat. Entry flow = license check → staff
-                // sign-in → LabHome; the license-blocked banner/notice semantics
-                // below are unchanged (a blocked device still signs people in and
-                // stays fully readable/printable/exportable).
+                // sign-in → LabHome. A blocked device AND a subscription past
+                // lic_exp + gr both still sign people in and stay fully readable/
+                // printable/exportable; only new-work routes refuse them.
                 val signedInStaff by staffSession.current.collectAsState()
                 val startDestination = remember(isLoggedIn) {
-                    if (!licenseManager.isLicensed()) Screen.Activation.route else Screen.StaffSignIn.route
+                    LicenceGate.entryRoute(activated = licenseManager.isActivated())
                 }
 
                 // "Switch user", "Sign out" and the auto-lock are one action:
@@ -608,25 +616,23 @@ fun App() {
                             if (everSynced == null) runCatching { syncEngine.syncAll(businessId) }
                         }
 
+                        val subscription = licenseManager.subscriptionStatus()
+                        val readOnly = licState.readOnlyReason
                         Column(Modifier.fillMaxSize()) {
-                            if (licState.blocked) LicenseBlockedBanner()
+                            readOnly?.let {
+                                ReadOnlyBanner(it, onOpenLicence = { navController.navigate(Screen.LicenseDevices.route) })
+                            }
                             Box(Modifier.fillMaxWidth().weight(1f)) {
                                 LabHomeScreen(
-                    subscriptionNotice = run {
-                        val sub = licenseManager.subscriptionStatus()
-                        sub.notice
-                    },
-                    subscriptionUrgent = licenseManager.subscriptionStatus().state in setOf(
-                        com.bnm.lab.license.SubscriptionState.IN_GRACE,
-                        com.bnm.lab.license.SubscriptionState.EXPIRED,
-                    ),
+                                    subscriptionNotice = subscription.notice,
+                                    subscriptionUrgent = subscription.urgent,
                                     labName = labName,
-                                    licenseBlocked = licState.blocked,
+                                    newWorkLockedNote = readOnly?.let(ReadOnlyCopy::inline),
                                     accessionNotice = lastAccession,
                                     onNoticeShown = { lastAccession = null },
-                                    // License-blocked devices keep everything readable/
+                                    // Blocked or lapsed seats keep everything readable/
                                     // printable/exportable but can't START new work.
-                                    onNewOrder = { if (!licState.blocked) navController.navigate(Screen.NewOrder.createRoute()) },
+                                    onNewOrder = { if (licState.canStartNewWork) navController.navigate(Screen.NewOrder.createRoute()) },
                                     onPatients = { navController.navigate(Screen.Patients.route) },
                                     onReferrers = { navController.navigate(Screen.Referrers.route) },
                                     onCatalog = { navController.navigate(Screen.Catalog.route) },
@@ -656,37 +662,35 @@ fun App() {
                             defaultValue = null
                         })
                     ) { backStack ->
-                        if (licState.blocked) {
-                            LicenseBlockedNotice(onBack = { navController.popBackStack() })
-                            return@composable
+                        LicenceGatedRoute(Screen.NewOrder.route, licState, onBack = { navController.popBackStack() }) {
+                            val emrId = backStack.arguments?.let { NavType.StringType.get(it, "emrId") }
+                            val businessId = billingBusinessId()
+                            val labName = licState.labName ?: authRepository.getSelectedBusinessName() ?: "BNM Lab"
+                            NewOrderScreen(
+                                businessId = businessId,
+                                labName = labName,
+                                onBack = { navController.popBackStack() },
+                                onFinished = { accession, invoiceId ->
+                                    lastAccession = accession
+                                    // Home, whatever opened the registration (the EMR inbox
+                                    // does too) — LabHome is always on the stack once signed
+                                    // in; the snackbar there shows the accession.
+                                    if (!navController.popBackStack(Screen.LabHome.route, inclusive = false)) {
+                                        navController.navigate(Screen.LabHome.route) { launchSingleTop = true }
+                                    }
+                                    invoiceId?.let { navController.navigate(Screen.InvoiceDetail.createRoute(it)) }
+                                },
+                                emrOrderId = emrId,
+                                onEmrRegistered = { id, order -> labSync.onEmrOrderRegistered(id, order) },
+                            )
                         }
-                        val emrId = backStack.arguments?.let { NavType.StringType.get(it, "emrId") }
-                        val businessId = billingBusinessId()
-                        val labName = licState.labName ?: authRepository.getSelectedBusinessName() ?: "BNM Lab"
-                        NewOrderScreen(
-                            businessId = businessId,
-                            labName = labName,
-                            onBack = { navController.popBackStack() },
-                            onFinished = { accession, invoiceId ->
-                                lastAccession = accession
-                                // Home, whatever opened the registration (the EMR inbox
-                                // does too) — LabHome is always on the stack once signed
-                                // in; the snackbar there shows the accession.
-                                if (!navController.popBackStack(Screen.LabHome.route, inclusive = false)) {
-                                    navController.navigate(Screen.LabHome.route) { launchSingleTop = true }
-                                }
-                                invoiceId?.let { navController.navigate(Screen.InvoiceDetail.createRoute(it)) }
-                            },
-                            emrOrderId = emrId,
-                            onEmrRegistered = { id, order -> labSync.onEmrOrderRegistered(id, order) },
-                        )
                     }
 
                     composable(Screen.EmrInbox.route) {
                         EmrInboxScreen(
                             onBack = { navController.popBackStack() },
                             onRegister = { emrId ->
-                                if (!licState.blocked) {
+                                if (licState.canStartNewWork) {
                                     navController.navigate(Screen.NewOrder.createRoute(emrId))
                                 }
                             },
@@ -809,20 +813,18 @@ fun App() {
                     }
 
                     composable(Screen.CreateInvoice.route) {
-                        if (licState.blocked) {
-                            LicenseBlockedNotice(onBack = { navController.popBackStack() })
-                            return@composable
+                        LicenceGatedRoute(Screen.CreateInvoice.route, licState, onBack = { navController.popBackStack() }) {
+                            val businessId = billingBusinessId()
+                            CreateInvoiceScreen(
+                                businessId = businessId,
+                                onBack = { navController.popBackStack() },
+                                onCreated = { id ->
+                                    navController.navigate(Screen.InvoiceDetail.createRoute(id)) {
+                                        popUpTo(Screen.CreateInvoice.route) { inclusive = true }
+                                    }
+                                },
+                            )
                         }
-                        val businessId = billingBusinessId()
-                        CreateInvoiceScreen(
-                            businessId = businessId,
-                            onBack = { navController.popBackStack() },
-                            onCreated = { id ->
-                                navController.navigate(Screen.InvoiceDetail.createRoute(id)) {
-                                    popUpTo(Screen.CreateInvoice.route) { inclusive = true }
-                                }
-                            },
-                        )
                     }
 
                     composable(Screen.Bills.route) {
@@ -835,36 +837,32 @@ fun App() {
                     }
 
                     composable(Screen.Cart.route) {
-                        if (licState.blocked) {
-                            LicenseBlockedNotice(onBack = { navController.popBackStack() })
-                            return@composable
+                        LicenceGatedRoute(Screen.Cart.route, licState, onBack = { navController.popBackStack() }) {
+                            val businessId = billingBusinessId()
+                            CartScreen(
+                                businessId = businessId,
+                                businessName = authRepository.getSelectedBusinessName() ?: "Business",
+                                onBack = { navController.popBackStack() },
+                                onEnterDetails = { navController.navigate(Screen.CustomerDetails.route) },
+                                onSaved = { id ->
+                                    navController.navigate(Screen.InvoiceDetail.createRoute(id)) { popUpTo(Screen.Main.route) }
+                                },
+                            )
                         }
-                        val businessId = billingBusinessId()
-                        CartScreen(
-                            businessId = businessId,
-                            businessName = authRepository.getSelectedBusinessName() ?: "Business",
-                            onBack = { navController.popBackStack() },
-                            onEnterDetails = { navController.navigate(Screen.CustomerDetails.route) },
-                            onSaved = { id ->
-                                navController.navigate(Screen.InvoiceDetail.createRoute(id)) { popUpTo(Screen.Main.route) }
-                            },
-                        )
                     }
 
                     composable(Screen.CustomerDetails.route) {
-                        if (licState.blocked) {
-                            LicenseBlockedNotice(onBack = { navController.popBackStack() })
-                            return@composable
+                        LicenceGatedRoute(Screen.CustomerDetails.route, licState, onBack = { navController.popBackStack() }) {
+                            val businessId = billingBusinessId()
+                            CustomerDetailsScreen(
+                                businessId = businessId,
+                                businessName = authRepository.getSelectedBusinessName() ?: "Business",
+                                onBack = { navController.popBackStack() },
+                                onSaved = { id ->
+                                    navController.navigate(Screen.InvoiceDetail.createRoute(id)) { popUpTo(Screen.Main.route) }
+                                },
+                            )
                         }
-                        val businessId = billingBusinessId()
-                        CustomerDetailsScreen(
-                            businessId = businessId,
-                            businessName = authRepository.getSelectedBusinessName() ?: "Business",
-                            onBack = { navController.popBackStack() },
-                            onSaved = { id ->
-                                navController.navigate(Screen.InvoiceDetail.createRoute(id)) { popUpTo(Screen.Main.route) }
-                            },
-                        )
                     }
 
                     composable(
@@ -919,47 +917,5 @@ fun App() {
 /** How often the auto-lock poll wakes up to check the idle stamp (P4). */
 private const val AUTO_LOCK_POLL_MS = 30_000L
 
-/**
- * Full-width banner shown when the license heartbeat reported this device as
- * revoked/inactive. Existing data stays readable, printable and exportable —
- * only CREATING new work is blocked.
- */
-@Composable
-private fun LicenseBlockedBanner() {
-    Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
-            Text(
-                "This device's license was deactivated — contact BNM",
-                color = MaterialTheme.colorScheme.onErrorContainer,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                "You can still view, print and export everything; creating new work is disabled.",
-                color = MaterialTheme.colorScheme.onErrorContainer,
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-    }
-}
-
-/** Shown instead of a new-work screen when the device's license is blocked. */
-@Composable
-private fun LicenseBlockedNotice(onBack: () -> Unit) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                "This device's license was deactivated — contact BNM",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                "Existing data stays readable, printable and exportable.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 6.dp, bottom = 16.dp),
-            )
-            Button(onClick = onBack) { Text("Go back") }
-        }
-    }
-}
+/** How often the licence term is re-read while the app is open. */
+private const val LICENCE_RECHECK_MS = 60_000L

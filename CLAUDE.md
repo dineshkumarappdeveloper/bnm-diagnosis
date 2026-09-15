@@ -54,7 +54,16 @@ IS a GST invoice whose line items are tests.
   `@SerialName`. jlink needs `modules("java.sql","java.naming","jdk.unsupported")`.
 - Licensing (P2): Ed25519-signed license payloads; lab name is admin-set and
   READ-ONLY in-app; seats = devices. Perpetual licenses never lock; lab data
-  is always exportable regardless of license state.
+  is always exportable regardless of license state. That promise is enforced
+  by `LicenseStanding` (NONE / CURRENT / LAPSED) + `navigation/LicenceGate`:
+  ONLY a computer with no genuine licence (never activated, deactivated, bad
+  signature) opens on Activation. A subscription past `lic_exp + gr` (LAPSED)
+  or a BNM-blocked device opens on staff sign-in READ-ONLY — the new-work
+  routes (NewOrder, CreateInvoice, Cart, CustomerDetails) refuse it, everything
+  else stays open. 🔴 Never gate the entry screen on `isLicensed()` again (use
+  `isActivated()`), and never compute expiry/grace outside `standingOf` /
+  `subscriptionStatusOf` — the warning and the lock must share the signed `gr`
+  and the guarded clock (`trustedNowSeconds`).
 - Server side lives in BusinessStudio: `admin-lab` edge fn + `lab_licenses`/
   `lab_devices` tables (both Supabase refs, LOCKSTEP).
 - Git: `dineshkumarappdeveloper/bnm-diagnosis`, branch `main`; commit local,
