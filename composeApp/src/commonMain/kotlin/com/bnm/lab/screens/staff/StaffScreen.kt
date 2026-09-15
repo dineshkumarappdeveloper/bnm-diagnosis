@@ -1,5 +1,6 @@
 package com.bnm.lab.screens.staff
 
+import androidx.compose.runtime.LaunchedEffect
 import com.bnm.lab.report.ReportFiling
 import com.bnm.lab.report.Signatory
 import androidx.compose.material3.Switch
@@ -300,7 +301,7 @@ private fun signInSummary(staff: Staff): String = when (staff.credential) {
 }
 
 /** What to do with the person's one secret when the dialog is saved. */
-private sealed interface CredentialAction {
+internal sealed interface CredentialAction {
     data object Keep : CredentialAction
     data object Clear : CredentialAction
     data class SetPin(val pin: String) : CredentialAction
@@ -309,7 +310,7 @@ private sealed interface CredentialAction {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun StaffEditDialog(
+internal fun StaffEditDialog(
     existing: Staff?,
     onDismiss: () -> Unit,
     onSave: (name: String, role: String, username: String?, alsoPathologist: Boolean, credential: CredentialAction) -> Unit,
@@ -337,18 +338,36 @@ private fun StaffEditDialog(
     // Blank means "leave the current secret alone", but only when the kind is
     // unchanged — switching PIN → password with an empty box has nothing to set.
     val keepsExisting = existing != null && kind == existing.credential && existing.hasSecret
+    // The dialog scrolls, and Save sits outside that scroll: an error written at
+    // the bottom of the content was out of sight, so Save looked dead. Errors now
+    // show at the top and the content scrolls back up to them.
+    val scroll = rememberScrollState()
+    LaunchedEffect(err) { if (err != null) scroll.animateScrollTo(0) }
+    // Reports print an owner-pathologist's name under the sign-off, so say what is
+    // wrong with the name the moment the switch is on — not only after Save.
+    val pathologistNameIssue = if (role == StaffRole.OWNER && alsoPathologist) {
+        Signatory.pathologistNameProblem(name)
+    } else null
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (existing == null) "Add person" else "Edit ${existing.name}") },
         text = {
             Column(
-                Modifier.widthIn(max = 420.dp).heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
+                Modifier.widthIn(max = 420.dp).heightIn(max = 520.dp).verticalScroll(scroll),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                err?.takeIf { it != pathologistNameIssue }?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
                 OutlinedTextField(
                     value = name, onValueChange = { name = it; err = null },
-                    label = { Text("Full name") }, singleLine = true,
+                    label = { Text(if (pathologistNameIssue != null || (role == StaffRole.OWNER && alsoPathologist))
+                        "Full name — printed on reports" else "Full name") },
+                    singleLine = true,
+                    isError = pathologistNameIssue != null,
+                    supportingText = pathologistNameIssue?.let { issue -> { Text(issue) } },
+                    placeholder = if (role == StaffRole.OWNER && alsoPathologist) ({ Text("Dr. Meena Iyer") }) else null,
                     modifier = Modifier.fillMaxWidth(),
                 )
 
@@ -440,7 +459,6 @@ private fun StaffEditDialog(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                err?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         },
         confirmButton = {
