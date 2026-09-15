@@ -1,7 +1,4 @@
 package com.bnm.lab.backup
 
-/**
- * Placeholder until the engine lands: the desktop `BackupService` replaces this
- * actual and returns its singleton.
- */
-actual fun platformBackupController(): BackupController? = null
+/** The desktop engine — one per process, started by `main()`. */
+actual fun platformBackupController(): BackupController? = BackupService.shared

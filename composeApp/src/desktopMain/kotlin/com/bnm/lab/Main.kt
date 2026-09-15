@@ -30,6 +30,10 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.bnm.lab.api.ApiClient
+import com.bnm.lab.backup.BackupCli
+import com.bnm.lab.backup.BackupService
+import com.bnm.lab.backup.SingleInstance
+import com.bnm.lab.db.appDataDir
 import com.bnm.lab.diagnostics.AppLog
 import com.bnm.lab.diagnostics.DesktopDiagnostics
 import com.bnm.lab.diagnostics.FatalWindowError
@@ -37,10 +41,24 @@ import com.bnm.lab.diagnostics.SupportReporter
 import com.bnm.lab.diagnostics.SupportUi
 
 @OptIn(ExperimentalComposeUiApi::class)
-fun main() {
+fun main(args: Array<String>) {
+    // Headless: `--export-backup <file.bnmlab> <out.db> [--key …|--code …]`
+    // decrypts a Backup pendrive generation to a plain SQLite file for support,
+    // with no window, no diagnostics and no engine. Exits with its own code.
+    BackupCli.run(args)?.let { kotlin.system.exitProcess(it) }
     // FIRST, before any other code runs: a failure in startup or in the first
     // frame of the UI is exactly the kind a lab cannot describe over the phone.
     DesktopDiagnostics.install()
+    // One BNM Lab per data directory: a second copy would run a second backup
+    // engine against the same pendrive, and a staged restore could not swap the
+    // database while the first copy still holds it open.
+    if (!SingleInstance.acquire(appDataDir())) SingleInstance.refuseAndExit()
+    // The Backup pendrive engine ticks from here on — before the window exists —
+    // but does nothing until DriverFactory has opened the database. Its
+    // shutdown hook only persists what is unsaved and removes a half-written
+    // file; the long close-window flush is the window's job, not the JVM's.
+    BackupService.shared.start()
+    BackupService.shared.installShutdownHook()
     // Full HTTP bodies only for a developer who asks for them — and only ever
     // to the console, never into a log file that gets emailed.
     ApiClient.consoleHttpBodies = System.getenv("BNM_HTTP_DEBUG") != null
