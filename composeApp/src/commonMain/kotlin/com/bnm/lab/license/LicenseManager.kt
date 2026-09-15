@@ -79,6 +79,7 @@ class LicenseManager {
         private const val KEY_BUSINESS_ID = "license_business_id"
 private const val KEY_LICENSE_FP = "lab_license_fp"
         private const val KEY_DEVICE_ID = "license_device_id"
+        private const val KEY_SEAT_NO = "license_seat_no"
         private const val KEY_BLOCKED = "license_blocked"
         private const val KEY_LAST_SEEN_NOW = "license_last_seen_now"
 
@@ -120,6 +121,14 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
         get() = settings.getStringOrNull(KEY_DEVICE_ID) ?: uuid4().also {
             settings.putString(KEY_DEVICE_ID, it)
         }
+
+    /**
+     * This device's seat number under its licence, as admin-lab assigned it:
+     * once per device row, never reused. Null until a server that assigns one
+     * answers /activate or /heartbeat. Connected seats number accessions
+     * `S<n>` from it ([com.bnm.lab.lab.AccessionSeat]).
+     */
+    val seatNo: Int? get() = settings.getIntOrNull(KEY_SEAT_NO)?.takeIf { it > 0 }
 
     fun deviceToken(): String? = settings.getStringOrNull(KEY_DEVICE_TOKEN)
     fun licenseJwt(): String? = settings.getStringOrNull(KEY_JWT)
@@ -169,8 +178,13 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
         /** sha256 of the key just activated — see [licenseFingerprint]. Null keeps
          *  the previous value, so a heartbeat-style refresh cannot erase it. */
         licenseFingerprint: String? = null,
+        /** admin-lab's `seat_no` for this device row; absent = the server assigns none. */
+        seatNo: Int? = null,
     ) {
         if (licenseFingerprint != null) settings.putString(KEY_LICENSE_FP, licenseFingerprint)
+        // Belongs to the device row this activation returned: never carry a
+        // previous licence's number over to a new one.
+        if (seatNo != null) settings.putInt(KEY_SEAT_NO, seatNo) else settings.remove(KEY_SEAT_NO)
         settings.putString(KEY_JWT, licenseJwt)
         settings.putString(KEY_DEVICE_TOKEN, deviceToken)
         settings.putString(KEY_DEVICE_ROW_ID, deviceRowId)
@@ -185,7 +199,8 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
     }
 
     /** Persist a fresh heartbeat: new JWT + latest license metadata; unblocks. */
-    fun applyHeartbeat(licenseJwt: String?, mode: String?, seats: Int?, expiresAt: String?, labName: String?) {
+    fun applyHeartbeat(licenseJwt: String?, mode: String?, seats: Int?, expiresAt: String?, labName: String?, seatNo: Int? = null) {
+        if (seatNo != null) settings.putInt(KEY_SEAT_NO, seatNo)
         if (!licenseJwt.isNullOrBlank()) settings.putString(KEY_JWT, licenseJwt)
         if (!mode.isNullOrBlank()) settings.putString(KEY_MODE, mode)
         if (seats != null) settings.putInt(KEY_SEATS, seats)
@@ -219,6 +234,7 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
         settings.remove(KEY_EXPIRES_AT)
         settings.remove(KEY_BUSINESS_ID)
         settings.remove(KEY_BLOCKED)
+        settings.remove(KEY_SEAT_NO)
         refresh()
     }
 

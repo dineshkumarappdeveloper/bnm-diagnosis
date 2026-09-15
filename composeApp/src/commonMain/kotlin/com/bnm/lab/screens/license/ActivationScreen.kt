@@ -202,6 +202,7 @@ fun ActivationScreen(
                             expiresAt = a.expiresAt,
                             businessId = a.businessId,
                             licenseFingerprint = licenseManager.fingerprintOf(k),
+                            seatNo = a.seatNo,
                         )
                         seatsFull = null
                         replaceCandidate = null

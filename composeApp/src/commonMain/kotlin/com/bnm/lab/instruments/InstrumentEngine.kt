@@ -8,7 +8,6 @@ import com.bnm.lab.db.AppDatabase
 import com.bnm.lab.db.Instrument_log
 import com.bnm.lab.db.Instrument_results
 import com.bnm.lab.db.Instruments
-import com.bnm.lab.lab.DiagnosisPrefs
 import com.bnm.lab.lab.LabOrder
 import com.bnm.lab.lab.LabRepository
 import com.bnm.lab.lab.LabStatus
@@ -75,7 +74,6 @@ class InstrumentEngine(
     private val db: AppDatabase,
     private val labRepo: LabRepository,
     private val json: Json,
-    private val prefs: DiagnosisPrefs = DiagnosisPrefs(),
 ) {
     private val scope = CoroutineScope(
         SupervisorJob() + Dispatchers.Default +
@@ -474,10 +472,13 @@ class InstrumentEngine(
 
     /**
      * Exact accession first, then numeric-tail resolution ('42' → ACC-S1-00042).
-     * The tail shortcut only auto-applies to THIS seat's own series: on a
-     * multi-seat lab another seat's ACC-S2-00042 may not have synced here yet,
-     * so a bare '42' meant for it would silently land on the wrong patient.
-     * Other seats' samples take the claim queue (one tap) instead.
+     * The tail shortcut only auto-applies to the series this seat issues from
+     * NOW: on a multi-seat lab another seat's ACC-S2-00042 may not have synced
+     * here yet, so a bare '42' meant for it would silently land on the wrong
+     * patient. Other seats' samples take the claim queue (one tap) instead, and
+     * so do bare numbers from the ACC-S1 series every computer used up to 1.2.0:
+     * a bare number there cannot say whose tube it is. A full barcode still
+     * matches exactly.
      */
     private suspend fun findOrder(specimenId: String): LabOrder? {
         labRepo.orderByAccession(specimenId.trim())?.let { return it }
@@ -488,7 +489,7 @@ class InstrumentEngine(
             q.ordersByAccessionTail(tail).executeAsList()
         }
         if (hits.size != 1) return null       // ambiguous or none → claim queue
-        val ownSeries = "${prefs.accessionPrefix}-${prefs.accessionSeat}-"
+        val ownSeries = labRepo.ownAccessionSeries()
         if (!hits[0].accession_no.startsWith(ownSeries, ignoreCase = true)) return null
         return labRepo.orderById(hits[0].id)
     }

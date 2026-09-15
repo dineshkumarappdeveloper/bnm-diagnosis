@@ -1012,7 +1012,8 @@ private fun ColumnScope.CalibrateButton(profile: PrintProfile) {
     msg?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
 }
 
-/** "ACC-S12-00042" — the longest accession a normal seat series produces. */
+/** "ACC-S12-00042" / "ACC-EJ2-00042": the longest accession a seat series produces
+ *  (AccessionSeat keeps every seat to three characters for exactly this budget). */
 private const val ACCESSION_CHARS = 13
 
 /** One deterministic sticker through the real transport — the only way to see

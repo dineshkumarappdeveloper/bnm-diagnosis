@@ -38,6 +38,8 @@ data class LicenseActivation(
     val seats: Int = 1,
     @SerialName("expires_at") val expiresAt: String? = null,
     @SerialName("business_id") val businessId: String? = null,
+    /** Stable per-device seat number (never reused). Absent from servers that assign none. */
+    @SerialName("seat_no") val seatNo: Int? = null,
 )
 
 /** A seat row — from the 409 seats_full payload and GET /devices. */
@@ -73,6 +75,7 @@ sealed interface LabHeartbeatResult {
         val seats: Int?,
         val expiresAt: String?,
         val labName: String?,
+        val seatNo: Int? = null,
     ) : LabHeartbeatResult
 
     /** 403 license_inactive | device_revoked — block creating new work. */
@@ -313,6 +316,7 @@ class LabApi(
                     seats = obj?.get("seats")?.jsonPrimitive?.intOrNull,
                     expiresAt = obj.strField("expires_at"),
                     labName = obj.strField("lab_name"),
+                    seatNo = obj?.get("seat_no")?.jsonPrimitive?.intOrNull,
                 )
                 resp.status == HttpStatusCode.Unauthorized -> LabHeartbeatResult.InvalidSession
                 resp.status == HttpStatusCode.Forbidden -> LabHeartbeatResult.Blocked(

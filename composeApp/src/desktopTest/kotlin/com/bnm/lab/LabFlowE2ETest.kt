@@ -3,6 +3,7 @@ package com.bnm.lab
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import com.bnm.lab.api.ApiClient
 import com.bnm.lab.db.AppDatabase
+import com.bnm.lab.lab.AccessionSeat
 import com.bnm.lab.lab.LabRepository
 import com.bnm.lab.lab.LabStatus
 import com.bnm.lab.lab.LabTest
@@ -32,7 +33,7 @@ class LabFlowE2ETest {
 
     @Test
     fun fullLabFlow_offline() = runBlocking {
-        val repo = LabRepository(freshDb(), ApiClient.json)
+        val repo = LabRepository(freshDb(), ApiClient.json, accessionSeat = { AccessionSeat.install("e2e-install") })
 
         // Seeded catalog is substantial and panels expand.
         SeedCatalog.seedIfEmpty(repo)
@@ -57,7 +58,7 @@ class LabFlowE2ETest {
 
         // Order → accession from the per-seat never-rewind series.
         val order = repo.createLabOrder(patient.id, testIds = listOf("t-e2e-glu")).getOrThrow()
-        assertTrue(order.accessionNo.matches(Regex("""ACC-S\d+-\d{5}""")), order.accessionNo)
+        assertTrue(order.accessionNo.matches(Regex("""ACC-[A-Z][0-9A-Z]{2}-00001""")), order.accessionNo)
         assertEquals(LabStatus.REGISTERED, order.status)
 
         // Approval before any entry must be refused.

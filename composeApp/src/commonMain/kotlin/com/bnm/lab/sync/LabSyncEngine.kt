@@ -395,6 +395,11 @@ class LabSyncEngine(
                     // Never let a not-yet-approved copy roll back a local approval.
                     if (local.approved_at != null && o.approvedAt == null) return
                 }
+                db.orderHoldingAccession(o.id, o.accessionNo)?.let { holder ->
+                    AppLog.w("Sync", "pulled order ${o.id} carries ${o.accessionNo}, which order ${holder.id} " +
+                        "already holds here: kept the local order, skipped the pulled copy")
+                    return
+                }
                 db.transaction {
                     oQ.upsertOrder(o.id, o.accessionNo, o.patientId, o.referrerId, o.invoiceId,
                         o.status, o.priority, o.notes, o.createdAt, o.updatedAt,
@@ -657,6 +662,22 @@ internal fun com.bnm.lab.db.Staff.toStaff(): Staff = Staff(
     username = username, signaturePng = signature_png,
     qualifications = qualifications, registrationNo = registration_no,
 )
+
+// ── Order apply guard (file level so the test can pin it) ────────────────────
+
+/**
+ * The OTHER local order that already holds [accessionNo], or null when a pulled
+ * copy of [orderId] can land.
+ *
+ * accession_no is UNIQUE and `upsertOrder` is INSERT OR REPLACE, so applying a
+ * pulled order whose number a different local order holds does not fail: SQLite
+ * deletes the local order to make room, stranding its tests and results, and on
+ * the seat that registered it the order is gone for good. Builds up to 1.2.0
+ * numbered every seat ACC-S1-…, so such pairs already sit on the server for any
+ * multi-seat connected lab. The pulled copy stays on its own seat.
+ */
+internal fun AppDatabase.orderHoldingAccession(orderId: String, accessionNo: String): Lab_orders? =
+    labOrdersQueries.byAccession(accessionNo).executeAsOneOrNull()?.takeIf { it.id != orderId }
 
 // ── Result-row merge rules (file level so the test can pin them) ─────────────
 
