@@ -122,8 +122,9 @@ import com.bnm.lab.report.buildReportDoc
 import com.bnm.lab.report.openPdf
 import com.bnm.lab.report.printPdf
 import com.bnm.lab.report.writeLabReportPdf
-import com.bnm.lab.report.readReportBase64
+import com.bnm.lab.report.reportPdfBase64
 import com.bnm.lab.staff.LocalStaffSession
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -1294,60 +1295,78 @@ fun OrderDetailScreen(
                         if (paymentBlocksRelease) { showWhatsapp = false; showPaymentDue = true; return@Button }
                         sending = true; note = null
                         scope.launch {
-                            val token = if (standalone) null
-                            else runCatching { repo.reportShareToken(o.id, o.accessionNo) }.getOrNull()
-                            val url = token?.let { ReportShare.resolveUrl(it) }
-                            val doctor = toDoctor && typed.isBlank()
-                            when (waMode) {
-                                WaShareMode.API -> {
-                                    if (token == null) {
-                                        note = "This edition cannot send the file — use the link option."
-                                    } else {
-                                        // The server keeps no report PDFs, so the file
-                                        // Meta sends is the one this PC renders — the
-                                        // same document the link option attaches.
-                                        val released = repo.approvedTestIds(o.id)
-                                        val doc = assembler.assemble(o.id, labName, testIds = released.ifEmpty { null })
-                                        val pdfBase64 = doc?.let {
-                                            withContext(Dispatchers.Default) {
-                                                writeLabReportPdf(it).takeIf { pdfPath -> pdfPath.isNotBlank() }?.let { pdfPath -> readReportBase64(pdfPath) }
+                            // Whatever fails below, the dialog gets its buttons back:
+                            // Close is disabled while sending, so a throw that skipped
+                            // the reset would leave a modal nobody can shut.
+                            try {
+                                val token = if (standalone) null
+                                else runCatching { repo.reportShareToken(o.id, o.accessionNo) }.getOrNull()
+                                val url = token?.let { ReportShare.resolveUrl(it) }
+                                val doctor = toDoctor && typed.isBlank()
+                                when (waMode) {
+                                    WaShareMode.API -> {
+                                        if (token == null) {
+                                            note = "This edition cannot send the file — use the link option."
+                                        } else {
+                                            // The server keeps no report PDFs, so the file
+                                            // Meta sends is the one this PC renders — the
+                                            // same document the link option attaches. It is
+                                            // rendered in memory, so a copy open in a PDF
+                                            // viewer cannot block it. A render that fails
+                                            // still tries the send (a report published as a
+                                            // PDF by an older build needs no file) and says
+                                            // why when the server then has nothing to send.
+                                            val released = repo.approvedTestIds(o.id)
+                                            val doc = assembler.assemble(o.id, labName, testIds = released.ifEmpty { null })
+                                            val pdf = doc?.let { withContext(Dispatchers.Default) { reportPdfBase64(it) } }
+                                            val renderError = pdf?.exceptionOrNull()
+                                            labApi.sendReportWhatsapp(
+                                                token = token, to = phone,
+                                                filename = waReportFilename(o.accessionNo),
+                                                caption = waReportCaption(recipientName, labName, o.accessionNo, doctor),
+                                                idempotencyKey = "labrep-$token-$phone",
+                                                pdfBase64 = pdf?.getOrNull(),
+                                            ).onSuccess {
+                                                note = "Sent to $phone"
+                                                markReported(null)
+                                            }.onFailure {
+                                                note = if (renderError != null) {
+                                                    "The report PDF could not be made on this PC (${renderError.message ?: "render failed"}) — nothing was sent."
+                                                } else {
+                                                    it.message ?: "WhatsApp send failed"
+                                                }
                                             }
                                         }
-                                        labApi.sendReportWhatsapp(
-                                            token = token, to = phone,
-                                            filename = waReportFilename(o.accessionNo),
-                                            caption = waReportCaption(recipientName, labName, o.accessionNo, doctor),
-                                            idempotencyKey = "labrep-$token-$phone",
-                                            pdfBase64 = pdfBase64,
-                                        ).onSuccess {
-                                            note = "Sent to $phone"
-                                            markReported(null)
-                                        }.onFailure { note = it.message ?: "WhatsApp send failed" }
+                                    }
+                                    else -> {
+                                        // The file beats a link: WhatsApp cannot attach one
+                                        // from a wa.me link, but the platform share can, and
+                                        // the PDF we already render for printing is the same
+                                        // document. Falls back to the link when there is no
+                                        // file (iOS) or the lab chose links.
+                                        val released = repo.approvedTestIds(o.id)
+                                        val doc = if (!waSendPdf) null
+                                        else assembler.assemble(o.id, labName, testIds = released.ifEmpty { null })
+                                        val pdf = doc?.let { withContext(Dispatchers.Default) { writeLabReportPdf(it) } }
+                                            ?.takeIf { it.isNotBlank() }
+                                        note = if (pdf != null) {
+                                            // No link in the text — the report is attached.
+                                            shareFile(pdf, "application/pdf",
+                                                waReportMessage(recipientName, labName, o.accessionNo, null, doctor), phone)
+                                        } else {
+                                            openUrl(waDeepLink(phone,
+                                                waReportMessage(recipientName, labName, o.accessionNo, url, doctor)))
+                                        }
+                                        if (waHandedOver(note)) markReported(null)
                                     }
                                 }
-                                else -> {
-                                    // The file beats a link: WhatsApp cannot attach one
-                                    // from a wa.me link, but the platform share can, and
-                                    // the PDF we already render for printing is the same
-                                    // document. Falls back to the link when there is no
-                                    // file (iOS) or the lab chose links.
-                                    val released = repo.approvedTestIds(o.id)
-                                    val doc = if (!waSendPdf) null
-                                    else assembler.assemble(o.id, labName, testIds = released.ifEmpty { null })
-                                    val pdf = doc?.let { withContext(Dispatchers.Default) { writeLabReportPdf(it) } }
-                                        ?.takeIf { it.isNotBlank() }
-                                    note = if (pdf != null) {
-                                        // No link in the text — the report is attached.
-                                        shareFile(pdf, "application/pdf",
-                                            waReportMessage(recipientName, labName, o.accessionNo, null, doctor), phone)
-                                    } else {
-                                        openUrl(waDeepLink(phone,
-                                            waReportMessage(recipientName, labName, o.accessionNo, url, doctor)))
-                                    }
-                                    if (waHandedOver(note)) markReported(null)
-                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                note = "WhatsApp send failed: ${e.message ?: e::class.simpleName}"
+                            } finally {
+                                sending = false
                             }
-                            sending = false
                         }
                     },
                 ) { Text(if (waMode == WaShareMode.API) "Send now" else "Open WhatsApp") }
