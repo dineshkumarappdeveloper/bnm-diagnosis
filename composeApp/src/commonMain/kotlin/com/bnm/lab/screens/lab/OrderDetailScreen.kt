@@ -1,5 +1,6 @@
 package com.bnm.lab.screens.lab
 
+import com.bnm.lab.report.ReportFiling
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.flowOf
 import androidx.compose.foundation.background
@@ -451,30 +452,7 @@ fun OrderDetailScreen(
      */
     suspend fun archiveReport() {
         val ord = order ?: return
-        val pat = patient ?: return
-        val prefs0 = ReportPrefs()
-        if (!prefs0.archiveReports) return
-        val dir = prefs0.reportsDir
-        if (dir.isBlank()) return
-        val approved = repo.approvedTestIds(ord.id)
-        if (approved.isEmpty()) return
-        runCatching {
-            val doc = assembler.assemble(ord.id, labName, stampReportedNow = false, testIds = approved) ?: return
-            withContext(Dispatchers.Default) {
-                val path = writeLabReportPdf(doc)
-                if (path.isNotBlank()) {
-                    archiveReportFile(
-                        sourcePath = path,
-                        dir = dir,
-                        relativePath = ReportArchive.relativePath(
-                            finishedAtIso = ord.reportedAt ?: ord.approvedAt ?: ord.createdAt,
-                            accession = ord.accessionNo,
-                            patientName = pat.name,
-                        ),
-                    )
-                }
-            }
-        }
+        ReportFiling.fileOrder(repo, assembler, ord.id, labName)
     }
 
     /**
@@ -569,8 +547,8 @@ fun OrderDetailScreen(
             val slipRows = results.values.filter { it.testId in slipIds }
             suspend fun currentName(id: String?) = id?.takeIf { it.isNotBlank() }?.let { staffRepo.byId(it)?.name }
             val body = renderLabReport(
-                verifiedByName = currentName(slipRows.firstNotNullOfOrNull { it.verifiedById }),
-                approvedByName = currentName(slipRows.firstNotNullOfOrNull { it.approvedById }),
+                verifiedByName = currentName(slipRows.firstNotNullOfOrNull { it.verifiedById?.takeIf { v -> v.isNotBlank() } }),
+                approvedByName = currentName(slipRows.firstNotNullOfOrNull { it.approvedById?.takeIf { v -> v.isNotBlank() } }),
                 labName = labName, order = ord, patient = pat, tests = slipTests,
                 results = slipRows, referrerName = referrer?.name,
                 widthChars = bp.paperWidth, paramName = nameOf,
@@ -993,8 +971,11 @@ fun OrderDetailScreen(
                         alsoPathologist = true,
                     )).onSuccess { saved ->
                         // A rename is exactly when old "Lab Owner" stamps need the id
-                        // filled in, so reprints follow the person.
+                        // filled in, so reprints follow the person…
                         runCatching { repo.backfillSignatoryIds(staffRepo.listAll(), com.bnm.lab.staff.StaffRepository.DEFAULT_OWNER_ID) }
+                        // …and when copies already published or filed must stop
+                        // carrying the old name.
+                        if (saved.name != current.name) ReportFiling.refileForRenamedSigner(repo, staffRepo, saved.id)
                         session.refresh(saved)
                         approversInLab = staffRepo.countApprovers()
                         claimingOwner = null

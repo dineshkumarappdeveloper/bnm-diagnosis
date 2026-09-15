@@ -56,6 +56,15 @@ UPDATE lab_reports SET state = 'revoked', updated_at = ? WHERE order_id = ?;
 requeueReport:
 UPDATE lab_reports SET state = 'pending', updated_at = ? WHERE order_id = ? AND state = 'uploaded';
 
+-- A signer's NAME changed (the seeded "Lab Owner" entering their real name
+-- above all): every report they signed goes back in the upload queue, so the
+-- QR link and WhatsApp copies stop showing the old name. Same token, same QR.
+requeueReportsSignedBy:
+UPDATE lab_reports SET state = 'pending', updated_at = :now
+WHERE state = 'uploaded' AND order_id IN (
+    SELECT DISTINCT order_id FROM lab_results WHERE verified_by_id = :staffId OR approved_by_id = :staffId
+);
+
 -- Drain queue: everything minted but not yet on the server.
 pendingUploads:
 SELECT * FROM lab_reports WHERE state = 'pending' ORDER BY created_at;

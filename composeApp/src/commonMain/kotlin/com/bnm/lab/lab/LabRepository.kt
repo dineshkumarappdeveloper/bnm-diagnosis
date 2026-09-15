@@ -579,6 +579,18 @@ class LabRepository(
 
     suspend fun deleteTest(id: String) = withContext(Dispatchers.Default) { tQ.deleteTest(id) }
 
+    /**
+     * [staffId]'s name changed. Their already-published reports go back in the
+     * upload queue (the QR / WhatsApp copies re-render under the new name), and
+     * the orders they signed are returned so the caller can re-file the PDFs in
+     * the reports folder. Nothing is re-stamped: the rows carry the id, and every
+     * report resolves the current name from it.
+     */
+    suspend fun onSignatoryRenamed(staffId: String): List<String> = withContext(Dispatchers.Default) {
+        db.transaction { repQ.requeueReportsSignedBy(nowIso(), staffId) }
+        resQ.ordersSignedBy(staffId).executeAsList()
+    }
+
     suspend fun countTests(): Long = withContext(Dispatchers.Default) { tQ.countTests().executeAsOne() }
 
     suspend fun upsertPanel(p: LabPanel) = withContext(Dispatchers.Default) {

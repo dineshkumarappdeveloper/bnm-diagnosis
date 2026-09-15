@@ -73,6 +73,12 @@ SELECT count(*) FROM lab_results WHERE order_id = ? AND test_id = ? AND (value I
 markVerified:
 UPDATE lab_results SET verified_by = ?, verified_at = ?, verified_by_id = ? WHERE order_id = ? AND verified_at IS NULL;
 
+-- Orders with at least one approved test that [staffId] verified or approved —
+-- the filed reports a rename has to re-file.
+ordersSignedBy:
+SELECT DISTINCT order_id FROM lab_results
+WHERE approved_at IS NOT NULL AND (verified_by_id = :staffId OR approved_by_id = :staffId);
+
 markApproved:
 UPDATE lab_results SET approved_by = ?, approved_at = ?, approved_by_id = ? WHERE order_id = ? AND approved_at IS NULL;
 

@@ -99,4 +99,63 @@ class OwnerPathologistReportTest {
         assertTrue("Dr. Meena Iyer" in after, after)
         assertFalse("Owner" in after, after)
     }
+
+    @Test
+    fun `a real name stamped on the result is not hidden by a placeholder account name`() = runBlocking {
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        AppDatabase.Schema.create(driver)
+        val db = AppDatabase(driver)
+        val repo = LabRepository(db, ApiClient.json)
+        val staff = StaffRepository(db, ApiClient.json)
+        staff.seedOwnerIfEmpty("Lab")
+        repo.upsertTest(LabTest(id = "t-glu", code = "GLU", name = "Glucose", price = 100.0,
+            parameters = listOf(TestParameter(key = "glu", name = "Glucose", unit = "mg/dL", decimals = 0,
+                ranges = listOf(RefRange(low = 70.0, high = 100.0))))))
+        val patient = repo.upsertPatient(Patient(id = "p1", name = "Asha", sex = "F", ageYears = 30))
+        val order = repo.createLabOrder(patient.id, testIds = listOf("t-glu")).getOrThrow()
+        repo.enterResult(order.id, "t-glu", "glu", "90").getOrThrow()
+        // Signed on another seat where the owner already had their name; this seat's
+        // staff row still reads "Lab Owner".
+        val now = "2026-09-15T10:00:00Z"
+        db.resultsQueries.markVerified("Dr. Meena Iyer", now, StaffRepository.DEFAULT_OWNER_ID, order.id)
+        db.resultsQueries.markApproved("Dr. Meena Iyer", now, StaffRepository.DEFAULT_OWNER_ID, order.id)
+        db.labOrdersQueries.setStatus(com.bnm.lab.lab.LabStatus.APPROVED, now, order.id)
+
+        val doc = ReportAssembler(repo, staff).assemble(order.id, labName = "Lab", stampReportedNow = false)!!
+        assertEquals("Dr. Meena Iyer", doc.approvedBy)
+        assertEquals("Dr. Meena Iyer", doc.verifiedBy)
+    }
+
+    @Test
+    fun `renaming a signer re-queues the reports they signed for re-publishing`() = runBlocking {
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        AppDatabase.Schema.create(driver)
+        val db = AppDatabase(driver)
+        val repo = LabRepository(db, ApiClient.json)
+        val staff = StaffRepository(db, ApiClient.json)
+        val owner = staff.upsert(com.bnm.lab.staff.Staff(id = "", name = "Lab Owner",
+            role = com.bnm.lab.staff.StaffRole.OWNER, alsoPathologist = true))
+        val other = staff.upsert(com.bnm.lab.staff.Staff(id = "", name = "Dr. Rao", role = com.bnm.lab.staff.StaffRole.PATHOLOGIST))
+        repo.upsertTest(LabTest(id = "t-glu", code = "GLU", name = "Glucose", price = 100.0,
+            parameters = listOf(TestParameter(key = "glu", name = "Glucose", unit = "mg/dL", decimals = 0,
+                ranges = listOf(RefRange(low = 70.0, high = 100.0))))))
+        val patient = repo.upsertPatient(Patient(id = "p1", name = "Asha", sex = "F", ageYears = 30))
+        fun signedBy(approver: com.bnm.lab.staff.Staff): String = runBlocking {
+            val o = repo.createLabOrder(patient.id, testIds = listOf("t-glu")).getOrThrow()
+            repo.enterResult(o.id, "t-glu", "glu", "90").getOrThrow()
+            repo.verifyOrder(o.id, "Tech").getOrThrow()
+            repo.approveOrder(o.id, approver.name, approver.id).getOrThrow()
+            db.labReportsQueries.upsertReport(o.id, "tok-${o.id}", o.accessionNo, "uploaded", "t", null, "sha", "t", "t")
+            o.id
+        }
+        val mine = signedBy(owner)
+        val theirs = signedBy(other)
+
+        val refile = repo.onSignatoryRenamed(owner.id)
+
+        assertEquals(listOf(mine), refile)
+        assertEquals("pending", db.labReportsQueries.reportForOrder(mine).executeAsOne().state,
+            "the QR / WhatsApp copy must re-render under the new name")
+        assertEquals("uploaded", db.labReportsQueries.reportForOrder(theirs).executeAsOne().state)
+    }
 }

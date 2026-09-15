@@ -497,8 +497,11 @@ fun buildReportDoc(
         pagination = pagination,
         toFollow = toFollow.map { it.trim() }.filter { it.isNotEmpty() },
         // Never "Lab Owner": a report is signed by named people (Signatory).
-        verifiedBy = Signatory.printable(verifiedByName ?: results.firstNotNullOfOrNull { it.verifiedBy?.takeIf { v -> v.isNotBlank() } }),
-        approvedBy = Signatory.printable(approvedByName ?: results.firstNotNullOfOrNull { it.approvedBy?.takeIf { v -> v.isNotBlank() } }),
+        // The current name when it is a real one, else the name stamped at sign-off
+        // when THAT is real — a seat whose staff row still reads "Lab Owner" must
+        // not hide a real name the result carries.
+        verifiedBy = Signatory.printable(verifiedByName) ?: results.firstNotNullOfOrNull { Signatory.printable(it.verifiedBy) },
+        approvedBy = Signatory.printable(approvedByName) ?: results.firstNotNullOfOrNull { Signatory.printable(it.approvedBy) },
         // Results carry the sign-off stamp; the order's own approved_at is the
         // fallback for rows written before results were stamped individually.
         approvedOn = (results.firstNotNullOfOrNull { it.approvedAt?.takeIf { a -> a.isNotBlank() } }

@@ -147,8 +147,8 @@ fun renderLabReport(
     // ── Sign-off footer ──
     // The signer's CURRENT name when the caller resolved one (a renamed owner
     // reprints under their name), and never the "Lab Owner" placeholder.
-    val verifiedBy = Signatory.printable(verifiedByName ?: results.firstNotNullOfOrNull { it.verifiedBy?.takeIf { v -> v.isNotBlank() } })
-    val approvedBy = Signatory.printable(approvedByName ?: results.firstNotNullOfOrNull { it.approvedBy?.takeIf { v -> v.isNotBlank() } })
+    val verifiedBy = Signatory.printable(verifiedByName) ?: results.firstNotNullOfOrNull { Signatory.printable(it.verifiedBy) }
+    val approvedBy = Signatory.printable(approvedByName) ?: results.firstNotNullOfOrNull { Signatory.printable(it.approvedBy) }
     ln("Verified by : ${verifiedBy ?: "-"}")
     ln("Approved by : ${approvedBy ?: "-"}")
     ln(); ln(); ln() // signature gap

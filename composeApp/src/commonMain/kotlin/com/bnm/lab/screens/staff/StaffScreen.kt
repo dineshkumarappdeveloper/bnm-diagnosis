@@ -1,5 +1,6 @@
 package com.bnm.lab.screens.staff
 
+import com.bnm.lab.report.ReportFiling
 import com.bnm.lab.report.Signatory
 import androidx.compose.material3.Switch
 import androidx.compose.foundation.layout.Arrangement
@@ -203,8 +204,13 @@ fun StaffScreen(onBack: () -> Unit) {
                             ?: Staff(id = "", name = name, role = role, username = username, alsoPathologist = alsoPathologist)
                     ).getOrElse { message = it.message; return@launch }
                     val noApproverLeft = approversBefore > 0 && repo.countApprovers() == 0L
-                    // A rename is exactly when old rows need their ids filled in.
+                    // A rename is exactly when old rows need their ids filled in…
                     runCatching { labRepo.backfillSignatoryIds(repo.listAll(), StaffRepository.DEFAULT_OWNER_ID) }
+                    // …and when reports already published or filed under the old name
+                    // (the seeded "Lab Owner" above all) must be re-issued.
+                    if (target != null && target.name != saved.name) {
+                        ReportFiling.refileForRenamedSigner(labRepo, repo, saved.id)
+                    }
 
                     val credResult = when (credential) {
                         is CredentialAction.Keep -> Result.success(Unit)
