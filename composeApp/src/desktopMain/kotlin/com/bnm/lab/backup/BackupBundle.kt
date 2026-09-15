@@ -27,6 +27,8 @@ internal data class BackupManifest(
     @SerialName("backup_id") val backupId: String,
     /** The writing PC's device id — a restored PC records it as where it came from. */
     @SerialName("previous_device_id") val previousDeviceId: String? = null,
+    /** The writing PC's seat row under the licence — the seat a restored PC offers to take over at registration. */
+    @SerialName("previous_device_row_id") val previousDeviceRowId: String? = null,
     @SerialName("db_bytes") val dbBytes: Long = 0,
     val counts: BackupCounts = BackupCounts(),
 )

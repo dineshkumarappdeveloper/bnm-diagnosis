@@ -58,6 +58,8 @@ internal class BackupPrefs(
     /** The old PC's device id this install was restored from; cleared by an online activation. */
     var restoredFrom: String? by str(K_RESTORED_FROM)
     var restoredAt: Long? by long(K_RESTORED_AT)
+    /** The old PC's seat row under the licence — the seat to take over when BNM answers "all seats in use". */
+    var restoredFromRowId: String? by str(K_RESTORED_FROM_ROW)
     /** After a restore the pendrive marker still names the old PC; rewrite it once the new device id exists. */
     var ownerRebindPending: Boolean
         get() = settings.getBoolean(K_OWNER_REBIND, false)
@@ -76,7 +78,7 @@ internal class BackupPrefs(
         for (k in listOf(
             K_DIR, K_ID, K_DEK, K_SLOTS, K_CODE, K_SEQ, K_LAST_OK, K_LAST_VERIFIED, K_LAST_VERIFIED_DAY,
             K_DIRTY_SINCE, K_LAST_COUNTS, K_RETENTION_PAUSED, K_EXPECT_DROP, K_WRITE_ERRORS,
-            K_RESTORED_FROM, K_RESTORED_AT, K_OWNER_REBIND,
+            K_RESTORED_FROM, K_RESTORED_AT, K_RESTORED_FROM_ROW, K_OWNER_REBIND,
         )) settings.remove(k)
     }
 
@@ -115,6 +117,7 @@ internal class BackupPrefs(
         const val K_WRITE_ERRORS = "lab_backup_write_errors"
         const val K_RESTORED_FROM = "lab_backup_restored_from"
         const val K_RESTORED_AT = "lab_backup_restored_at"
+        const val K_RESTORED_FROM_ROW = "lab_backup_restored_from_row"
         const val K_OWNER_REBIND = "lab_backup_owner_rebind"
     }
 }

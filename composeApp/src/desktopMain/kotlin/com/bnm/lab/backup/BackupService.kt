@@ -379,7 +379,8 @@ internal class BackupService(
             val manifest = BackupManifest(
                 appVersion = appVersion, createdAt = created.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
                 seq = seq, reason = reason, labName = labName(), edition = edition(), labLicenseFp = licenceFp(),
-                backupId = prefs.vaultId!!, previousDeviceId = deviceId(), dbBytes = staging.length(), counts = counts,
+                backupId = prefs.vaultId!!, previousDeviceId = deviceId(), previousDeviceRowId = deviceRowId(),
+                dbBytes = staging.length(), counts = counts,
             )
             val header = ContainerHeader(
                 backupId = manifest.backupId, lab = manifest.labName, created = manifest.createdAt, seq = seq,
@@ -722,6 +723,7 @@ internal class BackupService(
 
         notes += RestoreStaging.applyCarriedPrefs(head.prefs, prefs.store)
         prefs.restoredFrom = head.manifest.previousDeviceId ?: "unknown"
+        prefs.restoredFromRowId = head.manifest.previousDeviceRowId
         prefs.restoredAt = wall()
 
         // Adopt the vault this generation came from.
@@ -820,10 +822,24 @@ internal class BackupService(
         publish()
     }
 
-    /** The Licence page's "Register this computer" succeeded online: the amber restore notice can go. Not on the interface. */
-    fun markRegisteredOnline() {
+    /** The Licence page's "Register this computer" succeeded online: the amber restore notice can go. */
+    override fun markRegisteredOnline() {
+        if (prefs.restoredFrom == null && prefs.restoredFromRowId == null) return
         prefs.restoredFrom = null
         prefs.restoredAt = null
+        prefs.restoredFromRowId = null
+        AppLog.i("Backup", "restored computer registered online — the restore notice is cleared")
+        publish()
+    }
+
+    /**
+     * The window is about to close: the prefs hash normally runs once a minute,
+     * so a letterhead or prefix edit in the last seconds would otherwise leave
+     * without a generation. Cheap, and the status the exit flow decides from is
+     * republished at once. Desktop-only; not on the interface.
+     */
+    fun checkPrefsBeforeClose() {
+        runCatching { probePrefsHash() }
         publish()
     }
 
@@ -857,6 +873,7 @@ internal class BackupService(
             lastError = error,
             retentionPaused = prefs.retentionPaused,
             restoredFromBackup = prefs.restoredFrom != null,
+            restoredFromDeviceRowId = prefs.restoredFromRowId,
             bannerDismissed = bannerDismissed,
         )
     }
@@ -905,6 +922,7 @@ internal class BackupService(
     private fun labName(): String? = prefs.store.getStringOrNull("license_lab_name")?.takeIf { it.isNotBlank() }
     private fun licenceFp(): String? = prefs.store.getStringOrNull("lab_license_fp")?.takeIf { it.isNotBlank() }
     private fun deviceId(): String? = prefs.store.getStringOrNull("license_device_id")?.takeIf { it.isNotBlank() }
+    private fun deviceRowId(): String? = prefs.store.getStringOrNull("license_device_row_id")?.takeIf { it.isNotBlank() }
 
     /** The `ed` claim of the stored licence token — no verification, display only. */
     private fun edition(): String? {

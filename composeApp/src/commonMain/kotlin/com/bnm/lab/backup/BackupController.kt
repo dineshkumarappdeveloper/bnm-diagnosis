@@ -92,6 +92,13 @@ interface BackupController {
 
     /** Hide the "not backed up" banner until the next session. */
     fun dismissBannerForSession()
+
+    /**
+     * A successful ONLINE activation with the licence key landed: BNM now knows
+     * this computer, so the "restored from a backup — register it" notice can
+     * go ([BackupStatus.restoredFromBackup] clears). No-op on other platforms.
+     */
+    fun markRegisteredOnline()
 }
 
 /** The engine on this platform, or null where there is none (Android, iOS). */
@@ -115,6 +122,12 @@ data class BackupStatus(
     val retentionPaused: Boolean = false,
     /** This install came from a restore and has not yet registered online with the licence key. */
     val restoredFromBackup: Boolean = false,
+    /**
+     * The old PC's seat row under the licence (from the backup's manifest), while
+     * [restoredFromBackup]. When BNM answers "all seats in use" at registration,
+     * the Activation screen pre-selects exactly this seat to take over.
+     */
+    val restoredFromDeviceRowId: String? = null,
     /** True once per session after [BackupController.dismissBannerForSession]. */
     val bannerDismissed: Boolean = false,
 ) {

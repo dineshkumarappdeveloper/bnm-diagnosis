@@ -55,6 +55,10 @@ class FakeBackupController(initial: BackupStatus = BackupStatus()) : BackupContr
         calls += "dismissBannerForSession"
         statusFlow.value = statusFlow.value.copy(bannerDismissed = true)
     }
+    override fun markRegisteredOnline() {
+        calls += "markRegisteredOnline"
+        statusFlow.value = statusFlow.value.copy(restoredFromBackup = false, restoredFromDeviceRowId = null)
+    }
 }
 
 /** Shared fixtures for the backup screen tests. */

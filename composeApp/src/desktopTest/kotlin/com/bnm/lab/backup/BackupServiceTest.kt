@@ -43,6 +43,7 @@ class BackupServiceTest {
             s.putString("license_lab_name", "Sunrise Diagnostics")
             s.putString("license_device_id", "device-old-pc")
             s.putString("license_device_token", "tok-old")
+            s.putString("license_device_row_id", "row-old-pc")
             s.putString("license_jwt", "e30.e30.sig") // {} payload: no edition claim, fine for display
             s.putString("report_lh_address", "12 Main Rd, Salem")
             s.putString("pref_accession_prefix", "SUN")
@@ -151,6 +152,9 @@ class BackupServiceTest {
             assertEquals(2L, new.settings.getLongOrNull(BackupPrefs.K_SEQ), "numbering continues from the drive")
             assertEquals("device-old-pc", new.settings.getStringOrNull(BackupPrefs.K_RESTORED_FROM))
             assertTrue(new.service.status.value.restoredFromBackup)
+            assertEquals("row-old-pc", new.settings.getStringOrNull(BackupPrefs.K_RESTORED_FROM_ROW), "the old seat travels in the manifest")
+            assertEquals("row-old-pc", new.service.status.value.restoredFromDeviceRowId, "so Activation can offer that seat when seats are full")
+            assertNull(new.settings.getStringOrNull("license_device_row_id"), "…but never as this PC's own identity")
             assertNull(new.settings.getStringOrNull(BackupPrefs.K_CODE), "unlocked with the key: the code is not on this PC")
             assertTrue(staged.notes.isEmpty(), staged.notes.toString())
 
@@ -175,6 +179,14 @@ class BackupServiceTest {
             assertEquals(BackupStatus.Phase.FAILING, oldStatus.phase, oldStatus.toString())
             assertTrue(oldStatus.lastError!!.contains("moved to another computer"), oldStatus.lastError)
             assertEquals(3L, DriveScan.maxSeq(vault), "nothing written by the old PC")
+
+            // ── the new PC registers online with the licence key: the restore notice goes ──
+            new.service.markRegisteredOnline()
+            val registered = new.service.status.value
+            assertFalse(registered.restoredFromBackup, registered.toString())
+            assertNull(registered.restoredFromDeviceRowId)
+            assertNull(new.settings.getStringOrNull(BackupPrefs.K_RESTORED_FROM))
+            assertNull(new.settings.getStringOrNull(BackupPrefs.K_RESTORED_FROM_ROW))
 
             // ── headless rescue ──
             val out = File(Files.createTempDirectory("bnm-rescue").toFile(), "rescued.db")
