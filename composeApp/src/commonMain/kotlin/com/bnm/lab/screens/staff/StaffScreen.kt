@@ -1,5 +1,6 @@
 package com.bnm.lab.screens.staff
 
+import com.bnm.lab.report.Signatory
 import androidx.compose.material3.Switch
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -360,7 +361,8 @@ private fun StaffEditDialog(
                         Column(Modifier.weight(1f)) {
                             Text("Also the lab's pathologist", style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Medium)
-                            Text("Lets this owner approve results and sign reports as the pathologist.",
+                            Text("Lets this owner approve results. Reports print their name, signature, " +
+                                "qualifications and registration no. — never \"Owner\".",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
@@ -439,6 +441,11 @@ private fun StaffEditDialog(
             Button(onClick = {
                 val n = name.trim()
                 if (n.isEmpty()) { err = "Name is required"; return@Button }
+                // The approving pathologist's NAME prints on every report; the
+                // seeded "Lab Owner" placeholder must not become that signature.
+                if (role == StaffRole.OWNER && alsoPathologist) {
+                    Signatory.pathologistNameProblem(n)?.let { err = it; return@Button }
+                }
 
                 val uname = username.trim().lowercase().ifBlank { null }
                 StaffRepository.usernameProblem(uname)?.let { err = it; return@Button }

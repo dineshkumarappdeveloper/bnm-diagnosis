@@ -1,5 +1,6 @@
 package com.bnm.lab.print
 
+import com.bnm.lab.report.Signatory
 import com.bnm.lab.lab.LabOrder
 import com.bnm.lab.lab.LabOrderTest
 import com.bnm.lab.lab.LabRepository
@@ -37,6 +38,9 @@ fun renderLabReport(
     /** Tests of the order left off this slip (per-test release) — named so the
      *  slip is never mistaken for the whole order. */
     toFollow: List<String> = emptyList(),
+    /** Current names of the signers (looked up by their stamped ids); null = the stamped text. */
+    verifiedByName: String? = null,
+    approvedByName: String? = null,
 ): String {
     val w = widthChars.coerceIn(32, 80)
     val sb = StringBuilder()
@@ -141,8 +145,10 @@ fun renderLabReport(
     }
 
     // ── Sign-off footer ──
-    val verifiedBy = results.firstNotNullOfOrNull { it.verifiedBy?.takeIf { v -> v.isNotBlank() } }
-    val approvedBy = results.firstNotNullOfOrNull { it.approvedBy?.takeIf { v -> v.isNotBlank() } }
+    // The signer's CURRENT name when the caller resolved one (a renamed owner
+    // reprints under their name), and never the "Lab Owner" placeholder.
+    val verifiedBy = Signatory.printable(verifiedByName ?: results.firstNotNullOfOrNull { it.verifiedBy?.takeIf { v -> v.isNotBlank() } })
+    val approvedBy = Signatory.printable(approvedByName ?: results.firstNotNullOfOrNull { it.approvedBy?.takeIf { v -> v.isNotBlank() } })
     ln("Verified by : ${verifiedBy ?: "-"}")
     ln("Approved by : ${approvedBy ?: "-"}")
     ln(); ln(); ln() // signature gap

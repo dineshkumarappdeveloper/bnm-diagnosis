@@ -226,6 +226,8 @@ fun OrderDetailScreen(
     // role that verifies (technician / pathologist / owner). A receptionist's
     // name must not land there with no way to ever carry a signature.
     val canVerify = (me?.canVerify == true)
+    // The owner claiming "I'm the lab's pathologist" — asked for the name that prints.
+    var claimingOwner by remember { mutableStateOf<com.bnm.lab.staff.Staff?>(null) }
     // Whether anyone at all can approve — drives the "nobody can approve" notice.
     var approversInLab by remember { mutableStateOf<Long?>(null) }
     LaunchedEffect(me?.id, me?.canApprove) { approversInLab = runCatching { staffRepo.countApprovers() }.getOrNull() }
@@ -564,9 +566,13 @@ fun OrderDetailScreen(
             t.testId !in slipIds && TestStage.of(results.values.filter { it.testId == t.testId }) != TestStage.REPORTED
         }.map { it.testName }
         val result = withContext(Dispatchers.Default) {
+            val slipRows = results.values.filter { it.testId in slipIds }
+            suspend fun currentName(id: String?) = id?.takeIf { it.isNotBlank() }?.let { staffRepo.byId(it)?.name }
             val body = renderLabReport(
+                verifiedByName = currentName(slipRows.firstNotNullOfOrNull { it.verifiedById }),
+                approvedByName = currentName(slipRows.firstNotNullOfOrNull { it.approvedById }),
                 labName = labName, order = ord, patient = pat, tests = slipTests,
-                results = results.values.filter { it.testId in slipIds }, referrerName = referrer?.name,
+                results = slipRows, referrerName = referrer?.name,
                 widthChars = bp.paperWidth, paramName = nameOf,
                 sampleType = { t -> sampleTypeDisplay(catalog[t.testId]?.sampleType) },
                 toFollow = toFollow,
@@ -675,20 +681,7 @@ fun OrderDetailScreen(
                             ) {
                                 NoApproverNotice(
                                     me = me,
-                                    onClaim = { owner ->
-                                        scope.launch {
-                                            // Save onto the stored row, not the sign-in copy, so a PIN or
-                                            // signature changed since sign-in is not written back over.
-                                            val current = staffRepo.byId(owner.id) ?: owner
-                                            staffRepo.save(current.copy(alsoPathologist = true))
-                                                .onSuccess { saved ->
-                                                    session.refresh(saved)
-                                                    approversInLab = staffRepo.countApprovers()
-                                                    message = "${saved.name} is now the lab's pathologist and can approve"
-                                                }
-                                                .onFailure { message = it.message }
-                                        }
-                                    },
+                                    onClaim = { owner -> claimingOwner = owner },
                                 )
                             }
                             perTestHint?.let {
@@ -986,6 +979,32 @@ fun OrderDetailScreen(
         }
     }
 
+    claimingOwner?.let { owner ->
+        PathologistDetailsDialog(
+            owner = owner,
+            onDismiss = { claimingOwner = null },
+            onSave = { name, qualifications, registrationNo ->
+                scope.launch {
+                    // Save onto the stored row, not the sign-in copy, so a PIN or
+                    // signature changed since sign-in is not written back over.
+                    val current = staffRepo.byId(owner.id) ?: owner
+                    staffRepo.save(current.copy(
+                        name = name, qualifications = qualifications, registrationNo = registrationNo,
+                        alsoPathologist = true,
+                    )).onSuccess { saved ->
+                        // A rename is exactly when old "Lab Owner" stamps need the id
+                        // filled in, so reprints follow the person.
+                        runCatching { repo.backfillSignatoryIds(staffRepo.listAll(), com.bnm.lab.staff.StaffRepository.DEFAULT_OWNER_ID) }
+                        session.refresh(saved)
+                        approversInLab = staffRepo.countApprovers()
+                        claimingOwner = null
+                        message = "${saved.name} is now the lab's pathologist and can approve"
+                    }.onFailure { message = it.message }
+                }
+            },
+        )
+    }
+
     if (showApprove && o != null && canApprove) {
         val signer = me
         val target = approveTarget
@@ -1032,7 +1051,7 @@ fun OrderDetailScreen(
                     if (signer != null) {
                         Text(signer.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                         Text(
-                            "Signing as ${signer.roleLabel.lowercase()} — switch user from the home header to sign as someone else.",
+                            "Signing as the pathologist — switch user from the home header to sign as someone else.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -1444,6 +1463,47 @@ private fun TestParameter?.isNumeric(): Boolean {
     if (this == null) return false
     if (ranges.isEmpty()) return true
     return ranges.any { it.text == null }
+}
+
+/**
+ * "I'm the lab's pathologist": the name, qualifications and registration no. the
+ * report prints under "Approved by (Pathologist)". The seeded "Lab Owner" is not
+ * accepted as that name.
+ */
+@Composable
+private fun PathologistDetailsDialog(
+    owner: com.bnm.lab.staff.Staff,
+    onDismiss: () -> Unit,
+    onSave: (name: String, qualifications: String?, registrationNo: String?) -> Unit,
+) {
+    var name by remember { mutableStateOf(com.bnm.lab.report.Signatory.printable(owner.name).orEmpty()) }
+    var qualifications by remember { mutableStateOf(owner.qualifications.orEmpty()) }
+    var registrationNo by remember { mutableStateOf(owner.registrationNo.orEmpty()) }
+    var err by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("You as the lab's pathologist") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("This is how your sign-off prints on reports.", style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(name, { name = it; err = null }, label = { Text("Name (e.g. Dr. Meena Iyer)") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth(), isError = err != null)
+                OutlinedTextField(qualifications, { qualifications = it }, label = { Text("Qualifications (e.g. MD Pathology)") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(registrationNo, { registrationNo = it }, label = { Text("Medical council registration no.") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth())
+                err?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            }
+        },
+        confirmButton = {
+            Button(onClick = {
+                val n = name.trim()
+                com.bnm.lab.report.Signatory.pathologistNameProblem(n)?.let { err = it; return@Button }
+                onSave(n, qualifications.trim().ifBlank { null }, registrationNo.trim().ifBlank { null })
+            }) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 /**

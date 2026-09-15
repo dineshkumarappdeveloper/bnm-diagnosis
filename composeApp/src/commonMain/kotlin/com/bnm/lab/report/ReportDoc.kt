@@ -496,8 +496,9 @@ fun buildReportDoc(
         sections = sections,
         pagination = pagination,
         toFollow = toFollow.map { it.trim() }.filter { it.isNotEmpty() },
-        verifiedBy = verifiedByName ?: results.firstNotNullOfOrNull { it.verifiedBy?.takeIf { v -> v.isNotBlank() } },
-        approvedBy = approvedByName ?: results.firstNotNullOfOrNull { it.approvedBy?.takeIf { v -> v.isNotBlank() } },
+        // Never "Lab Owner": a report is signed by named people (Signatory).
+        verifiedBy = Signatory.printable(verifiedByName ?: results.firstNotNullOfOrNull { it.verifiedBy?.takeIf { v -> v.isNotBlank() } }),
+        approvedBy = Signatory.printable(approvedByName ?: results.firstNotNullOfOrNull { it.approvedBy?.takeIf { v -> v.isNotBlank() } }),
         // Results carry the sign-off stamp; the order's own approved_at is the
         // fallback for rows written before results were stamped individually.
         approvedOn = (results.firstNotNullOfOrNull { it.approvedAt?.takeIf { a -> a.isNotBlank() } }
