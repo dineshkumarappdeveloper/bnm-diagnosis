@@ -65,6 +65,8 @@ import com.bnm.lab.api.LabActivateResult
 import com.bnm.lab.api.LabApi
 import com.bnm.lab.api.LabSeatDevice
 import com.bnm.lab.api.LicenseActivation
+import com.bnm.lab.backup.BackupController
+import com.bnm.lab.backup.BackupGeneration
 import com.bnm.lab.getPlatform
 import com.bnm.lab.license.LicenseManager
 import com.bnm.lab.resources.Res
@@ -73,6 +75,8 @@ import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.painterResource
 import com.bnm.lab.lab.LocalLabRepository
 import com.bnm.lab.lab.TenantRowCounts
+import com.bnm.lab.screens.backup.BackupRestoreOfferDialog
+import com.bnm.lab.screens.backup.RestoreDialog
 
 private val Brand = Color(0xFF2D7FF0)
 
@@ -112,6 +116,16 @@ fun ActivationScreen(
      *  listeners so no frame lands between "old lab erased" and "new lab
      *  activated" (it would re-seed the new tenant with old-lab data). */
     onBeforeTenantWipe: suspend () -> Unit = {},
+    /** Runs AFTER a tenant-switch wipe — the backup vault belonged to the
+     *  previous lab and is retired so the next lab sets up its own pendrive. */
+    onAfterTenantWipe: suspend () -> Unit = {},
+    /** Backup pendrive engine (desktop only): offers "Restore from a backup
+     *  pendrive…" under Activate. Null hides it. */
+    backupController: BackupController? = null,
+    /** The newest backup on a bound pendrive, found at launch while this PC
+     *  holds no records — asked about once, then [onRestoreOfferHandled]. */
+    restoreOffer: BackupGeneration? = null,
+    onRestoreOfferHandled: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var key by remember { mutableStateOf("") }
@@ -127,6 +141,10 @@ fun ActivationScreen(
     // rather than fall through to a silent decision either way.
     var pendingTenantSwitch by remember { mutableStateOf<Pair<String, TenantRowCounts?>?>(null) }
     val labRepo = LocalLabRepository.current
+    // Restore from a pendrive: opened by the button under Activate, or by the
+    // launch-time offer (which pre-selects the generation it found).
+    var restoreFrom by remember { mutableStateOf<BackupGeneration?>(null) }
+    var showRestore by remember { mutableStateOf(false) }
 
     fun runActivate(
         replaceDeviceId: String? = null,
@@ -178,6 +196,7 @@ fun ActivationScreen(
                 AppLog.w("Licence", "tenant switch confirmed — erasing this device's lab data before activating")
                 runCatching { onBeforeTenantWipe() }.logFailure("Licence", "stopping analyzers before tenant wipe")
                 runCatching { labRepo.resetForNewTenant() }.logFailure("Licence", "tenant wipe")
+                runCatching { onAfterTenantWipe() }.logFailure("Licence", "retiring the backup vault after tenant wipe")
             }
             // The key itself is never logged — only that an attempt happened.
             AppLog.i("Licence", "activation attempt (replacing device: ${replaceDeviceId != null})")
@@ -330,6 +349,12 @@ fun ActivationScreen(
                             enabled = !loading && key.trim().length >= 8,
                             onClick = { runActivate() },
                         )
+                        if (backupController != null) {
+                            Spacer(Modifier.height(10.dp))
+                            TextButton(onClick = { showRestore = true }, enabled = !loading) {
+                                Text("Restore from a backup pendrive…", color = Brand)
+                            }
+                        }
                     } else {
                         // ── Activated: lab name is admin-set and READ-ONLY ──
                         Icon(Icons.Outlined.Verified, contentDescription = null, tint = Brand, modifier = Modifier.size(44.dp))
@@ -458,6 +483,25 @@ fun ActivationScreen(
             dismissButton = {
                 TextButton(onClick = { if (!loading) pendingTenantSwitch = null }) { Text("Cancel") }
             },
+        )
+    }
+
+    // ── Restore from a backup pendrive ────────────────────────────────────────
+    // A new (or reinstalled) PC: the records come from the pendrive, the
+    // licence travels inside the backup, and the next launch swaps them in.
+    if (backupController != null) {
+        restoreOffer?.let { gen ->
+            BackupRestoreOfferDialog(
+                gen = gen,
+                onRestore = { onRestoreOfferHandled(); restoreFrom = gen; showRestore = true },
+                onNotNow = onRestoreOfferHandled,
+            )
+        }
+        if (showRestore) RestoreDialog(
+            controller = backupController,
+            activated = licenseManager.state.value.activated,
+            initialGeneration = restoreFrom,
+            onDismiss = { showRestore = false; restoreFrom = null },
         )
     }
 }
