@@ -1,8 +1,12 @@
 -- Per-seat accession-number series — the counter_series never-rewind concept
--- applied to sample accessioning. Each device/seat ('S1', 'S2', …) issues from
--- its own series so multi-seat offline devices can never collide. allocate =
--- bump then read inside ONE transaction (LabRepository.createLabOrder), so a
--- crash never reissues an accession number.
+-- applied to sample accessioning. Each seat issues from its own series so
+-- seats can never collide: 'S<n>' when admin-lab numbered the device, else a
+-- three-character install seat minted from the device id (see
+-- AccessionSeat.kt). A row per seat this database ever issued from; rows for
+-- seats it no longer uses (the 'S1' every install shared up to 1.2.0) stay as
+-- history. allocate = lift past issued numbers, bump, then read inside ONE
+-- transaction (LabRepository.createLabOrder), so a crash never reissues an
+-- accession number.
 
 CREATE TABLE IF NOT EXISTS accession_series (
     seat TEXT NOT NULL PRIMARY KEY,
@@ -27,3 +31,16 @@ SELECT high_water FROM accession_series WHERE seat = ?;
 -- Raise (never lower) — adopt a server/peer high-water on future sync.
 raiseHighWater:
 UPDATE accession_series SET high_water = MAX(high_water, ?) WHERE seat = ?;
+
+-- The highest number this database already holds under one series ('ACC-S2-'),
+-- whoever issued it: this seat, another seat whose orders were pulled, or an
+-- older build on this computer. Allocation starts above it, so a number already
+-- printed on a tube is never handed out again — and the UNIQUE accession_no can
+-- never wedge registration on a seat that is behind. [:series, :seriesEnd) is
+-- the index range of accessions starting with :series (AccessionSeat.seriesEnd).
+-- Stripping :series leaves the number: it occurs once, at the start, since the
+-- digits after it contain no letters or hyphens.
+highestIssued:
+SELECT coalesce(max(CAST(replace(accession_no, :series, '') AS INTEGER)), 0)
+FROM lab_orders
+WHERE accession_no >= :series AND accession_no < :seriesEnd;

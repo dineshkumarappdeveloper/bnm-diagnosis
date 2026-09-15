@@ -58,6 +58,7 @@ import com.bnm.lab.connectivity.ConnectivityMonitor
 import com.bnm.lab.connectivity.LocalConnectivity
 import com.bnm.lab.db.createAppDatabase
 import com.bnm.lab.instruments.InstrumentEngine
+import com.bnm.lab.lab.AccessionSeat
 import com.bnm.lab.lab.LabRepository
 import com.bnm.lab.lab.LocalLabRepository
 import com.bnm.lab.license.LicenseManager
@@ -138,7 +139,9 @@ fun App() {
     }
     // Revenue dashboard: reads the same bills and orders, never writes.
     val revenueRepo = remember { RevenueRepository(database, repo) }
-    val labRepo = remember { LabRepository(database, ApiClient.json) }
+    val labRepo = remember {
+        LabRepository(database, ApiClient.json, accessionSeat = { AccessionSeat.of(licenseManager) })
+    }
     // ── P4: staff accounts + local RBAC. The session is in-memory ONLY — a
     // restarted seat comes back to the sign-in grid. ──
     val staffRepo = remember { StaffRepository(database, ApiClient.json) }
@@ -291,7 +294,7 @@ fun App() {
                     when (hb) {
                         is LabHeartbeatResult.Ok -> {
                             AppLog.i("Licence", "heartbeat ok (mode=${hb.mode} seats=${hb.seats} expires=${hb.expiresAt})")
-                            licenseManager.applyHeartbeat(hb.licenseJwt, hb.mode, hb.seats, hb.expiresAt, hb.labName)
+                            licenseManager.applyHeartbeat(hb.licenseJwt, hb.mode, hb.seats, hb.expiresAt, hb.labName, hb.seatNo)
                         }
                         is LabHeartbeatResult.Blocked -> {
                             AppLog.w("Licence", "heartbeat: this device's licence is BLOCKED — new work gated")

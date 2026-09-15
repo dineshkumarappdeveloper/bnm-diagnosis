@@ -16,6 +16,7 @@ import com.bnm.lab.db.Patients
 import com.bnm.lab.db.Referrer_payouts
 import com.bnm.lab.db.Referrers
 import com.bnm.lab.db.WorklistByStatus
+import com.bnm.lab.license.LicenseManager
 import com.bnm.lab.report.ReportShare
 import kotlin.math.floor
 import kotlin.math.round
@@ -49,7 +50,9 @@ import kotlinx.serialization.json.Json
  *
  * Key invariants:
  *  - Accession numbers come from the per-seat never-rewind series
- *    (`accession_series`, bump-then-read inside the order transaction).
+ *    (`accession_series`, bump-then-read inside the order transaction). The
+ *    seat is derived from the licence ([AccessionSeat]), and allocation never
+ *    re-issues a number this database already holds under that series.
  *  - Order creation pre-creates EMPTY `lab_results` rows for every parameter
  *    of every ordered test, so results entry is a fill-in-the-grid worklist.
  *  - Flags + ref_display are computed at ENTRY time against the patient's
@@ -61,6 +64,8 @@ class LabRepository(
     private val db: AppDatabase,
     private val json: Json,
     private val prefs: DiagnosisPrefs = DiagnosisPrefs(),
+    /** The seat this computer issues accession numbers from ([AccessionSeat.of]). */
+    private val accessionSeat: () -> String = { AccessionSeat.of(LicenseManager()) },
 ) {
     private val pQ get() = db.patientsQueries
     private val rQ get() = db.referrersQueries
@@ -594,6 +599,13 @@ class LabRepository(
     // ── Orders ───────────────────────────────────────────────────────────────
 
     /**
+     * The accession series this computer issues from right now (`ACC-S2-`).
+     * Numbers under any other series were issued elsewhere, or by this computer
+     * under a seat it no longer uses.
+     */
+    fun ownAccessionSeries(): String = "${prefs.accessionPrefix}-${accessionSeat()}-"
+
+    /**
      * Register a new lab order in ONE transaction: allocate the accession
      * number (per-seat bump-then-read — a crash never reissues), insert the
      * order + its test lines (name/price snapshotted), and pre-create EMPTY
@@ -621,7 +633,7 @@ class LabRepository(
             val tests = expanded.map { tid ->
                 tQ.testById(tid).executeAsOneOrNull()?.toModel() ?: error("Test not found: $tid")
             }
-            val seat = prefs.accessionSeat
+            val seat = accessionSeat()
             val orderId = Uuid.random().toString()
             val now = nowIso()
             // P4: the referrer's negotiated rate list, applied through the ONE
@@ -641,12 +653,20 @@ class LabRepository(
             else cQ.commissionsFor(referrerId).executeAsList()
                 .associate { it.test_id to it.commission_pct }
             db.transactionWithResult {
-                // Atomic allocate: seed the seat row if new, bump, then read.
+                // Atomic allocate: seed the seat row if new, lift it past every
+                // number this database already holds under the series, bump,
+                // then read. The lift is what makes a seat change safe: a
+                // connected seat handed S1 continues after the ACC-S1 numbers
+                // every install up to 1.2.0 printed and the lab's other seats
+                // synced here, instead of re-issuing one (or failing on the
+                // UNIQUE accession_no, forever, on a seat that is behind).
                 accQ.init(seat, prefs.accessionPrefix)
+                val prefix = accQ.getSeries(seat).executeAsOne().prefix
+                val series = "$prefix-$seat-"
+                accQ.raiseHighWater(accQ.highestIssued(series, AccessionSeat.seriesEnd(series)).executeAsOne(), seat)
                 accQ.bump(seat)
                 val seq = accQ.highWater(seat).executeAsOne()
-                val prefix = accQ.getSeries(seat).executeAsOne().prefix
-                val accession = "$prefix-$seat-${seq.toString().padStart(5, '0')}"
+                val accession = series + seq.toString().padStart(5, '0')
 
                 oQ.insertOrder(orderId, accession, patientId, referrerId, invoiceId,
                     LabStatus.REGISTERED, priority, notes, now, now)
