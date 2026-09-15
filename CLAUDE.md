@@ -68,3 +68,11 @@ IS a GST invoice whose line items are tests.
   `lab_devices` tables (both Supabase refs, LOCKSTEP).
 - Git: `dineshkumarappdeveloper/bnm-diagnosis`, branch `main`; commit local,
   push only when asked.
+- Backup pendrive (desktop, `backup/`): the engine snapshots the live database
+  with `VACUUM INTO` — 🔴 never file-copy `bnm_chat.db` while the app runs (a
+  rollback-journal copy taken mid-transaction is corrupt). Preferences live in
+  `java.util.prefs` (Windows registry), NOT in the data dir, and the node is
+  shared with other BNM desktop apps: every new key gets an app prefix (the
+  engine's are `lab_backup_*`) and what a backup carries is an allow-list
+  (`BackupAllowList`), never a node dump. `DriverFactory` opens the driver
+  with `busy_timeout=10000` so app writes ride out a snapshot.
