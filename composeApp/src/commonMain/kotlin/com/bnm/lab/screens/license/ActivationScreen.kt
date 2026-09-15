@@ -233,6 +233,14 @@ fun ActivationScreen(
                     is LabActivateResult.SeatsFull -> {
                         AppLog.w("Licence", "activation refused: all seats in use (${outcome.devices.size} devices)")
                         seatsFull = outcome
+                        // A PC restored from a backup pendrive is registering with a
+                        // fresh device id, so its own old seat is the one in the way:
+                        // pre-select it (the list stays behind the confirmation, so
+                        // Cancel still offers every replaceable seat).
+                        restoredSeatToReplace(outcome.devices, backupController?.status?.value?.restoredFromDeviceRowId)?.let {
+                            AppLog.i("Licence", "seats full after a restore — offering the previous computer's seat")
+                            replaceCandidate = it
+                        }
                     }
                     is LabActivateResult.ReplaceCooldown -> {
                         AppLog.w("Licence", "activation refused: replace cooldown — ${outcome.message}")
@@ -612,4 +620,17 @@ private fun PrimaryButton(label: String, loading: Boolean, enabled: Boolean, onC
             }
         }
     }
+}
+
+/**
+ * After a restore from a backup pendrive this PC registers under a FRESH
+ * device id, so when BNM answers "all seats in use" the seat in the way is
+ * usually the old computer's own. The backup carried that seat's row id; when
+ * the server lists it, that is the one to offer first. Whether the seat may be
+ * taken over now is the server's call (`replace_cooldown`), not the list's
+ * `replaceable` hint — a dead PC's last heartbeat can be recent.
+ */
+internal fun restoredSeatToReplace(devices: List<LabSeatDevice>, restoredFromRowId: String?): LabSeatDevice? {
+    val id = restoredFromRowId?.takeIf { it.isNotBlank() } ?: return null
+    return devices.firstOrNull { it.id == id }
 }

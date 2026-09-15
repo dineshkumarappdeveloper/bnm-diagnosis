@@ -584,6 +584,9 @@ fun App() {
                                 a.businessId?.takeIf { it.isNotBlank() }?.let {
                                     authRepository.saveSelectedBusiness(it, a.labName)
                                 }
+                                // BNM now knows this computer: a PC restored from
+                                // a backup pendrive drops its "register" notice.
+                                backupController?.markRegisteredOnline()
                             },
                             onEnterApp = {
                                 // Licensed now → the staff sign-in gate, not straight in.
