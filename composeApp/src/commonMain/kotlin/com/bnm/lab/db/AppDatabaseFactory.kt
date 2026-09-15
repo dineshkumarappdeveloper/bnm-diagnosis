@@ -144,6 +144,9 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
     driver.addColumn("staff", "signature_png", "TEXT")
     driver.addColumn("staff", "qualifications", "TEXT")
     driver.addColumn("staff", "registration_no", "TEXT")
+    // Owner who is also the pathologist (approval rights). Appended after
+    // registration_no — same positional rule as the columns above.
+    driver.addColumn("staff", "also_pathologist", "INTEGER NOT NULL DEFAULT 0")
 
     // ── Round 1: referrer/rate stamps so edits actually sync ──
     driver.addColumn("referrers", "updated_at", "TEXT")

@@ -226,6 +226,9 @@ fun OrderDetailScreen(
     // role that verifies (technician / pathologist / owner). A receptionist's
     // name must not land there with no way to ever carry a signature.
     val canVerify = (me?.canVerify == true)
+    // Whether anyone at all can approve — drives the "nobody can approve" notice.
+    var approversInLab by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(me?.id, me?.canApprove) { approversInLab = runCatching { staffRepo.countApprovers() }.getOrNull() }
     // Per-test release (Settings ▸ Printing ▸ Report): each test can be
     // verified, approved and printed on its own — an outsourced test no longer
     // holds back the rest of the order. Read once per screen; the setting is
@@ -406,6 +409,12 @@ fun OrderDetailScreen(
         results.values.groupBy { it.testId }
             .filterValues { rows -> rows.all { it.approvedAt != null } && rows.any { it.reportedAt == null } }
             .keys
+    }
+    // A test verified but not yet approved — per-test release waits for approval too.
+    val hasVerifiedTest = remember(results) {
+        results.values.groupBy { it.testId }.values.any { rows ->
+            rows.all { it.verifiedAt != null } && rows.any { it.approvedAt == null }
+        }
     }
     val perTestHint: String? = remember(results, tests, releasePerTest, o?.status) {
         if (!releasePerTest || o == null || o.status !in ENTRY_OPEN) null
@@ -655,6 +664,26 @@ fun OrderDetailScreen(
                                     hint, style = MaterialTheme.typography.bodySmall,
                                     color = if (o.status == LabStatus.CANCELLED) MaterialTheme.colorScheme.error
                                     else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            // Nobody in the lab can approve — typically a lab upgraded from
+                            // when owners approved by default. Say so plainly, and let the
+                            // owner who IS the pathologist claim it in one tap. Never granted
+                            // silently: owning the lab is not being its pathologist.
+                            if (!canApprove && approversInLab == 0L && (o.status == LabStatus.VERIFIED || hasVerifiedTest)) {
+                                NoApproverNotice(
+                                    me = me,
+                                    onClaim = { owner ->
+                                        scope.launch {
+                                            staffRepo.save(owner.copy(alsoPathologist = true))
+                                                .onSuccess { saved ->
+                                                    session.refresh(saved)
+                                                    approversInLab = staffRepo.countApprovers()
+                                                    message = "${saved.name} is now the lab's pathologist and can approve"
+                                                }
+                                                .onFailure { message = it.message }
+                                        }
+                                    },
                                 )
                             }
                             perTestHint?.let {
@@ -1412,13 +1441,41 @@ private fun TestParameter?.isNumeric(): Boolean {
     return ranges.any { it.text == null }
 }
 
+/**
+ * Shown when an order is waiting for approval and nobody in the lab may give it.
+ * The owner gets a one-tap "I'm the pathologist"; anyone else is told who to ask.
+ */
+@Composable
+private fun NoApproverNotice(me: com.bnm.lab.staff.Staff?, onClaim: (com.bnm.lab.staff.Staff) -> Unit) {
+    val owner = me?.takeIf { it.role == com.bnm.lab.staff.StaffRole.OWNER && it.active }
+    androidx.compose.material3.Surface(
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Nobody in this lab can approve results yet",
+                fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onTertiaryContainer)
+            Text(
+                if (owner != null) "Approval is the pathologist's sign-off. If you are this lab's pathologist, " +
+                    "mark yourself as one; otherwise add your pathologist in Settings ▸ Staff & roles."
+                else "Approval is the pathologist's sign-off. Ask the lab owner to add a pathologist in Staff & roles.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onTertiaryContainer,
+            )
+            if (owner != null) {
+                Button(onClick = { onClaim(owner) }) { Text("I'm the lab's pathologist") }
+            }
+        }
+    }
+}
+
 /** The one line under the buttons that says what this stage is waiting for. */
 private fun stageHint(status: String, entered: Int, total: Int, canApprove: Boolean): String? = when (status) {
     LabStatus.REGISTERED -> "Collect the sample to start"
     LabStatus.COLLECTED, LabStatus.IN_PROGRESS -> "$entered of $total results entered — verify unlocks when all are in"
     LabStatus.ENTERED -> "All $total results in — ready to verify"
     LabStatus.VERIFIED -> if (canApprove) "Verified — awaiting the pathologist's approval"
-    else "Only a pathologist can approve results"
+    else "Verified — only a pathologist can approve it"
     LabStatus.APPROVED -> "Approved — printing marks it reported"
     LabStatus.REPORTED, LabStatus.DELIVERED -> "Report issued — reprints stay open"
     LabStatus.CANCELLED -> "Order cancelled"

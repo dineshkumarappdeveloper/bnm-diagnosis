@@ -102,6 +102,11 @@ class StaffRepository(
         sQ.countActive().executeAsOne()
     }
 
+    /** Active people who can approve results (pathologists + owner-pathologists). */
+    suspend fun countApprovers(): Long = withContext(Dispatchers.Default) {
+        sQ.countApprovers().executeAsOne()
+    }
+
     // ── Writes ───────────────────────────────────────────────────────────────
 
     /**
@@ -124,10 +129,15 @@ class StaffRepository(
             username = cleanUsername(staff.username, id),
             createdAt = existing?.created_at ?: staff.createdAt.ifBlank { now },
             updatedAt = now,
+            // Only an owner can carry the pathologist tick; a caller that leaves
+            // it unset keeps what the row already had.
+            alsoPathologist = staff.role == StaffRole.OWNER &&
+                (staff.alsoPathologist ?: (existing?.also_pathologist == 1L)),
         )
         sQ.upsert(saved.id, saved.name, saved.role, saved.pinHash, if (saved.active) 1L else 0L,
             saved.createdAt, saved.updatedAt, saved.deletedAt,
-            saved.username, saved.signaturePng, saved.qualifications, saved.registrationNo)
+            saved.username, saved.signaturePng, saved.qualifications, saved.registrationNo,
+            if (saved.alsoPathologist == true) 1L else 0L)
         saved
     }
 
@@ -210,7 +220,7 @@ class StaffRepository(
             }
             sQ.upsert(row.id, row.name, row.role, row.pin_hash, if (active) 1L else 0L,
                 row.created_at, nowIso(), row.deleted_at,
-                row.username, row.signature_png, row.qualifications, row.registration_no)
+                row.username, row.signature_png, row.qualifications, row.registration_no, row.also_pathologist)
             Unit
         }
     }
@@ -243,7 +253,7 @@ class StaffRepository(
             pinHash = null, active = true, createdAt = now, updatedAt = now,
         )
         sQ.upsert(owner.id, owner.name, owner.role, null, 1L, owner.createdAt, owner.updatedAt, null,
-            null, null, null, null)
+            null, null, null, null, 0L)
         owner
     }
 
@@ -263,7 +273,7 @@ class StaffRepository(
             "Remove ${row.name}'s username first — a username with no password is a login anyone could use"
         }
         sQ.upsert(row.id, row.name, row.role, hash, row.active, row.created_at, nowIso(), row.deleted_at,
-            row.username, row.signature_png, row.qualifications, row.registration_no)
+            row.username, row.signature_png, row.qualifications, row.registration_no, row.also_pathologist)
     }
 
     /**
@@ -296,6 +306,7 @@ class StaffRepository(
         signaturePng = signature_png,
         qualifications = qualifications,
         registrationNo = registration_no,
+        alsoPathologist = also_pathologist == 1L,
     )
 
     private fun newId(): String = Uuid.random().toString()

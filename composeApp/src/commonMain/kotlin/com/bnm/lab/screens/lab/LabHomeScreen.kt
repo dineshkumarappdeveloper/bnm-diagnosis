@@ -480,9 +480,8 @@ fun LabHomeScreen(
                     // Owner-only money surface (RouteGuard refuses everyone else): no
                     // door for people who cannot walk through it.
                     if (showMoney) HomeCard("Referrers", "Doctors & clinics", Icons.Outlined.People) { onReferrers() }
-                    if (showRevenue) HomeCard("Revenue", "Billed · collected · due", Icons.Outlined.BarChart) { onRevenue() }
                     HomeCard("Test catalog", "Tests, panels & prices", Icons.Outlined.Biotech) { onCatalog() }
-                    HomeCard("Bills", billsCaption, Icons.AutoMirrored.Outlined.ReceiptLong) { onBills() }
+                    HomeCard(if (showRevenue) "Bills & revenue" else "Bills", billsCaption, Icons.AutoMirrored.Outlined.ReceiptLong) { onBills() }
                     HomeCard("Settings", "Printer · License", Icons.Outlined.Settings) { onSettings() }
                 }
                 // (The standalone "Sync off" footer note now lives in the attention bar.)
@@ -1037,11 +1036,8 @@ private fun ShortcutsCard(
                 if (showReferrers) {
                     ShortcutTile("Referrers", Icons.Outlined.People, Modifier.fillMaxWidth(), onClick = onReferrers)
                 }
-                if (showRevenue) {
-                    ShortcutTile("Revenue", Icons.Outlined.BarChart, Modifier.fillMaxWidth(), onClick = onRevenue)
-                }
                 ShortcutTile("Test catalog", Icons.Outlined.Biotech, Modifier.fillMaxWidth(), onClick = onCatalog)
-                ShortcutTile("Bills", Icons.AutoMirrored.Outlined.ReceiptLong, Modifier.fillMaxWidth(),
+                ShortcutTile(if (showRevenue) "Bills & revenue" else "Bills", Icons.AutoMirrored.Outlined.ReceiptLong, Modifier.fillMaxWidth(),
                     caption = billsCaption, onClick = onBills)
                 ShortcutTile("Settings", Icons.Outlined.Settings, Modifier.fillMaxWidth(), onClick = onSettings)
             }

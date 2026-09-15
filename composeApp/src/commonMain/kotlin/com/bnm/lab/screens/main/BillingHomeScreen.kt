@@ -164,20 +164,6 @@ fun BillingHomeScreen(
     }
 }
 
-/** Mobile "Bills" route — the past-invoice list with a back button. */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun BillsScreen(businessId: String, onBack: () -> Unit, onOpen: (String) -> Unit) {
-    Scaffold(
-        topBar = {
-            TopAppBar(title = { Text("Past bills") }, navigationIcon = {
-                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
-            })
-        }
-    ) { inner ->
-        Box(Modifier.padding(inner).fillMaxSize()) { InvoiceListScreen(businessId, onOpen) }
-    }
-}
 
 @Composable
 private fun PaneHeader(title: String) {

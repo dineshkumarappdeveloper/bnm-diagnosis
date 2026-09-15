@@ -1,5 +1,6 @@
 package com.bnm.lab.screens.lab
 
+import androidx.compose.material3.TextButton
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.text.TextStyle
@@ -72,7 +73,7 @@ import kotlinx.datetime.LocalDate
 private val WIDE = 900.dp
 
 /**
- * The revenue dashboard: what the lab billed, collected and is still owed over a
+ * The revenue dashboard — the Revenue tab of the Bills page: what the lab billed, collected and is still owed over a
  * period, how that splits by payment mode, test and referrer, and how it moved
  * against the period before.
  *
@@ -83,11 +84,13 @@ private val WIDE = 900.dp
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun RevenueScreen(
+fun RevenueDashboard(
     revenue: RevenueRepository,
     businessId: String,
     offlineEdition: Boolean,
-    onBack: () -> Unit,
+    /** Shows a short confirmation on the host page (e.g. "Copied as CSV"). */
+    onMessage: (String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     // Recomputed on every composition rather than remembered, so a dashboard left
     // open past midnight rolls "Today" over on its own.
@@ -111,138 +114,127 @@ fun RevenueScreen(
         .collectAsState(null)
 
     val clipboard = LocalClipboardManager.current
-    val snackbar = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Revenue") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
-                },
-                actions = {
-                    val r = report
-                    IconButton(onClick = {
-                        if (r != null) {
-                            clipboard.setText(AnnotatedString(renderRevenueCsv(r)))
-                            scope.launch { snackbar.showSnackbar("Copied as CSV — paste into a spreadsheet") }
-                        }
-                    }, enabled = r != null) {
-                        Icon(Icons.Outlined.ContentCopy, contentDescription = "Copy as CSV")
-                    }
-                },
-            )
-        },
-        snackbarHost = { SnackbarHost(snackbar) },
-    ) { inner ->
-        BoxWithConstraints(Modifier.padding(inner).fillMaxSize()) {
-            val wide = maxWidth >= WIDE
-            Column(
-                Modifier.fillMaxSize().verticalScroll(rememberScrollState())
-                    .padding(horizontal = if (wide) 24.dp else 16.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+    BoxWithConstraints(modifier.fillMaxSize()) {
+        val wide = maxWidth >= WIDE
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                .padding(horizontal = if (wide) 24.dp else 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            // ── Period ──
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                itemVerticalAlignment = Alignment.CenterVertically,
             ) {
-                // ── Period ──
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    RevenuePreset.entries.forEach { p ->
-                        FilterChip(selected = preset == p, onClick = { preset = p }, label = { Text(p.label) })
-                    }
+                RevenuePreset.entries.forEach { p ->
+                    FilterChip(selected = preset == p, onClick = { preset = p }, label = { Text(p.label) })
                 }
-                if (preset == RevenuePreset.CUSTOM) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(customFrom, { customFrom = it.take(10) }, label = { Text("From (YYYY-MM-DD)") },
-                            singleLine = true, modifier = Modifier.widthIn(max = 200.dp),
-                            isError = customRange == null)
-                        OutlinedTextField(customTo, { customTo = it.take(10) }, label = { Text("To (YYYY-MM-DD)") },
-                            singleLine = true, modifier = Modifier.widthIn(max = 200.dp),
-                            isError = customRange == null)
+                val csvReport = report
+                TextButton(onClick = {
+                    if (csvReport != null) {
+                        clipboard.setText(AnnotatedString(renderRevenueCsv(csvReport)))
+                        onMessage("Copied as CSV — paste into a spreadsheet")
                     }
-                    if (customRange == null) {
-                        Text("Enter two dates up to today, the first on or before the second, at most ten years apart.",
-                            style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.danger)
-                    }
+                }, enabled = csvReport != null) {
+                    Icon(Icons.Outlined.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Text("  Copy as CSV")
                 }
-
-                val r = report
-                if (r == null) {
-                    Box(Modifier.fillMaxWidth().padding(48.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator()
-                    }
-                    return@Column
-                }
-                Text(
-                    "${rangeLabel(r.range)}  ·  compared with ${rangeLabel(r.priorRange)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-
-                // ── Headline figures ──
-                val tiles = listOf<@Composable (Modifier) -> Unit>(
-                    { m -> KpiTile("Billed", inr(r.current.billed), m,
-                        caption = "${r.current.bills} bill${plural(r.current.bills)}",
-                        change = percentChange(r.current.billed, r.prior.billed)) },
-                    { m -> KpiTile("Collected", inr(r.current.collected), m,
-                        caption = collectedShare(r),
-                        change = percentChange(r.current.collected, r.prior.collected)) },
-                    { m -> KpiTile("Due", inr(r.current.due), m,
-                        caption = "on these bills",
-                        tone = if (r.current.due > 0.005) AppTheme.colors.warning else null) },
-                    { m -> KpiTile("Orders", "${r.current.orders}", m,
-                        caption = "${r.current.tests} test${plural(r.current.tests)} · ${inr(r.current.orderValue)}",
-                        change = percentChange(r.current.orders.toDouble(), r.prior.orders.toDouble())) },
-                )
-                if (wide) {
-                    Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        tiles.forEach { it(Modifier.weight(1f).fillMaxHeight()) }
-                    }
-                } else {
-                    tiles.chunked(2).forEach { pair ->
-                        Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            pair.forEach { it(Modifier.weight(1f).fillMaxHeight()) }
-                        }
-                    }
-                }
-
-                // ── Things that need a decision, only when they exist ──
-                AttentionChips(r)
-
-                if (r.isEmpty) {
-                    RevenueCard {
-                        Text("Nothing billed or registered in this period.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                } else {
-                    // ── Over time + payment modes ──
-                    if (wide) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Box(Modifier.weight(0.64f)) { TrendCard(r) }
-                            Box(Modifier.weight(0.36f)) { SliceCard("By payment mode", "Collected", r.byPaymentMode, emptyText = "Nothing collected in this period.") }
-                        }
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Box(Modifier.weight(1f)) { SliceCard("Top tests", "Order value", r.topTests, countNoun = "ordered") }
-                            Box(Modifier.weight(1f)) { SliceCard("Referrers", "Order value", r.byReferrer, countNoun = "order", showCommission = true) }
-                        }
-                    } else {
-                        TrendCard(r)
-                        SliceCard("By payment mode", "Collected", r.byPaymentMode, emptyText = "Nothing collected in this period.")
-                        SliceCard("Top tests", "Order value", r.topTests, countNoun = "ordered")
-                        SliceCard("Referrers", "Order value", r.byReferrer, countNoun = "order", showCommission = true)
-                    }
-                }
-
-                // ── Where the numbers come from ──
-                Text(
-                    "Billed, collected and due count bills by the date printed on them. Orders, tests and commission " +
-                        "count by registration date; cancelled orders are left out. " +
-                        if (offlineEdition) "Offline edition: every figure comes from this computer."
-                        else "Bills from the lab's other computers are included once they have synced (every five minutes).",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(8.dp))
             }
+            if (preset == RevenuePreset.CUSTOM) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(customFrom, { customFrom = it.take(10) }, label = { Text("From (YYYY-MM-DD)") },
+                        singleLine = true, modifier = Modifier.widthIn(max = 200.dp),
+                        isError = customRange == null)
+                    OutlinedTextField(customTo, { customTo = it.take(10) }, label = { Text("To (YYYY-MM-DD)") },
+                        singleLine = true, modifier = Modifier.widthIn(max = 200.dp),
+                        isError = customRange == null)
+                }
+                if (customRange == null) {
+                    Text("Enter two dates up to today, the first on or before the second, at most ten years apart.",
+                        style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.danger)
+                }
+            }
+
+            val r = report
+            if (r == null) {
+                Box(Modifier.fillMaxWidth().padding(48.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+                return@Column
+            }
+            Text(
+                "${rangeLabel(r.range)}  ·  compared with ${rangeLabel(r.priorRange)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            // ── Headline figures ──
+            val tiles = listOf<@Composable (Modifier) -> Unit>(
+                { m -> KpiTile("Billed", inr(r.current.billed), m,
+                    caption = "${r.current.bills} bill${plural(r.current.bills)}",
+                    change = percentChange(r.current.billed, r.prior.billed)) },
+                { m -> KpiTile("Collected", inr(r.current.collected), m,
+                    caption = collectedShare(r),
+                    change = percentChange(r.current.collected, r.prior.collected)) },
+                { m -> KpiTile("Due", inr(r.current.due), m,
+                    caption = "on these bills",
+                    tone = if (r.current.due > 0.005) AppTheme.colors.warning else null) },
+                { m -> KpiTile("Orders", "${r.current.orders}", m,
+                    caption = "${r.current.tests} test${plural(r.current.tests)} · ${inr(r.current.orderValue)}",
+                    change = percentChange(r.current.orders.toDouble(), r.prior.orders.toDouble())) },
+            )
+            if (wide) {
+                Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    tiles.forEach { it(Modifier.weight(1f).fillMaxHeight()) }
+                }
+            } else {
+                tiles.chunked(2).forEach { pair ->
+                    Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        pair.forEach { it(Modifier.weight(1f).fillMaxHeight()) }
+                    }
+                }
+            }
+
+            // ── Things that need a decision, only when they exist ──
+            AttentionChips(r)
+
+            if (r.isEmpty) {
+                RevenueCard {
+                    Text("Nothing billed or registered in this period.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                // ── Over time + payment modes ──
+                if (wide) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Box(Modifier.weight(0.64f)) { TrendCard(r) }
+                        Box(Modifier.weight(0.36f)) { SliceCard("By payment mode", "Collected", r.byPaymentMode, emptyText = "Nothing collected in this period.") }
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Box(Modifier.weight(1f)) { SliceCard("Top tests", "Order value", r.topTests, countNoun = "ordered") }
+                        Box(Modifier.weight(1f)) { SliceCard("Referrers", "Order value", r.byReferrer, countNoun = "order", showCommission = true) }
+                    }
+                } else {
+                    TrendCard(r)
+                    SliceCard("By payment mode", "Collected", r.byPaymentMode, emptyText = "Nothing collected in this period.")
+                    SliceCard("Top tests", "Order value", r.topTests, countNoun = "ordered")
+                    SliceCard("Referrers", "Order value", r.byReferrer, countNoun = "order", showCommission = true)
+                }
+            }
+
+            // ── Where the numbers come from ──
+            Text(
+                "Billed, collected and due count bills by the date printed on them. Orders, tests and commission " +
+                    "count by registration date; cancelled orders are left out. " +
+                    if (offlineEdition) "Offline edition: every figure comes from this computer."
+                    else "Bills from the lab's other computers are included once they have synced (every five minutes).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
         }
     }
 }

@@ -39,8 +39,6 @@ sealed class Screen(val route: String) {
     data object Patients : Screen("patients")
     data object Referrers : Screen("referrers")
     data object Catalog : Screen("catalog")
-    /** Revenue dashboard: billed, collected and due over a period (owner only). */
-    data object Revenue : Screen("revenue")
 
     // ── Billing (kept; reachable via Home ▸ Bills and Settings only) ──
     /** Legacy billing home (product grid + cart) — NOT registered in the nav
@@ -50,7 +48,12 @@ sealed class Screen(val route: String) {
         fun createRoute(invoiceId: String) = "invoice/$invoiceId"
     }
     data object CreateInvoice : Screen("create_invoice")
-    data object Bills : Screen("bills")
+    /** Bills and (owner only) Revenue on one page; `tab` picks the starting tab —
+     *  resolved against permissions by [BillsTab.resolve]. */
+    data object Bills : Screen("bills?tab={tab}") {
+        fun createRoute(tab: BillsTab = BillsTab.BILLS) =
+            if (tab == BillsTab.BILLS) "bills" else "bills?tab=${tab.slug}"
+    }
     data object Cart : Screen("cart")
     data object CustomerDetails : Screen("customer_details")
     data object Settings : Screen("settings")

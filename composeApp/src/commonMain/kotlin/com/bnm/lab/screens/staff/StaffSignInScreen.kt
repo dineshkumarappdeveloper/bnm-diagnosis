@@ -259,7 +259,7 @@ private fun StaffTile(staff: Staff, onClick: () -> Unit) {
             }
             Text(staff.name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
-            RoleChip(staff.role)
+            RoleChip(staff)
             Text(
                 when (staff.credential) {
                     StaffCredential.NONE -> "Tap to enter"
@@ -278,12 +278,14 @@ private fun StaffTile(staff: Staff, onClick: () -> Unit) {
 
 /** Role pill — shared by the sign-in grid, the header chip and staff management. */
 @Composable
-fun RoleChip(role: String, modifier: Modifier = Modifier) {
+fun RoleChip(staff: Staff, modifier: Modifier = Modifier) {
     Box(
         modifier.background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(999.dp))
             .padding(horizontal = 9.dp, vertical = 3.dp),
     ) {
-        Text(StaffRole.label(role), style = MaterialTheme.typography.labelSmall,
+        // "Owner · Pathologist" for an owner who approves — the chip is where the
+        // desk sees who may sign off.
+        Text(staff.roleLabel, style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSecondaryContainer)
     }
 }
@@ -372,7 +374,7 @@ private fun PasswordPrompt(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(staff.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        RoleChip(staff.role)
+        RoleChip(staff)
 
         OutlinedTextField(
             value = password,
@@ -424,7 +426,7 @@ private fun PinPad(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Text(staff.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        RoleChip(staff.role)
+        RoleChip(staff)
         Text("Enter PIN", style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
 

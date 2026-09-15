@@ -30,7 +30,19 @@ data class Staff(
     val signaturePng: String? = null,
     val qualifications: String? = null,   // 'MD (Pathology)'
     val registrationNo: String? = null,   // state medical-council number
+    /**
+     * An OWNER who is also the lab's pathologist, and so may approve results.
+     * Meaningless for any other role (StaffRepository forces it off there).
+     *
+     * Nullable on the wire on purpose: a sync doc written by an older seat has no
+     * such key, and "absent" must not read as "not a pathologist" — the apply
+     * side keeps the local value instead.
+     */
+    val alsoPathologist: Boolean? = null,
 ) {
+    /** The owner-pathologist tick, read as a plain yes/no. */
+    val isOwnerPathologist: Boolean get() = role == StaffRole.OWNER && alsoPathologist == true
+
     /**
      * Which scheme [pinHash] currently holds. A person carries exactly ONE
      * secret — setting a password replaces a PIN and vice versa — because the
@@ -80,14 +92,18 @@ data class Staff(
      */
     val canVerify: Boolean get() = role != StaffRole.RECEPTIONIST
 
-    /** Pathologist sign-off is the legally meaningful one — owner included so a
-     *  single-person lab is never stuck (an owner IS the responsible person). */
-    val canApprove: Boolean get() = role == StaffRole.PATHOLOGIST || role == StaffRole.OWNER
+    /**
+     * Approval is the pathologist's sign-off, and only a pathologist's. Owning
+     * the lab does not make someone a pathologist: an owner may approve only
+     * when marked as one ([alsoPathologist]) — the single-person lab where the
+     * owner IS the pathologist ticks that once in Staff & roles.
+     */
+    val canApprove: Boolean get() = role == StaffRole.PATHOLOGIST || isOwnerPathologist
 
     /** Adding/editing/retiring staff is the owner's job alone. */
     val canManageStaff: Boolean get() = role == StaffRole.OWNER
 
-    val roleLabel: String get() = StaffRole.label(role)
+    val roleLabel: String get() = if (isOwnerPathologist) "Owner · Pathologist" else StaffRole.label(role)
 }
 
 /** The four roles. Stored as the raw string so an unknown value from a newer
@@ -111,7 +127,7 @@ object StaffRole {
 
     /** One-line "what this person may do", shown under the role dropdown. */
     fun describe(role: String): String = when (role) {
-        OWNER -> "Everything — revenue, commission, prices, staff & roles included."
+        OWNER -> "Revenue, commission, prices, staff & roles. Approves results only when also marked as the pathologist."
         PATHOLOGIST -> "Approves results and signs reports. No revenue, commission or prices."
         TECHNICIAN -> "Enters and verifies results. No revenue, commission or prices."
         RECEPTIONIST -> "Registers patients, orders and bills. No revenue, commission or prices."

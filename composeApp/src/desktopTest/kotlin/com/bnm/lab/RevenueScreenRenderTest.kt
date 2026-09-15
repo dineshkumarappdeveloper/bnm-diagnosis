@@ -10,7 +10,7 @@ import com.bnm.lab.billing.BillingScope
 import com.bnm.lab.chat.BillingRepository
 import com.bnm.lab.db.AppDatabase
 import com.bnm.lab.revenue.RevenueRepository
-import com.bnm.lab.screens.lab.RevenueScreen
+import com.bnm.lab.screens.lab.RevenueDashboard
 import com.bnm.lab.ui.theme.AppTheme
 import com.bnm.lab.ui.theme.ThemeChoice
 import io.ktor.client.HttpClient
@@ -74,7 +74,7 @@ class RevenueScreenRenderTest {
         // received its data in this harness.
         ImageComposeScene(1440, 1500, Density(1f)) {
             AppTheme(themeChoice = ThemeChoice.LIGHT) {
-                RevenueScreen(revenue, BillingScope.OFFLINE_BUSINESS_ID, offlineEdition = true, onBack = {})
+                RevenueDashboard(revenue, BillingScope.OFFLINE_BUSINESS_ID, offlineEdition = true, onMessage = {})
             }
         }.use { scene ->
             var img = scene.render(0)

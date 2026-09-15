@@ -49,6 +49,7 @@ class PerTestReleaseTest {
     fun `a finished test is signed and reported while the outsourced one is still out`() = runBlocking {
         val db = freshDb()
         val repo = LabRepository(db, ApiClient.json)
+        runBlocking { com.bnm.lab.staff.StaffRepository(db, ApiClient.json).upsert(com.bnm.lab.staff.Staff(id = "s-path", name = "Dr. P", role = com.bnm.lab.staff.StaffRole.PATHOLOGIST)) }
         repo.upsertTest(glucose("t-cbc", "Blood Count"))
         repo.upsertTest(glucose("t-out", "Vitamin D", fulfillment = "outsourced"))
         val patient = repo.upsertPatient(Patient(id = "p", name = "Partial Patient", sex = "F", ageYears = 40))
@@ -102,7 +103,7 @@ class PerTestReleaseTest {
         assertEquals(LabStatus.ENTERED, status(), "every value in; the slowest test is 'entered'")
         repo.verifyTest(order.id, "t-out", "Tech").getOrThrow()
         assertEquals(LabStatus.VERIFIED, status(), "both tests at least verified")
-        repo.approveTest(order.id, "t-out", "Dr. P").getOrThrow()
+        repo.approveTest(order.id, "t-out", "Dr. P", "s-path").getOrThrow()
         assertEquals(LabStatus.APPROVED, status())
         assertNotNull(repo.orderById(order.id)!!.approvedAt)
         repo.markReported(order.id, listOf("t-out")).getOrThrow()
@@ -117,13 +118,14 @@ class PerTestReleaseTest {
     fun `a partial report prints what is still to follow on the paper`() = runBlocking {
         val db = freshDb()
         val repo = LabRepository(db, ApiClient.json)
+        runBlocking { com.bnm.lab.staff.StaffRepository(db, ApiClient.json).upsert(com.bnm.lab.staff.Staff(id = "s-path", name = "Dr. P", role = com.bnm.lab.staff.StaffRole.PATHOLOGIST)) }
         repo.upsertTest(glucose("t-cbc", "Blood Count"))
         repo.upsertTest(glucose("t-out", "Vitamin D", fulfillment = "outsourced"))
         val patient = repo.upsertPatient(Patient(id = "p", name = "Paper Patient", sex = "F", ageYears = 40))
         val order = repo.createLabOrder(patient.id, testIds = listOf("t-cbc", "t-out")).getOrThrow()
         for (k in listOf("a", "b")) repo.enterResult(order.id, "t-cbc", k, "50").getOrThrow()
         repo.verifyTest(order.id, "t-cbc", "Tech").getOrThrow()
-        repo.approveTest(order.id, "t-cbc", "Dr. P").getOrThrow()
+        repo.approveTest(order.id, "t-cbc", "Dr. P", "s-path").getOrThrow()
         val doc = ReportAssembler(repo, StaffRepository(db, ApiClient.json)).assemble(order.id, "Lab", testIds = setOf("t-cbc"))!!
         val pdf = com.bnm.lab.report.writeLabReportPdf(doc)
         val text = org.apache.pdfbox.pdmodel.PDDocument.load(java.io.File(pdf)).use { org.apache.pdfbox.text.PDFTextStripper().getText(it) }
@@ -139,6 +141,7 @@ class PerTestReleaseTest {
     fun `the whole-order path still works and never overwrites a per-test signature`() = runBlocking {
         val db = freshDb()
         val repo = LabRepository(db, ApiClient.json)
+        runBlocking { com.bnm.lab.staff.StaffRepository(db, ApiClient.json).upsert(com.bnm.lab.staff.Staff(id = "s-path", name = "Dr. P", role = com.bnm.lab.staff.StaffRole.PATHOLOGIST)) }
         repo.upsertTest(glucose("t1", "One")); repo.upsertTest(glucose("t2", "Two"))
         val patient = repo.upsertPatient(Patient(id = "p", name = "Whole", sex = "M", ageYears = 30))
         val order = repo.createLabOrder(patient.id, testIds = listOf("t1", "t2")).getOrThrow()
@@ -151,7 +154,7 @@ class PerTestReleaseTest {
         assertTrue(rows.filter { it.testId == "t1" }.all { it.verifiedBy == "Early Tech" })
         assertTrue(rows.filter { it.testId == "t2" }.all { it.verifiedBy == "Late Tech" })
         assertEquals(LabStatus.VERIFIED, repo.orderById(order.id)!!.status)
-        repo.approveOrder(order.id, "Dr. P").getOrThrow()
+        repo.approveOrder(order.id, "Dr. P", "s-path").getOrThrow()
         repo.markReported(order.id, listOf("t1", "t2")).getOrThrow()
         assertEquals(LabStatus.REPORTED, repo.orderById(order.id)!!.status)
     }

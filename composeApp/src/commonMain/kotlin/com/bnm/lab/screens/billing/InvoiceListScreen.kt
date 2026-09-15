@@ -103,7 +103,8 @@ private fun InvoiceRow(bill: InvoiceBalance, onOpen: (String) -> Unit) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text(inv.displayNumber, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
-                SyncChip(bill.isPendingSync || bill.hasQueuedPayment)
+                // An offline-edition bill never syncs, so it is neither "Synced" nor "Pending".
+                if (!bill.offlineArchive) SyncChip(bill.isPendingSync || bill.hasQueuedPayment)
             }
             Text(inv.resolvedCustomer, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("₹ ${formatDecimal2(inv.total)} · ${bill.label}", style = MaterialTheme.typography.bodyMedium)

@@ -30,7 +30,10 @@ class DashboardQueriesTest {
 
     @Test
     fun openOrders_and_criticalsToday() = runBlocking {
-        val repo = LabRepository(freshDb(), ApiClient.json)
+        val db = freshDb()
+        val repo = LabRepository(db, ApiClient.json)
+        // Approval is a pathologist's: the lab needs one on its staff.
+        runBlocking { com.bnm.lab.staff.StaffRepository(db, ApiClient.json).upsert(com.bnm.lab.staff.Staff(id = "s-path", name = "Dr. P", role = com.bnm.lab.staff.StaffRole.PATHOLOGIST)) }
         repo.upsertTest(
             LabTest(
                 id = "t-dash-glu", code = "XGLU", name = "Dash Glucose",
@@ -70,7 +73,7 @@ class DashboardQueriesTest {
         // Walk o1 to approved — it must STAY open (not yet reported)…
         repo.enterResult(o1.id, "t-dash-glu", "glu", "90").getOrThrow()
         repo.verifyOrder(o1.id, "Tech").getOrThrow()
-        repo.approveOrder(o1.id, "Dr. Path").getOrThrow()
+        repo.approveOrder(o1.id, "Dr. Path", "s-path").getOrThrow()
         open = repo.openOrdersFlow(12).first()
         assertEquals(2, open.size)
 

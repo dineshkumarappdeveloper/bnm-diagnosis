@@ -1,7 +1,6 @@
 package com.bnm.lab
 
 import com.bnm.lab.revenue.RevenueRepository
-import com.bnm.lab.screens.lab.RevenueScreen
 import com.bnm.lab.diagnostics.AppLog
 import com.bnm.lab.diagnostics.DiagnosticsContext
 import com.bnm.lab.diagnostics.ReportProblemDialog
@@ -87,7 +86,6 @@ import com.bnm.lab.staff.LocalStaffRepository
 import com.bnm.lab.staff.LocalStaffSession
 import com.bnm.lab.staff.StaffRepository
 import com.bnm.lab.staff.StaffSession
-import com.bnm.lab.screens.main.BillsScreen
 import com.bnm.lab.ui.theme.AppTheme
 import com.bnm.lab.ui.theme.ThemeManager
 import kotlinx.coroutines.delay
@@ -142,6 +140,15 @@ fun App() {
     // restarted seat comes back to the sign-in grid. ──
     val staffRepo = remember { StaffRepository(database, ApiClient.json) }
     val staffSession = remember { StaffSession() }
+    // Keep the signed-in person's rights current. A role or pathologist tick changed
+    // on another seat arrives by sync; without this the approve button kept
+    // showing (or hiding) from the stale sign-in copy until the next sign-in.
+    LaunchedEffect(staffRepo, staffSession) {
+        staffRepo.listAllFlow().collect { all ->
+            val id = staffSession.current.value?.id ?: return@collect
+            all.firstOrNull { it.id == id }?.let { staffSession.refresh(it) }
+        }
+    }
     val licenseState by licenseManager.state.collectAsState()
     LaunchedEffect(licenseState.licensed, licenseState.lapsed, licenseState.blocked, licenseState.edition, licenseState.expiresAt) {
         AppLog.i("Licence", "licensed=${licenseState.licensed} lapsed=${licenseState.lapsed} blocked=${licenseState.blocked} " +
@@ -639,7 +646,7 @@ fun App() {
                                     onPatients = { navController.navigate(Screen.Patients.route) },
                                     onReferrers = { navController.navigate(Screen.Referrers.route) },
                                     onCatalog = { navController.navigate(Screen.Catalog.route) },
-                                    onBills = { navController.navigate(Screen.Bills.route) },
+                                    onBills = { navController.navigate(Screen.Bills.createRoute()) },
                                     onSettings = { navController.navigate(Screen.Settings.route) },
                                     onEmrInbox = { navController.navigate(Screen.EmrInbox.route) },
                                     onOpenOrder = { id -> navController.navigate(Screen.LabOrderDetail.createRoute(id)) },
@@ -651,7 +658,7 @@ fun App() {
                                     onSwitchUser = { lockSeat() },
                                     onSignOut = { lockSeat() },
                                     revenue = revenueRepo,
-                                    onRevenue = { navController.navigate(Screen.Revenue.route) },
+                                    onRevenue = { navController.navigate(Screen.Bills.createRoute(com.bnm.lab.navigation.BillsTab.REVENUE)) },
                                 )
                             }
                         }
@@ -713,18 +720,6 @@ fun App() {
                             onBack = { navController.popBackStack() },
                             onOpenInvoice = { id -> navController.navigate(Screen.InvoiceDetail.createRoute(id)) },
                         )
-                    }
-
-                    composable(Screen.Revenue.route) {
-                        GuardedRoute(Screen.Revenue.route, signedInStaff,
-                            onBack = { navController.popBackStack() }) {
-                            RevenueScreen(
-                                revenue = revenueRepo,
-                                businessId = billingBusinessId(),
-                                offlineEdition = licState.isStandalone,
-                                onBack = { navController.popBackStack() },
-                            )
-                        }
                     }
 
                     composable(Screen.Patients.route) {
@@ -830,10 +825,19 @@ fun App() {
                         }
                     }
 
-                    composable(Screen.Bills.route) {
-                        val businessId = billingBusinessId()
-                        BillsScreen(
-                            businessId = businessId,
+                    composable(
+                        route = Screen.Bills.route,
+                        arguments = listOf(navArgument("tab") {
+                            type = NavType.StringType
+                            nullable = true
+                            defaultValue = null
+                        }),
+                    ) { backStack ->
+                        com.bnm.lab.screens.billing.BillsScreen(
+                            businessId = billingBusinessId(),
+                            revenue = revenueRepo,
+                            offlineEdition = licState.isStandalone,
+                            requestedTab = backStack.arguments?.let { NavType.StringType.get(it, "tab") },
                             onBack = { navController.popBackStack() },
                             onOpen = { id -> navController.navigate(Screen.InvoiceDetail.createRoute(id)) },
                         )

@@ -33,7 +33,9 @@ class LabFlowE2ETest {
 
     @Test
     fun fullLabFlow_offline() = runBlocking {
-        val repo = LabRepository(freshDb(), ApiClient.json, accessionSeat = { AccessionSeat.install("e2e-install") })
+        val db = freshDb()
+        val repo = LabRepository(db, ApiClient.json, accessionSeat = { AccessionSeat.install("e2e-install") })
+        runBlocking { com.bnm.lab.staff.StaffRepository(db, ApiClient.json).upsert(com.bnm.lab.staff.Staff(id = "s-path", name = "Dr. Pathologist", role = com.bnm.lab.staff.StaffRole.PATHOLOGIST)) }
 
         // Seeded catalog is substantial and panels expand.
         SeedCatalog.seedIfEmpty(repo)
@@ -76,7 +78,7 @@ class LabFlowE2ETest {
             repo.enterResult(order.id, "t-e2e-glu", "glu", "99").isFailure,
             "entry must lock after verification",
         )
-        repo.approveOrder(order.id, "Dr. Pathologist").getOrThrow()
+        repo.approveOrder(order.id, "Dr. Pathologist", "s-path").getOrThrow()
         assertEquals(LabStatus.APPROVED, repo.orderById(order.id)!!.status)
 
         // Critical flagging on a second order.

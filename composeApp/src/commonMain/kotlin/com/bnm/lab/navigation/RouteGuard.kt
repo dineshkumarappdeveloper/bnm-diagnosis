@@ -46,8 +46,6 @@ object RouteGuard {
         // registration happens on NewOrder, which stays open to everyone.
         Screen.Referrers.route to LabPermission.MONEY,
         Screen.Staff.route to LabPermission.MANAGE_STAFF,
-        // The whole screen is money: takings, collections, dues, commission.
-        Screen.Revenue.route to LabPermission.REVENUE,
     )
 
     fun requirement(route: String?): LabPermission? = REQUIRED[route]

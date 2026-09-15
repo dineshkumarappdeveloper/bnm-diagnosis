@@ -1,5 +1,6 @@
 package com.bnm.lab.screens.staff
 
+import androidx.compose.material3.Switch
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -186,16 +187,20 @@ fun StaffScreen(onBack: () -> Unit) {
         StaffEditDialog(
             existing = editing,
             onDismiss = { creating = false; editing = null },
-            onSave = { name, role, username, credential ->
+            onSave = { name, role, username, alsoPathologist, credential ->
                 val target = editing
                 scope.launch {
+                    // Warn before a save leaves the lab with nobody who can approve:
+                    // every verified order would stop at approval.
+                    val approversBefore = repo.countApprovers()
                     // Profile FIRST, credential second: dropping someone back to
                     // tap-to-enter is refused while they still hold a username, so
                     // the username has to be gone from the row before the clear.
                     val saved = repo.save(
-                        target?.copy(name = name, role = role, username = username)
-                            ?: Staff(id = "", name = name, role = role, username = username)
+                        target?.copy(name = name, role = role, username = username, alsoPathologist = alsoPathologist)
+                            ?: Staff(id = "", name = name, role = role, username = username, alsoPathologist = alsoPathologist)
                     ).getOrElse { message = it.message; return@launch }
+                    val noApproverLeft = approversBefore > 0 && repo.countApprovers() == 0L
                     // A rename is exactly when old rows need their ids filled in.
                     runCatching { labRepo.backfillSignatoryIds(repo.listAll(), StaffRepository.DEFAULT_OWNER_ID) }
 
@@ -206,7 +211,10 @@ fun StaffScreen(onBack: () -> Unit) {
                         is CredentialAction.SetPassword -> repo.setPassword(saved.id, credential.password)
                     }
                     repo.byId(saved.id)?.let { session.refresh(it) }
-                    message = credResult.exceptionOrNull()?.message ?: "${saved.name} saved"
+                    message = credResult.exceptionOrNull()?.message
+                        ?: if (noApproverLeft) "${saved.name} saved — nobody in the lab can approve results now. " +
+                            "Add a pathologist, or mark the owner who is one."
+                        else "${saved.name} saved"
                     creating = false; editing = null
                 }
             },
@@ -242,7 +250,7 @@ private fun StaffRow(
                         color = if (staff.active) MaterialTheme.colorScheme.onSurface
                         else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    RoleChip(staff.role)
+                    RoleChip(staff)
                     if (isSelf) Text("(you)", style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -296,10 +304,11 @@ private sealed interface CredentialAction {
 private fun StaffEditDialog(
     existing: Staff?,
     onDismiss: () -> Unit,
-    onSave: (name: String, role: String, username: String?, credential: CredentialAction) -> Unit,
+    onSave: (name: String, role: String, username: String?, alsoPathologist: Boolean, credential: CredentialAction) -> Unit,
 ) {
     var name by remember { mutableStateOf(existing?.name.orEmpty()) }
     var role by remember { mutableStateOf(existing?.role ?: StaffRole.RECEPTIONIST) }
+    var alsoPathologist by remember { mutableStateOf(existing?.alsoPathologist == true) }
     var username by remember { mutableStateOf(existing?.username.orEmpty()) }
     // UNREADABLE is not an option the owner can pick — it starts as "Tap to
     // enter", so saving unchanged clears the unusable secret and unblocks them.
@@ -343,6 +352,20 @@ private fun StaffEditDialog(
                 }
                 Text(StaffRole.describe(role), style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
+                // Owner only: an owner is not a pathologist by owning the lab, but
+                // one can be — the single-person lab, or a pathologist who owns it.
+                if (role == StaffRole.OWNER) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Also the lab's pathologist", style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium)
+                            Text("Lets this owner approve results and sign reports as the pathologist.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(checked = alsoPathologist, onCheckedChange = { alsoPathologist = it })
+                    }
+                }
 
                 OutlinedTextField(
                     value = username,
@@ -447,7 +470,7 @@ private fun StaffEditDialog(
                         else -> CredentialAction.SetPassword(password)
                     }
                 }
-                onSave(n, role, uname, action)
+                onSave(n, role, uname, role == StaffRole.OWNER && alsoPathologist, action)
             }) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },

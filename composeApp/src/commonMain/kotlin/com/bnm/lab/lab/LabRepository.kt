@@ -1,5 +1,7 @@
 package com.bnm.lab.lab
 
+import com.bnm.lab.sync.toStaff
+import com.bnm.lab.staff.Staff
 import app.cash.sqldelight.coroutines.asFlow
 import app.cash.sqldelight.coroutines.mapToList
 import app.cash.sqldelight.coroutines.mapToOne
@@ -899,6 +901,7 @@ class LabRepository(
     /** Pathologist sign-off: requires `verified` + every result entered. */
     suspend fun approveOrder(orderId: String, by: String, byId: String? = null): Result<Unit> = withContext(Dispatchers.Default) {
         runCatching {
+            val approver = requireApprover(byId)
             val order = oQ.byId(orderId).executeAsOneOrNull()?.toModel() ?: error("Order not found: $orderId")
             require(order.status == LabStatus.VERIFIED) { "Only a verified order can be approved (is ${order.status})" }
             require(resQ.countEmptyForOrder(orderId).executeAsOne() == 0L) {
@@ -906,7 +909,7 @@ class LabRepository(
             }
             val now = nowIso()
             db.transaction {
-                resQ.markApproved(by, now, byId, orderId)
+                resQ.markApproved(approver.name.ifBlank { by }, now, approver.id, orderId)
                 oQ.setStatus(LabStatus.APPROVED, now, orderId)
                 oQ.stampApproved(now, orderId)
             }
@@ -943,6 +946,7 @@ class LabRepository(
     suspend fun approveTest(orderId: String, testId: String, by: String, byId: String? = null): Result<Unit> =
         withContext(Dispatchers.Default) {
             runCatching {
+                val approver = requireApprover(byId)
                 val order = openOrder(orderId)
                 val rows = resQ.resultsForOrderTest(orderId, testId).executeAsList().map { it.toModel() }
                 require(rows.isNotEmpty()) { "No results on ${order.accessionNo} for this test" }
@@ -950,11 +954,30 @@ class LabRepository(
                 require(rows.none { it.approvedAt != null }) { "This test is already approved" }
                 val now = nowIso()
                 db.transaction {
-                    resQ.markApprovedForTest(by, now, byId, orderId, testId)
+                    resQ.markApprovedForTest(approver.name.ifBlank { by }, now, approver.id, orderId, testId)
                     rollupOrderStatus(orderId, now)
                 }
             }
         }
+
+    /**
+     * The person approving, as the lab's own staff table knows them — never the
+     * caller's word for it. Approval is a pathologist's sign-off: a pathologist,
+     * or an owner marked as the lab's pathologist. The approve buttons already
+     * hide from everyone else, but a button is not a rule; this is.
+     *
+     * Only LOCAL approvals come through here. Approvals pulled from the lab's
+     * other seats are applied as they were made, so a report signed on an older
+     * build is not un-signed by this one.
+     */
+    private fun requireApprover(byId: String?): Staff {
+        val id = byId?.takeIf { it.isNotBlank() } ?: error(ONLY_PATHOLOGIST)
+        val row = db.staffQueries.byId(id).executeAsOneOrNull() ?: error(ONLY_PATHOLOGIST)
+        val staff = row.toStaff()
+        require(staff.active && staff.deletedAt == null) { "${staff.name} is retired and can't approve results" }
+        require(staff.canApprove) { ONLY_PATHOLOGIST }
+        return staff
+    }
 
     /**
      * The tests in [testIds] went out on a report: stamp them, roll the order
@@ -1251,6 +1274,9 @@ class LabRepository(
     )
 
     companion object {
+        const val ONLY_PATHOLOGIST = "Only a pathologist can approve results. An owner who is the lab's " +
+            "pathologist can be marked as one in Settings ▸ Staff & roles."
+
         /** What a rescued starter-catalog code becomes, so it stops colliding
          *  with the master catalog's code for the same test. */
         const val RETIRED_SUFFIX = "-OLD"

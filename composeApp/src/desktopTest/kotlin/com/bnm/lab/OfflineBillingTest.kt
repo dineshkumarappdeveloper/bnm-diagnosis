@@ -1,5 +1,6 @@
 package com.bnm.lab
 
+import com.bnm.lab.navigation.BillsTab
 import kotlinx.serialization.json.jsonObject
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import com.bnm.lab.api.ApiClient
@@ -211,15 +212,28 @@ class OfflineBillingTest {
     }
 
     @Test
-    fun `revenue is owner-only, at the route as well as on the tile`() {
+    fun `revenue is owner-only on the shared Bills page`() {
         val owner = Staff(id = "o", name = "Owner", role = StaffRole.OWNER)
         for (role in listOf(StaffRole.PATHOLOGIST, StaffRole.TECHNICIAN, StaffRole.RECEPTIONIST)) {
-            assertFalse(Staff(id = role, name = role, role = role).allows(LabPermission.REVENUE), role)
+            val who = Staff(id = role, name = role, role = role)
+            assertFalse(who.allows(LabPermission.REVENUE), role)
+            // Asking for the revenue tab still lands on Bills, with no tab row.
+            assertEquals(BillsTab.BILLS, BillsTab.resolve("revenue", who), role)
+            assertEquals(listOf(BillsTab.BILLS), BillsTab.visibleTo(who), role)
         }
         assertTrue(owner.allows(LabPermission.REVENUE))
-        assertEquals(LabPermission.REVENUE, RouteGuard.requirement(Screen.Revenue.route),
-            "the route is a deny-list: an unlisted Revenue route would open for everyone")
-        assertFalse(RouteGuard.allows(Screen.Revenue.route, null))
+        assertEquals(BillsTab.REVENUE, BillsTab.resolve("revenue", owner))
+        assertEquals(listOf(BillsTab.BILLS, BillsTab.REVENUE), BillsTab.visibleTo(owner))
+        // An owner who is also the pathologist keeps every owner surface.
+        assertEquals(BillsTab.REVENUE, BillsTab.resolve("revenue", owner.copy(alsoPathologist = true)))
+        // Nobody signed in, an unknown slug, or the bare route pattern: Bills.
+        assertEquals(BillsTab.BILLS, BillsTab.resolve("revenue", null))
+        assertEquals(BillsTab.BILLS, BillsTab.resolve("{tab}", owner))
+        assertEquals(BillsTab.BILLS, BillsTab.resolve(null, owner))
+        // The page itself is open to the desk — people collect payments there.
+        assertEquals(null, RouteGuard.requirement(Screen.Bills.route))
+        assertEquals("bills?tab=revenue", Screen.Bills.createRoute(BillsTab.REVENUE))
+        assertEquals("bills", Screen.Bills.createRoute())
     }
 
     @Test

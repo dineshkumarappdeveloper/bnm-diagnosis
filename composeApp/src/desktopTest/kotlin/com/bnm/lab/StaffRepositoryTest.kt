@@ -35,7 +35,9 @@ class StaffRepositoryTest {
         assertNotNull(seeded, "a fresh install must never be locked out")
         assertEquals(StaffRole.OWNER, seeded.role)
         assertFalse(seeded.hasPin, "the seeded owner must be tap-to-enter")
-        assertTrue(seeded.canApprove)
+        // Owning the lab is not being its pathologist: the seed cannot approve
+        // until someone marks the owner as the pathologist (or adds one).
+        assertFalse(seeded.canApprove)
         assertTrue(seeded.canManageStaff)
         assertEquals(1, repo.listActive().size)
 
@@ -98,7 +100,11 @@ class StaffRepositoryTest {
         val tech = Staff(id = "t", name = "T", role = StaffRole.TECHNICIAN)
         val recep = Staff(id = "r", name = "R", role = StaffRole.RECEPTIONIST)
 
-        assertTrue(owner.canApprove); assertTrue(path.canApprove)
+        assertFalse(owner.canApprove, "an owner is not a pathologist by owning the lab")
+        assertTrue(owner.copy(alsoPathologist = true).canApprove, "…but an owner who is one approves")
+        assertEquals("Owner · Pathologist", owner.copy(alsoPathologist = true).roleLabel)
+        assertTrue(path.canApprove)
+        assertFalse(tech.copy(alsoPathologist = true).canApprove, "the tick means nothing off an owner row")
         assertFalse(tech.canApprove); assertFalse(recep.canApprove)
 
         // canVerify (back since 2026-09-07, and this time CALLED): whose name may

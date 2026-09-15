@@ -1,5 +1,6 @@
 package com.bnm.lab
 
+import com.bnm.lab.lab.LabStatus
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import com.bnm.lab.api.ApiClient
 import com.bnm.lab.db.AppDatabase
@@ -48,6 +49,7 @@ class ReportSignatoryTest {
             id = "s1", name = "S. Kumar", role = StaffRole.TECHNICIAN, pin_hash = "s1-salt-hash",
             active = 1L, created_at = "2026-01-01T00:00:00Z", updated_at = "2026-09-07T00:00:00Z", deleted_at = null,
             username = "skumar", signature_png = png("ink"), qualifications = "DMLT", registration_no = "TN/PMC/1",
+            also_pathologist = 0L,
         )
         val json = ApiClient.json
         val roundTrip = json.decodeFromJsonElement(Staff.serializer(), json.encodeToJsonElement(Staff.serializer(), row.toStaff()))
@@ -56,6 +58,7 @@ class ReportSignatoryTest {
                 id = "s1", name = "S. Kumar", role = StaffRole.TECHNICIAN, pinHash = "s1-salt-hash", active = true,
                 createdAt = "2026-01-01T00:00:00Z", updatedAt = "2026-09-07T00:00:00Z", deletedAt = null,
                 username = "skumar", signaturePng = png("ink"), qualifications = "DMLT", registrationNo = "TN/PMC/1",
+                alsoPathologist = false,
             ),
             roundTrip,
         )
@@ -127,7 +130,13 @@ class ReportSignatoryTest {
         val o1 = repo.createLabOrder(patient.id, testIds = listOf("t-bf")).getOrThrow()
         repo.enterResult(o1.id, "t-bf", "glu", "90").getOrThrow()
         repo.verifyOrder(o1.id, "Lab Owner").getOrThrow()          // name only — the pre-id world
-        repo.approveOrder(o1.id, "Lab Owner").getOrThrow()
+        // The pre-id world approved by name alone (and let any owner approve).
+        // Write that stamp as it was — approveOrder today requires a pathologist id.
+        run {
+            val now = "2026-08-01T10:00:00Z"
+            db.resultsQueries.markApproved("Lab Owner", now, null, o1.id)
+            db.labOrdersQueries.setStatus(LabStatus.APPROVED, now, o1.id)
+        }
         val o2 = repo.createLabOrder(patient.id, testIds = listOf("t-bf")).getOrThrow()
         repo.enterResult(o2.id, "t-bf", "glu", "90").getOrThrow()
         repo.verifyOrder(o2.id, "A. Raj").getOrThrow()

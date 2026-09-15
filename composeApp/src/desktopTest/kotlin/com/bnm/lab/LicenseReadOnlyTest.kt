@@ -114,7 +114,7 @@ class LicenseReadOnlyTest {
     private val readable = listOf(
         Screen.StaffSignIn.route, Screen.LabHome.route, Screen.Patients.route, Screen.LabOrderDetail.route,
         Screen.Bills.route, Screen.InvoiceDetail.route, Screen.Catalog.route, Screen.EmrInbox.route,
-        Screen.Settings.route, Screen.PrintSettings.route, Screen.LicenseDevices.route, Screen.Revenue.route,
+        Screen.Settings.route, Screen.PrintSettings.route, Screen.LicenseDevices.route,
     )
 
     @Test

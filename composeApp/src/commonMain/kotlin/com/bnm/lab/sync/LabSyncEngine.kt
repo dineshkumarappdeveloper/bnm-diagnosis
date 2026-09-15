@@ -21,6 +21,7 @@ import com.bnm.lab.lab.Referrer
 import com.bnm.lab.lab.TestParameter
 import com.bnm.lab.license.LicenseManager
 import com.bnm.lab.staff.Staff
+import com.bnm.lab.staff.StaffRole
 import kotlin.time.Instant
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -363,15 +364,9 @@ class LabSyncEngine(
                 val d = json.decodeFromJsonElement(SettingDoc.serializer(), doc)
                 cQ.putSetting(d.key, d.value, d.updatedAt)
             }
-            E_STAFF -> {
-                val st = json.decodeFromJsonElement(Staff.serializer(), doc)
-                val local = stQ.byId(st.id).executeAsOneOrNull()
-                val incoming = maxOf(ms(st.updatedAt), ms(st.deletedAt ?: row.deletedAt))
-                if (local != null && maxOf(ms(local.updated_at), ms(local.deleted_at)) >= incoming) return
-                stQ.upsert(st.id, st.name, st.role, st.pinHash, if (st.active) 1L else 0L,
-                    st.createdAt, st.updatedAt, st.deletedAt ?: row.deletedAt,
-                    st.username, st.signaturePng, st.qualifications, st.registrationNo)
-            }
+            E_STAFF -> applyPulledStaff(
+                stQ, json.decodeFromJsonElement(Staff.serializer(), doc), row.deletedAt, ::ms,
+            )
             // Catalog rows carry no stamps — server seq order IS the LWW order.
             E_TEST -> {
                 val t = json.decodeFromJsonElement(LabTest.serializer(), doc)
@@ -656,11 +651,37 @@ class LabSyncEngine(
  * reached another, and any staff edit made elsewhere wiped it on the seat that
  * created it. Found by review, 2026-09-07.
  */
+/**
+ * Apply one pulled staff doc: last writer wins on the row's stamps, whole row.
+ *
+ * A doc from a seat that predates the pathologist tick has no such key — keep
+ * what this seat holds rather than read "absent" as "not a pathologist", which
+ * would silently strip an owner's right to approve when an older seat edits
+ * their PIN or name. Top-level so a test can drive it.
+ */
+internal fun applyPulledStaff(
+    stQ: com.bnm.lab.db.StaffQueries,
+    st: Staff,
+    rowDeletedAt: String?,
+    ms: (String?) -> Long,
+) {
+    val local = stQ.byId(st.id).executeAsOneOrNull()
+    val incoming = maxOf(ms(st.updatedAt), ms(st.deletedAt ?: rowDeletedAt))
+    if (local != null && maxOf(ms(local.updated_at), ms(local.deleted_at)) >= incoming) return
+    val alsoPathologist = st.role == StaffRole.OWNER &&
+        (st.alsoPathologist ?: (local?.also_pathologist == 1L))
+    stQ.upsert(st.id, st.name, st.role, st.pinHash, if (st.active) 1L else 0L,
+        st.createdAt, st.updatedAt, st.deletedAt ?: rowDeletedAt,
+        st.username, st.signaturePng, st.qualifications, st.registrationNo,
+        if (alsoPathologist) 1L else 0L)
+}
+
 internal fun com.bnm.lab.db.Staff.toStaff(): Staff = Staff(
     id = id, name = name, role = role, pinHash = pin_hash, active = active == 1L,
     createdAt = created_at, updatedAt = updated_at, deletedAt = deleted_at,
     username = username, signaturePng = signature_png,
     qualifications = qualifications, registrationNo = registration_no,
+    alsoPathologist = also_pathologist == 1L,
 )
 
 // ── Order apply guard (file level so the test can pin it) ────────────────────
