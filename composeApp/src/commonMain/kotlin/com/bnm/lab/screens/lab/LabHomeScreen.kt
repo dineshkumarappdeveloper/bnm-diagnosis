@@ -77,6 +77,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.bnm.lab.backup.BackupController
 import com.bnm.lab.chat.LocalBillingRepository
 import com.bnm.lab.lab.CommissionRollup
 import com.bnm.lab.lab.CriticalResult
@@ -87,6 +88,7 @@ import com.bnm.lab.revenue.RevenueRange
 import com.bnm.lab.revenue.RevenueReport
 import com.bnm.lab.revenue.RevenueRepository
 import com.bnm.lab.revenue.inr
+import com.bnm.lab.screens.backup.BackupStatusChip
 import com.bnm.lab.staff.LabPermission
 import com.bnm.lab.staff.Staff
 import com.bnm.lab.staff.allows
@@ -196,6 +198,10 @@ fun LabHomeScreen(
     revenue: RevenueRepository? = null,
     /** Opens the revenue dashboard (owner-only route). */
     onRevenue: () -> Unit = {},
+    /** Backup pendrive (offline edition, desktop): the header chip. Null hides it. */
+    backupController: BackupController? = null,
+    /** Chip tap → the Backup page. */
+    onBackup: () -> Unit = {},
 ) {
     val repo = LocalLabRepository.current
     // A lab that has just been moved between editions is told once, in plain
@@ -226,6 +232,8 @@ fun LabHomeScreen(
     val emrPending by remember(repo) { repo.emrPendingCountFlow() }.collectAsState(0L)
     val criticals by remember(repo) { repo.criticalsTodayFlow(6) }.collectAsState(emptyList())
     val syncState = if (labSync != null) labSync.state.collectAsState().value else null
+    // Same nullable-collect shape as syncState: no engine, no chip.
+    val backupStatus = if (backupController != null) backupController.status.collectAsState().value else null
 
     // The worklist IS the home's main panel: one selected tab, fully reactive.
     // "Open" rides openOrdersFlow (uncapped — the panel scrolls internally);
@@ -301,6 +309,10 @@ fun LabHomeScreen(
                         }
                     },
                     actions = {
+                        if (backupStatus != null) BackupStatusChip(
+                            status = backupStatus, onClick = onBackup, compact = true,
+                            modifier = Modifier.padding(end = 8.dp),
+                        )
                         StaffHeaderChip(
                             staff = signedInStaff,
                             onSwitchUser = onSwitchUser,
@@ -333,6 +345,7 @@ fun LabHomeScreen(
                                 Text(todayLabel(), style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 LicenseModeChip(licenseMode)
+                                if (backupStatus != null) BackupStatusChip(status = backupStatus, onClick = onBackup)
                             }
                         }
                         StaffHeaderChip(

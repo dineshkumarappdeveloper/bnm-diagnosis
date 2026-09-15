@@ -33,6 +33,7 @@ import androidx.compose.material.icons.outlined.People
 import androidx.compose.material.icons.outlined.Percent
 import androidx.compose.material.icons.outlined.Print
 import androidx.compose.material.icons.outlined.QrCodeScanner
+import androidx.compose.material.icons.outlined.Usb
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -65,6 +66,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.bnm.lab.api.BillingApi
+import com.bnm.lab.backup.BackupController
+import com.bnm.lab.backup.BackupCopy
+import com.bnm.lab.backup.BackupStatus
 import com.bnm.lab.billing.BillingScope
 import com.bnm.lab.auth.AuthRepository
 import com.bnm.lab.billing.BillingPrefs
@@ -74,8 +78,10 @@ import com.bnm.lab.screens.staff.signatureSummary
 import com.bnm.lab.chat.LocalBillingRepository
 import com.bnm.lab.chat.LocalSyncEngine
 import com.bnm.lab.chat.currentFy
+import com.bnm.lab.screens.backup.nowMs
 import com.bnm.lab.staff.LocalStaffSession
 import com.bnm.lab.sync.LabSyncEngine
+import com.bnm.lab.ui.theme.AppTheme
 import com.bnm.lab.update.AppVersionPanel
 import kotlinx.coroutines.launch
 
@@ -124,6 +130,10 @@ fun BillingSettingsScreen(
     onOpenInstruments: (() -> Unit)? = null,
     /** Live one-liner for the Instruments row ("2 listening", "a listener is down"). */
     instrumentsSummary: String? = null,
+    /** Backup pendrive (offline edition, desktop only): renders the row when provided. */
+    backupController: BackupController? = null,
+    /** Opens the Backup page. */
+    onOpenBackup: () -> Unit = {},
 ) {
     val repo = LocalBillingRepository.current
     val scope = rememberCoroutineScope()
@@ -270,6 +280,11 @@ fun BillingSettingsScreen(
                         // Self-contained: the row, its state and its dialog share
                         // one collectAsState rather than hoisting a nullable flow.
                         LabSyncRow(labSync)
+                        if (backupController != null || !offlineBilling) RowDivider()
+                    }
+                    if (backupController != null) {
+                        // Same shape as the sync row: the live status is the subtitle.
+                        BackupRow(backupController, onOpenBackup)
                         if (!offlineBilling) RowDivider()
                     }
                     if (!offlineBilling) SettingsRow(
@@ -566,6 +581,28 @@ private fun LabSyncRow(labSync: LabSyncEngine) {
             dismissButton = { TextButton(onClick = { showDialog = false }) { Text("Close") } },
         )
     }
+}
+
+/** Backup pendrive: the row's subtitle IS the live status; tap → the Backup page. */
+@Composable
+private fun BackupRow(controller: BackupController, onOpen: () -> Unit) {
+    val status by controller.status.collectAsState()
+    SettingsRow(
+        icon = Icons.Outlined.Usb,
+        tint = MaterialTheme.colorScheme.tertiary,
+        title = BackupCopy.FEATURE,
+        subtitle = BackupCopy.rowSubtitle(status, nowMs()),
+        subtitleMaxLines = 2,
+        subtitleColor = when (BackupCopy.tone(status.phase)) {
+            BackupCopy.Tone.BAD -> MaterialTheme.colorScheme.error
+            BackupCopy.Tone.WARN -> AppTheme.colors.warning
+            else -> null
+        },
+        onClick = onOpen,
+        trailing = if (status.phase == BackupStatus.Phase.WORKING) {
+            { CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) }
+        } else null,
+    )
 }
 
 /** The profile block: which lab, who is at the keyboard, which counter. */
