@@ -1,0 +1,26 @@
+{
+  "name": "bnm-lab-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BNM Lab remote-support relay: a Cloudflare Worker + Durable Objects that pairs one lab connection with one support connection per session and forwards frames verbatim.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "mint-test-jwt": "node scripts/mint-test-jwt.mjs",
+    "gen-test-keypair": "node scripts/gen-test-keypair.mjs",
+    "deploy": "wrangler deploy"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@cloudflare/workers-types": "5.20260815.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11",
+    "wrangler": "4.124.0"
+  }
+}
