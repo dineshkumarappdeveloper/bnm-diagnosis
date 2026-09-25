@@ -14,7 +14,6 @@ import com.bnm.lab.lab.LabRepository
 import com.bnm.lab.lab.LabStatus
 import com.bnm.lab.lab.LabTest
 import io.ktor.network.selector.SelectorManager
-import io.ktor.network.sockets.InetSocketAddress
 import io.ktor.network.sockets.aSocket
 import io.ktor.network.sockets.openReadChannel
 import io.ktor.network.sockets.openWriteChannel
@@ -316,7 +315,7 @@ class InstrumentEngine(
                     // client; letting it stamp peerIp would erase the one fact
                     // that says WHICH box is talking — and put "peer=127.0.0.1"
                     // in the support report the lab pastes to BNM.
-                    (socket.remoteAddress as? InetSocketAddress)?.hostname
+                    peerIpOf(socket.remoteAddress)
                         ?.takeIf { !LinkCheck.isLoopback(it) }
                         ?.let { ip -> update(cfg.id) { it.copy(peerIp = ip) } }
                     scope.launch {
