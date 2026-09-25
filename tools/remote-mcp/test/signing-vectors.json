@@ -1,0 +1,63 @@
+{
+  "public_key_spki_b64": "MCowBQYDK2VwAyEAKRprPO/KtAKrrHADx75Xi0ZZzgWaSU7fTaI0wrq9aMA=",
+  "vectors": [
+    {
+      "name": "session_info",
+      "session_id": "4b0e6c2a-9d1f-4c3e-8a7b-2f5d6e1c9a01",
+      "id": 7,
+      "method": "tools/call",
+      "ts_ms": 1790000000000,
+      "nonce": "0123456789abcdef0123456789abcdef",
+      "params": {
+        "name": "session.info",
+        "arguments": {}
+      },
+      "payload": "bnm-lab-support-v1\n4b0e6c2a-9d1f-4c3e-8a7b-2f5d6e1c9a01\n7\ntools/call\n1790000000000\n0123456789abcdef0123456789abcdef\n{\"arguments\":{},\"name\":\"session.info\"}",
+      "payload_sha256": "0ee77fa82012ae1011fd54b29e443c72daeae750a50dfb464a66edc2df421a22",
+      "sig_b64": "CM7Y+1p1JbxJr/k99ckeN0zGQn6vjEOeEhwxHK/KVgkEOpJmRVqiSaJThxto1oQkTFMNYLZyQk7SP2wn+XXIDg=="
+    },
+    {
+      "name": "instruments_log_unsorted_args",
+      "session_id": "4b0e6c2a-9d1f-4c3e-8a7b-2f5d6e1c9a01",
+      "id": "req-42",
+      "method": "tools/call",
+      "ts_ms": 1790000123456,
+      "nonce": "fedcba9876543210fedcba9876543210",
+      "params": {
+        "name": "instruments.log",
+        "arguments": {
+          "limit": 50,
+          "include_raw": false,
+          "instrument_id": "inst-01"
+        }
+      },
+      "payload": "bnm-lab-support-v1\n4b0e6c2a-9d1f-4c3e-8a7b-2f5d6e1c9a01\nreq-42\ntools/call\n1790000123456\nfedcba9876543210fedcba9876543210\n{\"arguments\":{\"include_raw\":false,\"instrument_id\":\"inst-01\",\"limit\":50},\"name\":\"instruments.log\"}",
+      "payload_sha256": "e10d5cbc59147f5bf6c364e87c477c489e7f89cdd94cf813032d727b898bf510",
+      "sig_b64": "n27cG7lN8/+qSgt9+m4pXNcXsiw5vSii7Txs3cQ+PyVNmUFjOYtnudKFkR8MVycvPbr41nv46pSAapk6spIkCQ=="
+    },
+    {
+      "name": "set_config_nested",
+      "session_id": "c9a2f7e1-1b3d-4e5f-9a8b-7c6d5e4f3a21",
+      "id": 3,
+      "method": "tools/call",
+      "ts_ms": 1790000999999,
+      "nonce": "00000000000000000000000000000001",
+      "params": {
+        "name": "instruments.set_config",
+        "arguments": {
+          "id": "inst-01",
+          "name": "Mispa Count X",
+          "driver_key": "mispa_count_x",
+          "transport": "serial",
+          "serial_port": "COM3",
+          "baud": 9600,
+          "enabled": true,
+          "param_map_json": "{\"WBC\":\"wbc\"}"
+        }
+      },
+      "payload": "bnm-lab-support-v1\nc9a2f7e1-1b3d-4e5f-9a8b-7c6d5e4f3a21\n3\ntools/call\n1790000999999\n00000000000000000000000000000001\n{\"arguments\":{\"baud\":9600,\"driver_key\":\"mispa_count_x\",\"enabled\":true,\"id\":\"inst-01\",\"name\":\"Mispa Count X\",\"param_map_json\":\"{\\\"WBC\\\":\\\"wbc\\\"}\",\"serial_port\":\"COM3\",\"transport\":\"serial\"},\"name\":\"instruments.set_config\"}",
+      "payload_sha256": "94f44c10df7540c05ae21738d30ee78fa7d817a1de671741f49f8ed998739986",
+      "sig_b64": "WEUeiTaZ/BsmCkcB13uK9ol34wG6B9ELWS4Pb0gJXW7tFMYAKR16OLTmBxCA6OWVajA3Tq0NLZ/VPIEu89zMBA=="
+    }
+  ]
+}

@@ -27,10 +27,10 @@ object RemoteSupportKeys {
      * │  SPKI here, and `isDevKey` turns false (lab.overview reports it).     │
      * └──────────────────────────────────────────────────────────────────────┘
      */
-    const val SUPPORT_PUBLIC_KEY_SPKI_B64 = "MCowBQYDK2VwAyEAu+v3Zk5RgmE3hzUUv9JtFVbakdYD86+3ZqpFnXi3+S4="
+    const val SUPPORT_PUBLIC_KEY_SPKI_B64 = "MCowBQYDK2VwAyEAKRprPO/KtAKrrHADx75Xi0ZZzgWaSU7fTaI0wrq9aMA="
 
     /** The committed dev key (tools/remote-mcp/test/dev-support.pub), kept to detect a build that still trusts it. */
-    const val DEV_PUBLIC_KEY_SPKI_B64 = "MCowBQYDK2VwAyEAu+v3Zk5RgmE3hzUUv9JtFVbakdYD86+3ZqpFnXi3+S4="
+    const val DEV_PUBLIC_KEY_SPKI_B64 = "MCowBQYDK2VwAyEAKRprPO/KtAKrrHADx75Xi0ZZzgWaSU7fTaI0wrq9aMA="
 
     /** True while the app still trusts the committed dev key — surfaced as `support_key: dev` in `lab.overview`. */
     val isDevKey: Boolean get() = SUPPORT_PUBLIC_KEY_SPKI_B64 == DEV_PUBLIC_KEY_SPKI_B64
