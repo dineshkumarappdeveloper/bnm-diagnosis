@@ -120,6 +120,13 @@ kotlin {
         commonTest.dependencies {
             implementation(libs.kotlin.test)
         }
+        // The analyzer simulator, so the real drivers can be tested against the
+        // frames that tool actually emits (AnalyzerSimFidelityTest) — the only
+        // thing that keeps the simulator from drifting away from the parsers.
+        // Test-only: nothing in the shipped app depends on it.
+        val desktopTest by getting {
+            dependencies { implementation(project(":analyzer-sim")) }
+        }
     }
 }
 
