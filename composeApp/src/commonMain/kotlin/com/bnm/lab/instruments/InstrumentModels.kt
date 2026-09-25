@@ -24,6 +24,14 @@ data class InstrumentConfig(
     val paramMapJson: String? = null,
     val createdAt: String = "",
     val updatedAt: String = "",
+    /**
+     * Set when BNM remote support changed the driver or the param map. While
+     * true every frame from this analyzer is queued for manual claim instead of
+     * applied — a mapping typed from the office has to be checked against one
+     * known sample at the bench first. Cleared by "Verified" on the
+     * Instruments screen (any signed-in staff).
+     */
+    val verifyPending: Boolean = false,
 )
 
 object InstrumentTransport {
@@ -71,11 +79,35 @@ val INSTRUMENT_DRIVERS = listOf(
 
 fun driverFor(key: String): InstrumentDriver? = INSTRUMENT_DRIVERS.firstOrNull { it.key == key }
 
-/** Live listener state for one configured instrument, keyed by instrument id. */
+/**
+ * Live listener state for one configured instrument, keyed by instrument id.
+ *
+ * The counters answer the "is anything arriving at all?" question a support
+ * engineer asks first: bytes prove the cable, frames prove the framing, parsed
+ * proves the driver, applied/unmatched prove the accession match. They live for
+ * the app's lifetime (a listener restart keeps them) and reset with the app.
+ */
 data class InstrumentStatus(
     val state: String,                  // 'listening' | 'error' | 'off'
     val detail: String? = null,
+    /** Moves only on a parsed RESULT frame. */
     val lastFrameAt: String? = null,
+    val bytesIn: Long = 0L,
+    /** Complete protocol frames pulled out of the byte stream. */
+    val framesIn: Long = 0L,
+    /** Frames the driver turned into a result. */
+    val framesParsed: Long = 0L,
+    val framesApplied: Long = 0L,
+    val framesUnmatched: Long = 0L,
+    /** Frames dropped: not understood by the driver, QC runs, non-result messages. */
+    val framesIgnored: Long = 0L,
+    val acksSent: Long = 0L,
+    val lastErrorAt: String? = null,
+    val lastError: String? = null,
+    /** Address of the analyzer that last connected (TCP transport only). */
+    val peerIp: String? = null,
+    /** When the port/socket was actually opened (null while not listening). */
+    val boundAt: String? = null,
 )
 
 /**
