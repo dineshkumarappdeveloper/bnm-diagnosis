@@ -513,13 +513,11 @@ fun App() {
                 // drop the in-memory session (lab data untouched) and go back to
                 // the sign-in grid with nothing left on the back stack.
                 val uiScope = rememberCoroutineScope()
-                fun lockSeat(explicit: Boolean = false) {
-                    // The owner signing out ends the support session they are
-                    // answerable for. The idle auto-lock does not: the engineer
-                    // may be mid-repair while the bench is quiet, and End on the
-                    // banner is always one click away.
-                    if (explicit && remoteSupport != null && remoteSupport.status.value.isActive &&
-                        staffSession.signedIn?.role == StaffRole.OWNER
+                fun lockSeat(signOut: Boolean = false) {
+                    // Only the owner's Sign out ends the support session they are
+                    // answerable for — see seatExitEndsSupport.
+                    if (remoteSupport != null &&
+                        seatExitEndsSupport(signOut, remoteSupport.status.value.isActive, staffSession.signedIn?.role)
                     ) {
                         uiScope.launch { remoteSupport.end("owner signed out") }
                     }
@@ -716,8 +714,8 @@ fun App() {
                                     businessId = businessId,
                                     labSync = labSync,
                                     signedInStaff = signedInStaff,
-                                    onSwitchUser = { lockSeat(explicit = true) },
-                                    onSignOut = { lockSeat(explicit = true) },
+                                    onSwitchUser = { lockSeat() },
+                                    onSignOut = { lockSeat(signOut = true) },
                                     revenue = revenueRepo,
                                     onRevenue = { navController.navigate(Screen.Bills.createRoute(com.bnm.lab.navigation.BillsTab.REVENUE)) },
                                 )
@@ -997,6 +995,17 @@ fun App() {
 
 /** How often the auto-lock poll wakes up to check the idle stamp (P4). */
 private const val AUTO_LOCK_POLL_MS = 30_000L
+
+/**
+ * Does leaving the seat end a running support session? Only the owner's
+ * explicit **Sign out** does. "Switch user" hands the bench to a technician
+ * mid-repair — RUNBOOK §3.7 asks for exactly that, so the lab can run one
+ * known sample and press Verified while the engineer watches — and the idle
+ * auto-lock fires while the bench is quiet. Neither may close the engineer's
+ * connection; End on the banner stays one click away for the owner.
+ */
+internal fun seatExitEndsSupport(signOut: Boolean, supportActive: Boolean, role: String?): Boolean =
+    signOut && supportActive && role == StaffRole.OWNER
 
 @OptIn(ExperimentalUuidApi::class)
 private fun uuid4(): String = Uuid.random().toString()
