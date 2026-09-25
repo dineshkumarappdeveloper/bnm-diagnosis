@@ -32,6 +32,12 @@ data class InstrumentConfig(
      * Instruments screen (any signed-in staff).
      */
     val verifyPending: Boolean = false,
+    /**
+     * The analyzer's IP address or hostname, typed by the lab (optional). The
+     * Link check pings it from this PC to separate "cable/IP wrong" from
+     * "analyzer never pressed Send". The listener itself never dials out.
+     */
+    val analyzerHost: String? = null,
 )
 
 object InstrumentTransport {

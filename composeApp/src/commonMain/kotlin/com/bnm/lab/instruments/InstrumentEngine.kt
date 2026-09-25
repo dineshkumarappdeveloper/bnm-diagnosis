@@ -824,6 +824,7 @@ class InstrumentEngine(
                 if (cfg.enabled) 1L else 0L, cfg.paramMapJson,
                 cfg.createdAt.ifBlank { now }, now,
                 if (cfg.verifyPending) 1L else 0L,
+                cfg.analyzerHost?.trim()?.ifBlank { null },
             )
         }
         restart(id)
@@ -924,6 +925,7 @@ class InstrumentEngine(
         enabled = enabled == 1L, paramMapJson = param_map_json,
         createdAt = created_at, updatedAt = updated_at,
         verifyPending = verify_pending == 1L,
+        analyzerHost = analyzer_host,
     )
 
     companion object {
