@@ -24,7 +24,12 @@ CREATE TABLE IF NOT EXISTS instruments (
     enabled INTEGER NOT NULL DEFAULT 1,
     param_map_json TEXT,                 -- {"GRAN%":"neut_pct", ...} explicit overrides
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- 1 after BNM remote support changed the driver or the param map: results
+    -- from this analyzer go to the claim queue until someone at the bench checks
+    -- one known sample and presses "Verified" on the Instruments screen.
+    -- Appended LAST (SELECT * maps positionally) + AppDatabaseFactory.addColumn.
+    verify_pending INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS instrument_log (
@@ -72,11 +77,15 @@ instrumentById:
 SELECT * FROM instruments WHERE id = ?;
 
 upsertInstrument:
-INSERT OR REPLACE INTO instruments(id, name, driver_key, transport, serial_port, baud, tcp_port, enabled, param_map_json, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+INSERT OR REPLACE INTO instruments(id, name, driver_key, transport, serial_port, baud, tcp_port, enabled, param_map_json, created_at, updated_at, verify_pending)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 deleteInstrument:
 DELETE FROM instruments WHERE id = ?;
+
+-- Remote support sets it (driver/param map changed); the bench clears it.
+setVerifyPending:
+UPDATE instruments SET verify_pending = ?, updated_at = ? WHERE id = ?;
 
 -- ── traffic log ──
 

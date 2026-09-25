@@ -100,6 +100,12 @@ import com.bnm.lab.screens.settings.PrintSettingsScreen
 import com.bnm.lab.billing.PrintKind
 import com.bnm.lab.print.BtPrinter
 import com.bnm.lab.screens.billing.BtPrinterPickerPage
+import com.bnm.lab.remote.SqlSupportAuditStore
+import com.bnm.lab.remote.SupportAuditRow
+import com.bnm.lab.remote.platformRemoteSupportController
+import com.bnm.lab.remote.remoteToolHost
+import kotlin.uuid.ExperimentalUuidApi
+import kotlin.uuid.Uuid
 
 @Composable
 fun App() {
@@ -278,6 +284,18 @@ fun App() {
         }
     }
     LaunchedEffect(Unit) { instrumentEngine.start() }
+
+    // ── Remote support: the audit trail (support history) and the tool host
+    // attach to the session engine once the database and the analyzer engine
+    // exist. Nothing is reachable until the OWNER starts a session. ──
+    val supportAudit = remember { SqlSupportAuditStore(database) }
+    val remoteSupport = remember { platformRemoteSupportController() }
+    LaunchedEffect(Unit) {
+        remoteSupport?.let { rs ->
+            rs.attachAuditStore(supportAudit)
+            rs.attachToolHost(remoteToolHost(database, instrumentEngine, labRepo, licenseManager, controller = rs))
+        }
+    }
     // A tenant switch stops the listeners before wiping (ActivationScreen's
     // onBeforeTenantWipe); bring them back once a (new) licence is in place.
     // Keyed on the licence identity, not every state emission — heartbeats
@@ -913,6 +931,17 @@ fun App() {
                         InstrumentsScreen(
                             engine = instrumentEngine,
                             onBack = { navController.popBackStack() },
+                            onVerified = { inst ->
+                                // Support history row: the bench confirmed the settings support changed.
+                                runCatching {
+                                    supportAudit.append(SupportAuditRow(
+                                        id = uuid4(), sessionId = "", atMs = kotlin.time.Clock.System.now().toEpochMilliseconds(),
+                                        tool = "instruments.verified", summary = "${inst.name} verified at the bench",
+                                        outcome = SupportAuditRow.Outcome.OK, ms = 0L,
+                                        startedBy = signedInStaff?.id ?: "",
+                                    ))
+                                }.logFailure("RemoteSupport", "verified audit row")
+                            },
                         )
                     }
                 }
@@ -923,6 +952,9 @@ fun App() {
 
 /** How often the auto-lock poll wakes up to check the idle stamp (P4). */
 private const val AUTO_LOCK_POLL_MS = 30_000L
+
+@OptIn(ExperimentalUuidApi::class)
+private fun uuid4(): String = Uuid.random().toString()
 
 /** How often the licence term is re-read while the app is open. */
 private const val LICENCE_RECHECK_MS = 60_000L
