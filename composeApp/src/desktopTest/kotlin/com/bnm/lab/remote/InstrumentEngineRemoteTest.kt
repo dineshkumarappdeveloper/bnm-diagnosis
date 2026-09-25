@@ -188,6 +188,34 @@ class InstrumentEngineRemoteTest {
     }
 
     @Test
+    fun `a frame draining after the port reported a fault leaves the fault in place`() = runBlocking<Unit> {
+        val b = Bench()
+        val port = freePort()
+        val blocker = ServerSocket(port)
+        try {
+            val order = b.newOrder()
+            // A listener in `error` (the serial "cable pulled" case has the same
+            // shape: the last chunk drains after jSerialComm reported the fault).
+            val id = b.engine.saveInstrument(InstrumentConfig(id = "", name = "Unplugged", driver = "mindray_hl7",
+                transport = InstrumentTransport.TCP, tcpPort = port))
+            waitFor("bind failure noticed") { b.engine.status.value[id]?.state == "error" }
+            val cfg = b.engine.instrumentById(id)!!
+
+            b.send(cfg, oru(order.accessionNo))
+            val st = b.status(cfg)
+            assertEquals("error", st.state, "ingest stamps lastFrameAt; it never flips the state")
+            assertNotNull(st.lastFrameAt)
+            assertEquals(1L, st.framesParsed)
+            assertEquals(1L, st.framesApplied)
+            assertNull(st.boundAt)
+            // …so the self-heal loop still sees it and brings it back once the port is free.
+            blocker.close()
+            b.engine.healOnce()
+            waitFor("healed") { b.engine.status.value[id]?.let { it.state == "listening" && it.boundAt != null } == true }
+        } finally { runCatching { blocker.close() }; b.close() }
+    }
+
+    @Test
     fun `a launcher never writes over the verdict of the job it just started`() = runBlocking<Unit> {
         // On an immediate dispatcher the accept loop binds — or fails to — inside
         // `scope.launch`, so every launcher below runs when the real verdict is

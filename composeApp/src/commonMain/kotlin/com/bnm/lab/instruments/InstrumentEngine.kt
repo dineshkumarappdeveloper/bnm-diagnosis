@@ -89,7 +89,8 @@ import kotlin.uuid.Uuid
  * write is a compare-and-set ([MutableStateFlow.update]), never a
  * read-modify-write of `.value`; and a launcher publishes its status BEFORE it
  * starts the job, so the job's real verdict (bound, or bind failed) is never
- * erased by a stale optimistic one.
+ * erased by a stale optimistic one. Result ingest only stamps `lastFrameAt`;
+ * state changes belong to the transports.
  */
 @OptIn(ExperimentalUuidApi::class)
 class InstrumentEngine(
@@ -575,9 +576,10 @@ class InstrumentEngine(
     // ── ingestion (Mispa Count X) ──
 
     private suspend fun ingestMispa(cfg: InstrumentConfig, frame: MispaCountX.Frame) {
-        update(cfg.id) { it.copy(framesParsed = it.framesParsed + 1) }
-        setStatus(cfg.id, InstrumentStatus("listening",
-            _status.value[cfg.id]?.detail, lastFrameAt = nowIso()))
+        // A stamp, never a transition: the last chunk of a frame can drain
+        // AFTER jSerialComm reported the cable gone, and flipping `error` back
+        // to `listening` here would hide that from the self-heal loop.
+        update(cfg.id) { it.copy(framesParsed = it.framesParsed + 1, lastFrameAt = nowIso()) }
         val stored = StoredInstrumentFrame(
             driver = cfg.driver,
             specimenId = frame.specimenId,
@@ -628,9 +630,7 @@ class InstrumentEngine(
             logRow(cfg, "rx", "QC result acknowledged and ignored (${frame.specimenId ?: "no id"})", excerpt)
             return
         }
-        update(cfg.id) { it.copy(framesParsed = it.framesParsed + 1) }
-        setStatus(cfg.id, InstrumentStatus("listening",
-            _status.value[cfg.id]?.detail, lastFrameAt = nowIso()))
+        update(cfg.id) { it.copy(framesParsed = it.framesParsed + 1, lastFrameAt = nowIso()) }   // a stamp, never a transition (see ingestMispa)
         val stored = StoredInstrumentFrame(
             driver = cfg.driver,
             specimenId = frame.specimenId,
