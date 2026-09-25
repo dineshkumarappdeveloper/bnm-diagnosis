@@ -15,6 +15,20 @@ Until now none of that could be reproduced anywhere but at a client's bench.
 
 ---
 
+## The easy way: the window
+
+Most people should not be reading this page. There is a packaged desktop app —
+same simulator, same core, no terminal and no flags — in
+[`../analyzer-sim-ui`](../analyzer-sim-ui/README.md). Install it, pick the
+analyzer, type the lab PC's address, press Send, read the transcript. It also
+tells you what BNM Lab should be showing for whatever you ticked, which is the
+part a command line cannot do.
+
+This page is for the command line: scripting a run, a machine with no display,
+or reaching for a flag the window does not expose (`--dry-run`, `--verbose`).
+
+---
+
 ## Run it
 
 ```bash
@@ -317,7 +331,11 @@ A simulator nobody checks drifts, and then an engineer commissions a lab
 against a frame no analyzer would ever send. Three layers stop that:
 
 - `./gradlew :analyzer-sim:test` — frame structure, value consistency, curve
-  shape, the CLI, and what each fault actually puts on the wire.
+  shape, the CLI, and what each fault actually puts on the wire. Including
+  `CliTranscriptParityTest`, which pins a whole dry run's output word for word:
+  the transcript is a user interface — this page tells an engineer which line to
+  look for — so a refactor (the window's [SendListener], for one) must not
+  reword it.
 - `composeApp/src/desktopTest/.../AnalyzerSimFidelityTest.kt` — every profile on
   both analyzers, built by this tool and read back by the **real** drivers
   (`MispaCountX.parse`, `MindrayBc5x.parse`). Values, units, ids, patient
@@ -330,6 +348,10 @@ against a frame no analyzer would ever send. Three layers stop that:
 
 There is also a manual bench for the packaged jar (`AnalyzerSimBench`), opt-in
 via environment variables — see its KDoc.
+
+The window in `../analyzer-sim-ui` is a front end on this module, not a copy of
+it: it builds `Options`, hands them to the same [Sender] and renders the same
+[SendListener] events the CLI prints. Anything you change here reaches both.
 
 The two things most worth knowing if you change this tool:
 
