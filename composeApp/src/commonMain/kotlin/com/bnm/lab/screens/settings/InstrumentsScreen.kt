@@ -121,6 +121,10 @@ fun InstrumentsScreen(
     fun factsFor(inst: InstrumentConfig): LinkFacts = snapshot?.forInstrument(inst) ?: LinkFactsSnapshot.pending(env)
     fun logsFor(inst: InstrumentConfig): LinkLogSummaries = LinkLogSummaries.of(
         log.filter { it.instrument_id == inst.id }.map { LinkLogRow(it.direction, it.summary, it.created_at) })
+    // The queue itself, not the session counter: claiming or discarding a result
+    // removes it here, while framesUnmatched only ever grows (listUnmatched caps
+    // at 50, which is far past the point where the count stops being the news).
+    fun queuedFor(inst: InstrumentConfig): Int = unmatched.count { it.instrument_id == inst.id }
 
     var editing by remember { mutableStateOf<InstrumentConfig?>(null) }
     var claiming by remember { mutableStateOf<String?>(null) }      // instrument_results.id
@@ -167,7 +171,8 @@ fun InstrumentsScreen(
                                 InstrumentRow(
                                     inst = inst,
                                     statusLine = statusLine(statuses[inst.id]),
-                                    verdict = LinkCheck.evaluate(inst, statuses[inst.id], logsFor(inst), factsFor(inst)),
+                                    verdict = LinkCheck.evaluate(inst, statuses[inst.id], logsFor(inst),
+                                        factsFor(inst), queuedFor(inst)),
                                     onClick = { editing = inst },
                                     onToggle = { on ->
                                         scope.launch { engine.saveInstrument(inst.copy(enabled = on)) }
@@ -332,6 +337,7 @@ fun InstrumentsScreen(
                         status = statuses[saved.id],
                         logs = logsFor(saved),
                         facts = factsFor(saved),
+                        queued = queuedFor(saved),
                         environment = env,
                         engine = engine,
                         onCheckAgain = { refreshKey++ },

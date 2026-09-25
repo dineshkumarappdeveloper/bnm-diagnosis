@@ -18,15 +18,15 @@ interface LinkEnvironment {
     /** False when nothing below can be answered on this device. */
     val environmentKnown: Boolean
 
-    /** Non-loopback IPv4 addresses of interfaces that are up. */
-    fun localIpv4(): List<String>
+    /** Non-loopback IPv4 addresses of interfaces that are up, each with its interface name. */
+    fun localIpv4(): List<LocalAddress>
     /** System names of the serial ports present right now (COM3, /dev/tty.usbserial-110). */
     fun serialPorts(): List<String>
     /** Windows: firewall state + whether an inbound allow rule covers [port] or this program. Elsewhere NOT_APPLICABLE. */
     fun firewall(port: Int): FirewallFacts
     /** Same for several ports at once — desktop reads netsh ONCE for all of them. */
     fun firewallFor(ports: Collection<Int>): Map<Int, FirewallFacts> = ports.associateWith { firewall(it) }
-    /** One ping with a ~1 s wait; exit code decides. */
+    /** One ping with a ~1 s wait. Silence is [PingOutcome.NO_ANSWER], never proof the host is down. */
     fun ping(host: String): PingResult
     /** Connect to 127.0.0.1:[port] with a 2 s timeout, send nothing, close. True when the connection was accepted. */
     fun tcpSelfProbe(port: Int): TcpProbeResult
@@ -47,10 +47,10 @@ object UnknownLinkEnvironment : LinkEnvironment {
     override val osName: String = "this device"
     override val isWindows: Boolean = false
     override val environmentKnown: Boolean = false
-    override fun localIpv4(): List<String> = emptyList()
+    override fun localIpv4(): List<LocalAddress> = emptyList()
     override fun serialPorts(): List<String> = emptyList()
     override fun firewall(port: Int): FirewallFacts = FirewallFacts.NOT_APPLICABLE
-    override fun ping(host: String): PingResult = PingResult(false, "not available on this device")
+    override fun ping(host: String): PingResult = PingResult.noAnswer("not available on this device")
     override fun tcpSelfProbe(port: Int): TcpProbeResult = TcpProbeResult(false, "not available on this device")
     override fun probeSerial(portName: String): String? = "Serial ports are only available on the lab PC"
     override fun addFirewallRule(port: Int): FirewallRuleOutcome = FirewallRuleOutcome(false, "Only on the Windows lab PC")

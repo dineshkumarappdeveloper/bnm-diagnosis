@@ -12,6 +12,7 @@ import com.bnm.lab.instruments.LinkFacts
 import com.bnm.lab.instruments.LinkLogRow
 import com.bnm.lab.instruments.LinkLogSummaries
 import com.bnm.lab.instruments.LinkState
+import com.bnm.lab.instruments.LocalAddress
 import com.bnm.lab.instruments.PingResult
 import com.bnm.lab.instruments.SampleFrames
 import kotlin.test.Test
@@ -35,14 +36,16 @@ class LinkCheckTest {
 
     private val listening = InstrumentStatus("listening", "TCP port 5500", boundAt = "2026-09-25T09:00:00Z")
     private val fwOnNoRule = FirewallFacts(applicable = true, known = true, enabled = true, profile = "Private")
-    private val windows = LinkFacts(os = "Windows 11", isWindows = true, localIpv4 = listOf("192.168.1.20"),
+    private fun lan(ip: String, iface: String = "Ethernet") = LocalAddress(ip, iface)
+    private val windows = LinkFacts(os = "Windows 11", isWindows = true, localIpv4 = listOf(lan("192.168.1.20")),
         serialPorts = listOf("COM1", "COM4"), firewall = fwOnNoRule)
 
     private fun row(r: LinkCheckReport, step: String) = r.rows.first { it.step == step }
     private fun logs(vararg rows: LinkLogRow) = LinkLogSummaries.of(rows.toList())
     private fun eval(cfg: InstrumentConfig = tcp, status: InstrumentStatus? = listening,
-                     logs: LinkLogSummaries = LinkLogSummaries(), facts: LinkFacts = windows) =
-        LinkCheck.evaluate(cfg, status, logs, facts)
+                     logs: LinkLogSummaries = LinkLogSummaries(), facts: LinkFacts = windows,
+                     queued: Int? = null) =
+        LinkCheck.evaluate(cfg, status, logs, facts, queued)
 
     // ── the owner's exact case ──
 
@@ -103,13 +106,66 @@ class LinkCheckTest {
     @Test
     fun `address transitions`() {
         assertEquals(LinkState.OK, row(eval(), "address").state)
-        val two = row(eval(facts = windows.copy(localIpv4 = listOf("192.168.1.20", "10.8.0.2"))), "address")
-        assertTrue(two.detail.contains("also 10.8.0.2"), two.detail)
         val none = row(eval(facts = windows.copy(localIpv4 = emptyList())), "address")
         assertEquals(LinkState.BLOCKED, none.state)
         assertEquals("Blocked at: This PC's address", eval(facts = windows.copy(localIpv4 = emptyList())).verdict)
         val phone = row(eval(facts = LinkFacts(os = "Android", isWindows = false, environmentKnown = false)), "address")
         assertEquals(LinkState.UNKNOWN, phone.state)
+    }
+
+    @Test
+    fun `a virtual adapter is never the address the analyzer is told to use`() {
+        // Windows enumerates the Hyper-V switch first on any PC with WSL2 or
+        // Docker Desktop. Naming it would send the lab to key an address the
+        // analyzer can never route to — and the row would stay a confident OK.
+        val hyperV = windows.copy(localIpv4 = listOf(
+            LocalAddress("172.19.240.1", "vEthernet (Default Switch)"),
+            lan("192.168.1.20")))
+        val r = row(eval(facts = hyperV), "address")
+        assertEquals(LinkState.OK, r.state)
+        assertTrue(r.detail.startsWith("192.168.1.20 (also 172.19.240.1)"), r.detail)
+        assertTrue(r.detail.contains("use 192.168.1.20, port 5500"), r.detail)
+        // The same pick feeds the hints that name an address.
+        assertTrue(row(eval(facts = hyperV.copy(firewall = fwOnNoRule.copy(enabled = false))), "connected")
+            .hint!!.contains("192.168.1.20 port 5500"))
+
+        // VirtualBox host-only sits in 192.168/16 — only the interface name tells it apart.
+        val vbox = windows.copy(localIpv4 = listOf(
+            LocalAddress("192.168.56.1", "VirtualBox Host-Only Network"), lan("192.168.1.20")))
+        assertTrue(row(eval(facts = vbox), "address").detail.startsWith("192.168.1.20 (also 192.168.56.1)"))
+
+        // The analyzer's own address settles it outright: same /24 wins.
+        val twoLans = windows.copy(localIpv4 = listOf(lan("10.8.0.2", "Wi-Fi"), lan("192.168.1.20")))
+        val pinned = row(eval(cfg = tcp.copy(analyzerHost = "192.168.1.77"), facts = twoLans), "address")
+        assertTrue(pinned.detail.contains("use 192.168.1.20, port 5500"), pinned.detail)
+
+        // Two equally plausible LAN cards and no analyzer address: name both
+        // rather than assert one, because the pick would be a coin toss.
+        val ambiguous = row(eval(facts = twoLans), "address")
+        assertTrue(ambiguous.detail.contains("use whichever of 10.8.0.2 or 192.168.1.20 is on the analyzer's network"),
+            ambiguous.detail)
+        assertFalse(ambiguous.detail.contains("also"), ambiguous.detail)
+    }
+
+    @Test
+    fun `before the first facts read every PC row says Checking, never a diagnosis`() {
+        // LinkFactsSnapshot.pending() — the state the Instruments screen composes
+        // in while gatherLinkFacts runs. Empty lists there mean "not read yet".
+        val pending = LinkFacts(os = "Windows 11", isWindows = true, factsRead = false)
+        val r = eval(facts = pending)
+        assertEquals(LinkState.UNKNOWN, row(r, "address").state)
+        assertEquals("Checking…", row(r, "address").detail)
+        assertEquals(LinkState.UNKNOWN, row(r, "firewall").state)
+        assertNull(r.blockedAt, "nothing may be blamed before anything was read")
+
+        val serialPending = eval(cfg = serial, facts = pending,
+            status = InstrumentStatus("listening", "COM3 @ 115200", boundAt = "2026-09-25T09:00:00Z"))
+        assertEquals(LinkState.UNKNOWN, row(serialPending, "port_present").state)
+        assertEquals("Checking…", row(serialPending, "port_present").detail)
+        assertNull(serialPending.blockedAt)
+
+        // Once the read finished, an empty list IS an answer again.
+        assertEquals(LinkState.BLOCKED, row(eval(facts = windows.copy(localIpv4 = emptyList())), "address").state)
     }
 
     // ── step 3: firewall ──
@@ -151,6 +207,35 @@ class LinkCheckTest {
     }
 
     @Test
+    fun `an inbound Block rule keeps the row red and never offers Add firewall rule`() {
+        // What a Cancel on the "Windows Security Alert" popup leaves behind.
+        // Adding an allow rule cannot outrank it, so offering that button would
+        // turn the row green while Windows still drops the analyzer's SYN — and
+        // erase the one clue the lab had.
+        val blocked = fwOnNoRule.copy(ruleByPort = "BNM Lab analyzer port 5500", blockedByRule = "BNM Lab")
+        val r = eval(facts = windows.copy(firewall = blocked))
+        val fw = row(r, "firewall")
+        assertEquals(LinkState.BLOCKED, fw.state)
+        assertTrue(fw.detail.contains("\"BNM Lab\" BLOCKS port 5500"), fw.detail)
+        assertNull(fw.action, "Add firewall rule must not be offered — an allow cannot beat a block")
+        assertTrue(fw.hint!!.contains("delete rule name=\"BNM Lab\" dir=in"), fw.hint)
+        assertEquals("Blocked at: Windows Firewall", r.verdict)
+
+        // Bytes already crossed: whatever netsh lists, it is not blocking now.
+        assertEquals(LinkState.OK, row(eval(status = listening.copy(bytesIn = 2048, framesIn = 1),
+            facts = windows.copy(firewall = blocked)), "firewall").state)
+    }
+
+    @Test
+    fun `a rule found while the active profile is unnamed says so on the row`() {
+        val vague = fwOnNoRule.copy(profile = null, ruleByPort = "BNM Lab analyzer port 5500",
+            note = "the active firewall profile is not named, so a rule scoped to another profile could still block")
+        val fw = row(eval(facts = windows.copy(firewall = vague)), "firewall")
+        assertEquals(LinkState.OK, fw.state)
+        assertTrue(fw.detail.contains("could still block"), fw.detail)
+    }
+
+    @Test
     fun `an unreadable firewall stops being a gap once bytes have crossed`() {
         // Un-read (a localised Windows, netsh refused) AND data arriving is an
         // answer, not "not checked" — the verdict must move on to the real step.
@@ -178,21 +263,47 @@ class LinkCheckTest {
         assertEquals("Pinging 192.168.1.77…", row(eval(cfg = withHost), "reachable").detail)
         assertEquals(LinkState.UNKNOWN, row(eval(cfg = withHost), "reachable").state)
 
-        val ok = row(eval(cfg = withHost, facts = windows.copy(ping = PingResult(true, "3 ms"))), "reachable")
+        val ok = row(eval(cfg = withHost, facts = windows.copy(ping = PingResult.replied("3 ms"))), "reachable")
         assertEquals(LinkState.OK, ok.state)
 
-        val fail = row(eval(cfg = withHost, facts = windows.copy(firewall = fwOnNoRule.copy(enabled = false), ping = PingResult(false, "no reply in 1004 ms"))), "reachable")
-        assertEquals(LinkState.BLOCKED, fail.state)
-        assertTrue(fail.hint!!.contains("same network as 192.168.1.20"), fail.hint)
+        val unreachable = row(eval(cfg = withHost, facts = windows.copy(firewall = fwOnNoRule.copy(enabled = false),
+            ping = PingResult.unreachable("destination host unreachable"))), "reachable")
+        assertEquals(LinkState.BLOCKED, unreachable.state)
+        assertTrue(unreachable.hint!!.contains("same network as 192.168.1.20"), unreachable.hint)
         assertEquals("Blocked at: Analyzer reachable from this PC",
-            eval(cfg = withHost, facts = windows.copy(firewall = fwOnNoRule.copy(enabled = false), ping = PingResult(false, "x"))).verdict)
+            eval(cfg = withHost, facts = windows.copy(firewall = fwOnNoRule.copy(enabled = false),
+                ping = PingResult.unreachable("could not find host"))).verdict)
 
         val failButConnected = row(eval(cfg = withHost, status = listening.copy(bytesIn = 10),
-            facts = windows.copy(ping = PingResult(false, "x"))), "reachable")
+            facts = windows.copy(ping = PingResult.noAnswer("x"))), "reachable")
         assertEquals(LinkState.OK, failButConnected.state)
 
         val phone = row(eval(cfg = withHost, facts = LinkFacts(os = "Android", isWindows = false, environmentKnown = false)), "reachable")
         assertEquals(LinkState.UNKNOWN, phone.state)
+    }
+
+    @Test
+    fun `a ping nobody answered is UNKNOWN, never the blocking step`() {
+        // Mindray/Agappe embedded LIS stacks drop ICMP as a matter of course.
+        // This row sits BEFORE "connected", so calling silence BLOCKED would
+        // send the lab to re-crimp a working cable instead of pressing Send —
+        // and entering the optional analyzer IP would make the diagnosis WORSE
+        // than leaving it blank.
+        val withHost = tcp.copy(analyzerHost = "192.168.1.77")
+        val facts = windows.copy(firewall = fwOnNoRule.copy(ruleByPort = "BNM Lab analyzer port 5500"),
+            ping = PingResult.noAnswer("no reply in 1004 ms"))
+        val r = eval(cfg = withHost, facts = facts)
+        val silent = row(r, "reachable")
+        assertEquals(LinkState.UNKNOWN, silent.state)
+        assertTrue(silent.detail.contains("many analyzers ignore ping, so this proves nothing"), silent.detail)
+        assertFalse(silent.hint!!.contains("cable"), silent.hint)
+        // The verdict must name the step that really is next, and an optional
+        // ping that said nothing must not show up as "not checked".
+        assertEquals("Waiting for the analyzer to send", r.verdict)
+        assertEquals(LinkState.WAITING, r.verdictState)
+        assertNull(r.blockedAt)
+        // Leaving the address blank gives the same verdict — entering it can only help.
+        assertEquals(r.verdict, eval(facts = facts.copy(ping = null)).verdict)
     }
 
     // ── step 5: connected ──
@@ -264,6 +375,57 @@ class LinkCheckTest {
         assertFalse(m.detail.contains("S12345"))
         assertTrue(m.hint!!.contains("accession number"), m.hint)
         assertEquals("Blocked at: Result matched to an order", r.verdict)
+    }
+
+    @Test
+    fun `a claimed result clears the step - the queue decides, not the session counter`() {
+        // The lab did exactly what the hint told them: pressed Assign, typed the
+        // accession, it applied. claimUnmatched applies the frame directly, so
+        // framesApplied stays 0 and framesUnmatched stays 1 forever — reading
+        // those counters would leave the checklist blocked for the whole session
+        // and the list-row dot red, after the fault was fixed.
+        val st = listening.copy(bytesIn = 900, framesIn = 1, framesParsed = 1, framesUnmatched = 1)
+        val applied = logs(
+            LinkLogRow("info", "Applied 18/20 params to ACC-S1-00042 · CBC", "2026-09-25T09:09:00Z"),
+            LinkLogRow("info", "Queued for manual claim — no order matches 'S12345'", "2026-09-25T09:07:00Z"))
+
+        val blocked = eval(status = st, logs = logs(
+            LinkLogRow("info", "Queued for manual claim — no order matches 'S12345'", "2026-09-25T09:07:00Z")),
+            queued = 1)
+        assertEquals(LinkState.BLOCKED, row(blocked, "matched").state)
+
+        val cleared = eval(status = st, logs = applied, queued = 0)
+        val m = row(cleared, "matched")
+        assertEquals(LinkState.OK, m.state)
+        assertTrue(m.detail.contains("A***0042"), m.detail)
+        assertNull(m.action)
+        assertFalse(m.detail.contains("waiting for an order"), m.detail)
+        assertEquals("Linked — last result 2026-09-25 09:09, applied to A***0042", cleared.verdict)
+        assertEquals(LinkState.OK, cleared.verdictState)
+        assertNull(cleared.blockedAt)
+
+        // A result queued in an earlier session (parsed counter at 0 after a
+        // restart) and claimed now reads the same way.
+        assertEquals(LinkState.OK, row(eval(status = listening, logs = applied, queued = 0), "matched").state)
+        // And the queue still speaks when it is not empty.
+        assertEquals(LinkState.OK, row(eval(status = st, logs = applied, queued = 2), "matched").state)
+        assertTrue(row(eval(status = st, logs = applied, queued = 2), "matched").detail.endsWith("· 2 waiting for an order"))
+    }
+
+    @Test
+    fun `parsed but nothing filed yet never renders as zero results waiting`() {
+        // routeFrame bumps framesParsed, then queues or applies after a database
+        // round trip. Between the two — or permanently, if that write threw —
+        // the counters read parsed=1 / applied=0 / unmatched=0. "0 results
+        // waiting for an order" in red, blaming the accession, is a lie.
+        val midFlight = listening.copy(bytesIn = 900, framesIn = 1, framesParsed = 1)
+        val m = row(eval(status = midFlight, queued = 0), "matched")
+        assertEquals(LinkState.WAITING, m.state)
+        assertEquals("A result was read but has not been filed yet", m.detail)
+        assertNull(m.action)
+        assertEquals("Waiting for a result", eval(status = midFlight, queued = 0).verdict)
+        // Same shape with no queue count available at all.
+        assertEquals(LinkState.WAITING, row(eval(status = midFlight), "matched").state)
     }
 
     @Test
@@ -354,14 +516,17 @@ class LinkCheckTest {
             lastError = "Frame not understood by mispa_count_x: $$$1\$2\$SPEC12345", lastErrorAt = "2026-09-25T08:00:00Z")
         val logs = logs(LinkLogRow("info", "Applied 20/20 params to ACC-S1-00042 · CBC", "2026-09-25T10:42:07Z"),
             LinkLogRow("rx", "Result frame · specimen ACC-S1-00042 · 20 params · 3 histograms", "2026-09-25T10:42:07Z"))
-        val report = eval(cfg = tcp.copy(analyzerHost = "192.168.1.77"), status = st, logs = logs)
-        val text = LinkCheck.reportText(tcp.copy(analyzerHost = "192.168.1.77"), st, logs, windows, report, "1.4.0")
+        val facts = windows.copy(ping = PingResult.replied("3 ms"))
+        val report = eval(cfg = tcp.copy(analyzerHost = "192.168.1.77"), status = st, logs = logs, facts = facts)
+        val text = LinkCheck.reportText(tcp.copy(analyzerHost = "192.168.1.77"), st, logs, facts, report, "1.4.0")
         assertTrue(text.startsWith("BNM Lab 1.4.0 · Analyzer link check · Windows 11"), text)
         assertTrue(text.contains("Verdict: Linked — last result 2026-09-25 10:42, applied to A***0042"), text)
         assertTrue(text.contains("Counters: state=listening"), text)
         assertTrue(text.contains("bytes=4000"), text)
         assertTrue(text.contains("1. [OK] BNM Lab is listening on port 5500"), text)
-        assertTrue(text.contains("PC: ipv4=192.168.1.20 serial=COM1,COM4 firewall=on/Private rulePort=- ruleProgram=-"), text)
+        assertTrue(text.contains("PC: ipv4=192.168.1.20(Ethernet) serial=COM1,COM4 " +
+            "firewall=on/Private rulePort=- ruleProgram=- block=-"), text)
+        assertTrue(text.contains("ping=replied 3 ms"), text)
         assertFalse(text.contains("ACC-S1-00042"), text)
         assertFalse(text.contains("SPEC12345"), text)
         assertTrue(text.contains("A***0042"), text)

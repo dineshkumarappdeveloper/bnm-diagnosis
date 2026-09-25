@@ -312,9 +312,13 @@ class InstrumentEngine(
                 logRow(cfg, "info", "Listening on TCP port $port", null)
                 while (currentCoroutineContext().isActive) {
                     val socket = server.accept()
-                    (socket.remoteAddress as? InetSocketAddress)?.hostname?.let { ip ->
-                        update(cfg.id) { it.copy(peerIp = ip) }
-                    }
+                    // "Test connection" dials 127.0.0.1 and is accepted like any
+                    // client; letting it stamp peerIp would erase the one fact
+                    // that says WHICH box is talking — and put "peer=127.0.0.1"
+                    // in the support report the lab pastes to BNM.
+                    (socket.remoteAddress as? InetSocketAddress)?.hostname
+                        ?.takeIf { !LinkCheck.isLoopback(it) }
+                        ?.let { ip -> update(cfg.id) { it.copy(peerIp = ip) } }
                     scope.launch {
                         // One assembler per connection: analyzers open, send, close.
                         // HL7 analyzers wait for an ACK on the same socket, so the

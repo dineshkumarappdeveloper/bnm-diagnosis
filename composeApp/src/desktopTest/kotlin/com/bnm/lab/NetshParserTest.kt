@@ -57,12 +57,13 @@ OK.
 """
 
     private fun rule(name: String, enabled: String = "Yes", dir: String = "In", protocol: String = "TCP",
-                     localPort: String? = "5500", action: String = "Allow", program: String = "Any") = """
+                     localPort: String? = "5500", action: String = "Allow", program: String = "Any",
+                     profiles: String = "Domain,Private,Public") = """
 Rule Name:                            $name
 ----------------------------------------------------------------------
 Enabled:                              $enabled
 Direction:                            $dir
-Profiles:                             Domain,Private,Public
+Profiles:                             $profiles
 Grouping:
 LocalIP:                              Any
 RemoteIP:                             Any
@@ -88,14 +89,14 @@ Action:                               $action
     }
 
     @Test
-    fun `rule present by port - exact, list, range, Any, not by UDP, disabled, outbound or block rules`() {
+    fun `rule present by port - exact, list, range, Any, not by UDP, disabled or outbound rules`() {
         val out = rule("Vendor UDP", protocol = "UDP") + rule("Old disabled", enabled = "No") +
-            rule("Outbound only", dir = "Out") + rule("Blocker", action = "Block") +
-            rule("BNM Lab analyzer port 5500")
+            rule("Outbound only", dir = "Out") + rule("BNM Lab analyzer port 5500")
         val f = NetshParser.facts(5500, exe, profileOn, out)
         assertTrue(f.known); assertEquals(true, f.enabled); assertEquals("Private", f.profile)
         assertEquals("BNM Lab analyzer port 5500", f.ruleByPort)
         assertNull(f.ruleByProgram)
+        assertNull(f.blockedByRule)
         assertTrue(f.hasRule)
 
         assertEquals("List", NetshParser.facts(5501, exe, profileOn, rule("List", localPort = "5500,5501")).ruleByPort)
@@ -120,6 +121,57 @@ Action:                               $action
         assertNull(NetshParser.facts(5500, exe, profileOn, rule("Disabled", enabled = "No", program = exe)).ruleByProgram)
         assertNull(NetshParser.facts(5500, exe, profileOn, rule("Something else", localPort = "80", program = "C:\\x\\other.exe")).ruleByProgram)
         assertNull(NetshParser.facts(5500, null, profileOn, rule("BNM Lab", program = exe, localPort = "1")).ruleByProgram, "no exe path known")
+    }
+
+    @Test
+    fun `an inbound Block rule beats every allow rule and is reported as such`() {
+        // Windows enforces an explicit inbound block over any allow, so an
+        // added allow rule cannot clear it. Parsing the block and then ignoring
+        // it let "Add firewall rule" turn the row green while the SYN was still
+        // being dropped — the exact dead end this check exists to prevent.
+        val f = NetshParser.facts(5500, exe, profileOn, rule("BNM Lab analyzer port 5500") + rule("Blocker", action = "Block"))
+        assertEquals("BNM Lab analyzer port 5500", f.ruleByPort)
+        assertEquals("Blocker", f.blockedByRule)
+        assertFalse(f.hasRule, "a block rule cancels every allow")
+
+        // A Cancel on the Windows Security Alert: a block scoped to the program.
+        val byProgram = NetshParser.facts(5500, exe, profileOn,
+            rule("BNM Lab", action = "Block", protocol = "Any", localPort = null, program = exe))
+        assertEquals("BNM Lab", byProgram.blockedByRule)
+
+        // Outbound and disabled blocks are not enforced on the analyzer's inbound connection.
+        assertNull(NetshParser.facts(5500, exe, profileOn, rule("Out block", action = "Block", dir = "Out")).blockedByRule)
+        assertNull(NetshParser.facts(5500, exe, profileOn, rule("Old block", action = "Block", enabled = "No")).blockedByRule)
+        // Nor is a block on a different port.
+        assertNull(NetshParser.facts(5500, exe, profileOn, rule("RDP block", action = "Block", localPort = "3389")).blockedByRule)
+
+        assertEquals("netsh advfirewall firewall delete rule name=\"BNM Lab\" dir=in",
+            NetshParser.deleteRuleCommand("BNM Lab"))
+    }
+
+    @Test
+    fun `a rule scoped to another profile is not enforced and must not count`() {
+        // Windows scopes the rule it writes to the profile that was active when
+        // the user clicked Allow. Swap the router, get classified Public, and
+        // the Private-only rule stops applying — while netsh still lists it.
+        val privateOnly = rule("BNM Lab analyzer port 5500", profiles = "Private")
+        val domainOnly = rule("BNM Lab analyzer port 5500", profiles = "Domain")
+        assertEquals("Private", NetshParser.parseCurrentProfile(profileOn)?.profile)
+        assertEquals("BNM Lab analyzer port 5500", NetshParser.facts(5500, exe, profileOn, privateOnly).ruleByPort)
+        assertNull(NetshParser.facts(5500, exe, profileOn, domainOnly).ruleByPort)
+        assertEquals("BNM Lab analyzer port 5500",
+            NetshParser.facts(5500, exe, profileOn, rule("BNM Lab analyzer port 5500", profiles = "Any")).ruleByPort)
+        // Same for a program allow and for a block rule.
+        assertNull(NetshParser.facts(5500, exe, profileOn,
+            rule("BNM Lab", profiles = "Domain", protocol = "Any", localPort = null, program = exe)).ruleByProgram)
+        assertNull(NetshParser.facts(5500, exe, profileOn,
+            rule("Blocker", action = "Block", profiles = "Domain")).blockedByRule)
+        // Two profiles on, the rule covers one of them → it counts.
+        assertEquals("BNM Lab analyzer port 5500", NetshParser.facts(5500, exe, twoProfiles, domainOnly).ruleByPort)
+        // When netsh named no profile at all the rule still counts, and the note says why that is a guess.
+        val unnamed = NetshParser.facts(5500, exe, "State                                 ON", domainOnly)
+        assertEquals("BNM Lab analyzer port 5500", unnamed.ruleByPort)
+        assertTrue(unnamed.note!!.contains("could still block"), unnamed.note)
     }
 
     @Test

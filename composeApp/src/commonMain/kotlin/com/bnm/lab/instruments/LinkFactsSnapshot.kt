@@ -13,7 +13,7 @@ data class LinkFactsSnapshot(
     val os: String,
     val isWindows: Boolean,
     val environmentKnown: Boolean,
-    val localIpv4: List<String>,
+    val localIpv4: List<LocalAddress>,
     val serialPorts: List<String>,
     val firewallByPort: Map<Int, FirewallFacts>,
     val pingByHost: Map<String, PingResult>,
@@ -22,6 +22,7 @@ data class LinkFactsSnapshot(
         os = os,
         isWindows = isWindows,
         environmentKnown = environmentKnown,
+        factsRead = true,
         localIpv4 = localIpv4,
         serialPorts = serialPorts,
         firewall = cfg.tcpPort?.let { firewallByPort[it] },
@@ -29,9 +30,15 @@ data class LinkFactsSnapshot(
     )
 
     companion object {
-        /** What the evaluator gets before the first read finished: OS known, everything else "checking". */
+        /**
+         * What the evaluator gets before the first read finished: OS known,
+         * everything else "checking". `factsRead = false` is what keeps the
+         * empty address and serial-port lists from reading as "this PC has
+         * none" during the second or so the first gather takes.
+         */
         fun pending(env: LinkEnvironment): LinkFacts = LinkFacts(
             os = env.osName, isWindows = env.isWindows, environmentKnown = env.environmentKnown,
+            factsRead = false,
         )
     }
 }
@@ -49,6 +56,9 @@ suspend fun gatherLinkFacts(env: LinkEnvironment, instruments: List<InstrumentCo
             serialPorts = runCatching { env.serialPorts() }.getOrDefault(emptyList()),
             firewallByPort = runCatching { env.firewallFor(ports) }
                 .getOrElse { e -> ports.associateWith { FirewallFacts.unknown(e.message ?: "read failed") } },
-            pingByHost = hosts.associateWith { h -> runCatching { env.ping(h) }.getOrElse { PingResult(false, "ping failed") } },
+            // A ping that threw says nothing about the analyzer — inconclusive, not unreachable.
+            pingByHost = hosts.associateWith { h ->
+                runCatching { env.ping(h) }.getOrElse { PingResult.noAnswer("ping failed") }
+            },
         )
     }

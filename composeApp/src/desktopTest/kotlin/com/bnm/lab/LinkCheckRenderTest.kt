@@ -19,6 +19,7 @@ import com.bnm.lab.instruments.LinkFacts
 import com.bnm.lab.instruments.LinkLogRow
 import com.bnm.lab.instruments.LinkLogSummaries
 import com.bnm.lab.instruments.LinkState
+import com.bnm.lab.instruments.LocalAddress
 import com.bnm.lab.instruments.NetshParser
 import com.bnm.lab.screens.settings.LinkCheckBody
 import com.bnm.lab.ui.theme.AppTheme
@@ -41,7 +42,8 @@ class LinkCheckRenderTest {
     private val serial = InstrumentConfig(id = "i2", name = "Mispa serial", driver = "mispa_count_x",
         transport = InstrumentTransport.SERIAL, serialPort = "COM3")
     private val listening = InstrumentStatus("listening", "TCP port 5500", boundAt = "2026-09-25T09:00:00Z")
-    private val windows = LinkFacts(os = "Windows 11", isWindows = true, localIpv4 = listOf("192.168.1.20"),
+    private val windows = LinkFacts(os = "Windows 11", isWindows = true,
+        localIpv4 = listOf(LocalAddress("192.168.1.20", "Ethernet")),
         serialPorts = listOf("COM1", "COM4"),
         firewall = FirewallFacts(applicable = true, known = true, enabled = true, profile = "Private"))
 
@@ -59,8 +61,10 @@ class LinkCheckRenderTest {
     }
 
     @Composable
-    private fun body(report: LinkCheckReport, testResult: List<String>? = null, ruleMessage: String? = null, ruleCommand: String? = null) {
-        LinkCheckBody(report, busy = false, testResult = testResult, ruleMessage = ruleMessage, ruleCommand = ruleCommand,
+    private fun body(report: LinkCheckReport, testResult: List<String>? = null, ruleMessage: String? = null,
+                     ruleCommand: String? = null, canAddRule: Boolean = false) {
+        LinkCheckBody(report, canAddRule = canAddRule, busy = false, testResult = testResult,
+            ruleMessage = ruleMessage, ruleCommand = ruleCommand,
             onCheckAgain = {}, onTest = {}, onAddRule = {}, onCopyReport = {}, onCopyCommand = {})
     }
 
@@ -69,7 +73,7 @@ class LinkCheckRenderTest {
         val report = LinkCheck.evaluate(tcp, listening, LinkLogSummaries(), windows)
         assertEquals("Blocked at: Windows Firewall", report.verdict)
         render("blocked-at-firewall") {
-            body(report,
+            body(report, canAddRule = true,
                 ruleMessage = "cancelled or refused (exit 1). Run this in an Administrator Command Prompt (Start ▸ type cmd ▸ right-click ▸ Run as administrator):",
                 ruleCommand = NetshParser.addRuleCommand(5500))
         }

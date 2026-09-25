@@ -29,11 +29,19 @@ class DesktopLinkEnvironment(
     override val isWindows: Boolean = System.getProperty("os.name").orEmpty().lowercase().contains("win")
     override val environmentKnown: Boolean = true
 
-    override fun localIpv4(): List<String> = runCatching {
+    // The interface name rides along: Windows lists a Hyper-V switch or a VPN
+    // tunnel here exactly like the real LAN card, and the Link check can only
+    // rank them apart by name (LocalAddress.looksVirtual).
+    override fun localIpv4(): List<LocalAddress> = runCatching {
         NetworkInterface.getNetworkInterfaces().toList()
             .filter { it.isUp && !it.isLoopback }
-            .flatMap { nic -> nic.inetAddresses.toList().filterIsInstance<Inet4Address>().map { it.hostAddress } }
-            .distinct()
+            .flatMap { nic ->
+                val label = nic.displayName?.takeIf { it.isNotBlank() } ?: nic.name.orEmpty()
+                nic.inetAddresses.toList().filterIsInstance<Inet4Address>()
+                    .mapNotNull { it.hostAddress }
+                    .map { LocalAddress(it, label) }
+            }
+            .distinctBy { it.ip }
     }.getOrDefault(emptyList())
 
     override fun serialPorts(): List<String> =
@@ -50,9 +58,18 @@ class DesktopLinkEnvironment(
         return ports.associateWith { NetshParser.facts(it, exePath, profile, rules) }
     }
 
+    /**
+     * The OUTPUT decides, not the exit code alone. Windows `ping -n 1` exits 0
+     * when a router answers "Destination host unreachable", so the code says
+     * "reachable" for a host that plainly is not; and a filtered analyzer, a
+     * powered-off one and an unroutable address all share a non-zero code. Only
+     * the tool's own unreachable/unknown-host wording is treated as evidence —
+     * everything else is [PingOutcome.NO_ANSWER], which the checklist reports
+     * as inconclusive rather than blaming the cable.
+     */
     override fun ping(host: String): PingResult {
         val h = host.trim()
-        if (h.isEmpty() || h.any { it.isWhitespace() }) return PingResult(false, "not a valid address")
+        if (h.isEmpty() || h.any { it.isWhitespace() }) return PingResult.unreachable("not a valid address")
         // -W is seconds on Linux but MILLISECONDS on macOS.
         val cmd = when {
             isWindows -> listOf("ping", "-n", "1", "-w", "1000", h)
@@ -60,9 +77,9 @@ class DesktopLinkEnvironment(
             else -> listOf("ping", "-c", "1", "-W", "1", h)
         }
         val t0 = System.currentTimeMillis()
-        val code = runExit(cmd) ?: return PingResult(false, "ping could not be run")
+        val out = exec(cmd) ?: return PingResult.noAnswer("ping could not be run")
         val ms = System.currentTimeMillis() - t0
-        return if (code == 0) PingResult(true, "$ms ms") else PingResult(false, "no reply in ${ms} ms")
+        return classifyPing(out.code, out.text, ms)
     }
 
     /** The engine logs a harmless closed connection; nothing is sent, so the byte counter stays at zero. */
@@ -98,9 +115,13 @@ class DesktopLinkEnvironment(
 
     // ── process helpers: capped output, hard timeout, never throw ──
 
-    private fun run(cmd: List<String>, timeoutMs: Long = PROCESS_TIMEOUT_MS): String? = runCatching {
+    private data class ProcOut(val code: Int, val text: String)
+
+    /** Exit code AND output; null when the tool could not be run or timed out. */
+    private fun exec(cmd: List<String>, timeoutMs: Long = PROCESS_TIMEOUT_MS): ProcOut? = runCatching {
         val p = ProcessBuilder(cmd).redirectErrorStream(true).start()
         val out = ByteArrayOutputStream()
+        // Drain on a thread so a chatty tool can't block on a full pipe.
         val reader = Thread {
             runCatching {
                 p.inputStream.use { ins ->
@@ -120,29 +141,45 @@ class DesktopLinkEnvironment(
             return@runCatching null
         }
         reader.join(1_000)
-        out.toString(Charsets.UTF_8.name())
+        ProcOut(p.exitValue(), out.toString(Charsets.UTF_8.name()))
     }.getOrElse { e ->
         AppLog.w("LinkCheck", "${cmd.take(3).joinToString(" ")} failed: ${e.message}")
         null
     }
 
-    private fun runExit(cmd: List<String>, timeoutMs: Long = PROCESS_TIMEOUT_MS): Int? = runCatching {
-        val p = ProcessBuilder(cmd).redirectErrorStream(true).start()
-        // Drain so a chatty tool can't block on a full pipe.
-        Thread { runCatching { p.inputStream.use { it.readAllBytes() } } }.apply { isDaemon = true; start() }
-        if (!p.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
-            p.destroyForcibly()
-            return@runCatching null
-        }
-        p.exitValue()
-    }.getOrNull()
+    private fun run(cmd: List<String>, timeoutMs: Long = PROCESS_TIMEOUT_MS): String? = exec(cmd, timeoutMs)?.text
 
-    private companion object {
+    private fun runExit(cmd: List<String>, timeoutMs: Long = PROCESS_TIMEOUT_MS): Int? = exec(cmd, timeoutMs)?.code
+
+    internal companion object {
         const val PROCESS_TIMEOUT_MS = 5_000L
         /** The UAC prompt itself is not waited for — Start-Process returns once it is launched. */
         const val ELEVATION_TIMEOUT_MS = 20_000L
         const val TCP_PROBE_TIMEOUT_MS = 2_000
         const val MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+
+        /**
+         * The network itself saying the host cannot be reached or resolved —
+         * the only ping outcomes that justify a red row. Lower-case; matched as
+         * substrings of the tool's output.
+         */
+        private val UNREACHABLE_MARKS = listOf(
+            "destination host unreachable", "destination net unreachable", "destination unreachable",
+            "no route to host", "network is unreachable",
+            "could not find host", "unknown host", "name or service not known",
+            "name does not resolve", "cannot resolve", "temporary failure in name resolution",
+        )
+
+        /** An echo really came back. "ttl=" survives localisation on Windows; the rest cover *nix. */
+        private val REPLY_MARKS = listOf("ttl=", "bytes from", "1 received", "1 packets received")
+
+        /** Shared with the test: the classification is the whole point of reading the output. */
+        internal fun classifyPing(code: Int, output: String, ms: Long): PingResult {
+            val text = output.lowercase()
+            UNREACHABLE_MARKS.firstOrNull { text.contains(it) }?.let { return PingResult.unreachable(it) }
+            if (code == 0 || REPLY_MARKS.any { text.contains(it) }) return PingResult.replied("$ms ms")
+            return PingResult.noAnswer("no reply in $ms ms")
+        }
     }
 }
 

@@ -98,13 +98,21 @@ data class FirewallFacts(
     val known: Boolean,
     val enabled: Boolean? = null,
     val profile: String? = null,
-    /** Name of an enabled inbound allow rule for TCP port N (or any port). */
+    /** Name of an enabled inbound allow rule for TCP port N (or any port), scoped to the active profile. */
     val ruleByPort: String? = null,
     /** Name of an enabled inbound allow rule for the running BNM Lab program. */
     val ruleByProgram: String? = null,
+    /**
+     * Name of an enabled inbound BLOCK rule covering the port or the program.
+     * Windows lets an explicit block beat every allow rule, so this outranks
+     * both names above: adding one more allow cannot get past it. A Cancel on
+     * the "Windows Security Alert" popup leaves exactly such a rule behind.
+     */
+    val blockedByRule: String? = null,
     val note: String? = null,
 ) {
-    val hasRule: Boolean get() = ruleByPort != null || ruleByProgram != null
+    /** A rule that actually lets the analyzer in — a block rule cancels it. */
+    val hasRule: Boolean get() = blockedByRule == null && (ruleByPort != null || ruleByProgram != null)
 
     companion object {
         val NOT_APPLICABLE = FirewallFacts(applicable = false, known = true)
@@ -112,7 +120,42 @@ data class FirewallFacts(
     }
 }
 
-data class PingResult(val reachable: Boolean, val detail: String)
+/**
+ * What one ping proved. A silent host is NOT evidence of a broken link —
+ * analyzer LIS stacks routinely drop ICMP — so [NO_ANSWER] is inconclusive and
+ * never blocks the checklist; only the ping tool's own "unreachable" /
+ * "unknown host" verdict ([UNREACHABLE]) is evidence.
+ */
+enum class PingOutcome { REPLIED, NO_ANSWER, UNREACHABLE }
+
+data class PingResult(val outcome: PingOutcome, val detail: String) {
+    val reachable: Boolean get() = outcome == PingOutcome.REPLIED
+
+    companion object {
+        fun replied(detail: String) = PingResult(PingOutcome.REPLIED, detail)
+        fun noAnswer(detail: String) = PingResult(PingOutcome.NO_ANSWER, detail)
+        fun unreachable(detail: String) = PingResult(PingOutcome.UNREACHABLE, detail)
+    }
+}
+
+/**
+ * One IPv4 address of this PC, with the interface it sits on. The name is what
+ * makes the address usable advice: Windows enumerates Hyper-V switches,
+ * VirtualBox host-only adapters and VPN tunnels alongside the real LAN card,
+ * often first, and telling the lab to type one of those into the analyzer
+ * sends them down a road that cannot work.
+ */
+data class LocalAddress(val ip: String, val iface: String = "") {
+    val looksVirtual: Boolean get() = VIRTUAL_IFACE_HINTS.any { iface.contains(it, ignoreCase = true) }
+
+    private companion object {
+        val VIRTUAL_IFACE_HINTS = listOf(
+            "vethernet", "hyper-v", "virtualbox", "vmware", "vmnet", "virtual",
+            "tailscale", "zerotier", "wireguard", "tap-", "tun", "loopback pseudo",
+            "docker", "wsl", "bluetooth",
+        )
+    }
+}
 
 /**
  * A snapshot of the PC for one instrument. Gathered outside the evaluator
@@ -123,7 +166,14 @@ data class LinkFacts(
     val isWindows: Boolean,
     /** false on Android/iOS: network, serial and firewall answers are "unknown", never "absent". */
     val environmentKnown: Boolean = true,
-    val localIpv4: List<String> = emptyList(),
+    /**
+     * False until the first read finished ([LinkFactsSnapshot.pending]). An
+     * empty [localIpv4] or [serialPorts] then means "not read yet", not "this
+     * PC has none" — the difference between "Checking…" and a red row telling
+     * a lab their working network card is missing.
+     */
+    val factsRead: Boolean = true,
+    val localIpv4: List<LocalAddress> = emptyList(),
     val serialPorts: List<String> = emptyList(),
     /** For this instrument's TCP port. */
     val firewall: FirewallFacts? = null,
@@ -138,9 +188,23 @@ object LinkCheck {
         status: InstrumentStatus?,
         logs: LinkLogSummaries,
         facts: LinkFacts,
+        /**
+         * Results still sitting in the claim queue for THIS analyzer (the
+         * `status='unmatched'` rows the screen already observes). Null when the
+         * caller doesn't know; the session counter is then the only source.
+         */
+        queued: Int? = null,
     ): LinkCheckReport {
         val rows = ArrayList<LinkCheckRow>(8)
         val driverLabel = driverFor(cfg.driver)?.label ?: cfg.driver
+        // A result claimed from the queue never bumps framesApplied — the claim
+        // path applies it directly (InstrumentEngine.claimUnmatched) — but it
+        // does write an "Applied …" log row, which proves the link just as well.
+        val applied = (status?.framesApplied ?: 0L) > 0L || logs.lastApplied != null
+        // The queue depth is a fact that survives a restart; framesUnmatched is
+        // a session counter nothing ever decrements, so claiming a result would
+        // otherwise leave this step blocked for good.
+        val waiting = queued?.toLong() ?: (status?.framesUnmatched ?: 0L)
         when (cfg.transport) {
             InstrumentTransport.SERIAL -> {
                 rows += serialPortPresent(cfg, facts)
@@ -156,8 +220,8 @@ object LinkCheck {
         }
         rows += connected(cfg, status, logs, facts)
         rows += understood(cfg, status, logs, driverLabel)
-        rows += matched(cfg, status, logs)
-        return LinkCheckReport(rows, verdictOf(rows, status, logs), verdictStateOf(rows, status))
+        rows += matched(cfg, status, logs, applied, waiting)
+        return LinkCheckReport(rows, verdictOf(rows, status, logs, applied), verdictStateOf(rows, applied))
     }
 
     // ── TCP steps ──
@@ -196,13 +260,63 @@ object LinkCheck {
         val title = "This PC's address"
         if (!facts.environmentKnown) return LinkCheckRow("address", LinkState.UNKNOWN, title,
             "Can't read network addresses on this device — run the link check on the lab PC.")
+        if (!facts.factsRead) return LinkCheckRow("address", LinkState.UNKNOWN, title, "Checking…")
         if (facts.localIpv4.isEmpty()) return LinkCheckRow("address", LinkState.BLOCKED, title,
             "No network address — this PC isn't on a network",
             "Connect the PC to the same network (cable or Wi-Fi) as the analyzer, then check again.")
-        val ip = facts.localIpv4.first()
-        val more = if (facts.localIpv4.size > 1) " (also ${facts.localIpv4.drop(1).joinToString(", ")})" else ""
+        val best = analyzerFacingIps(cfg, facts)
+        val rest = facts.localIpv4.map { it.ip } - best.toSet()
+        val more = if (rest.isNotEmpty()) " (also ${rest.joinToString(", ")})" else ""
+        // One candidate is an instruction; several is a choice the lab has to
+        // make at the analyzer — say so rather than naming one at random.
+        val use = if (best.size == 1) "use ${best.first()}"
+            else "use whichever of ${best.joinToString(" or ")} is on the analyzer's network"
         return LinkCheckRow("address", LinkState.OK, title,
-            "$ip$more — on the analyzer's LIS settings use $ip, port ${cfg.tcpPort ?: "?"}, TCP client mode")
+            "${best.joinToString(", ")}$more — on the analyzer's LIS settings $use, " +
+                "port ${cfg.tcpPort ?: "?"}, TCP client mode")
+    }
+
+    /**
+     * The address(es) worth typing into the analyzer, best first.
+     *
+     * When the analyzer's own address is known, the local address on its /24 is
+     * the answer and nothing else matters. Otherwise real LAN cards rank ahead
+     * of Hyper-V switches, VirtualBox host-only adapters, VPN tunnels and
+     * link-local addresses — `NetworkInterface` enumeration order routinely
+     * puts those first, and they are the one thing the analyzer can never
+     * reach. Everything still tied for the best rank is returned: a guess that
+     * admits it is a guess beats a confident wrong IP.
+     */
+    internal fun analyzerFacingIps(cfg: InstrumentConfig, facts: LinkFacts): List<String> {
+        val all = facts.localIpv4
+        if (all.isEmpty()) return emptyList()
+        val host = cfg.analyzerHost?.trim().orEmpty()
+        if (host.isNotEmpty()) {
+            val onItsNetwork = all.filter { sameNetwork24(it.ip, host) }
+            if (onItsNetwork.isNotEmpty()) return onItsNetwork.map { it.ip }
+        }
+        val best = all.minOf { addressRank(it) }
+        return all.filter { addressRank(it) == best }.map { it.ip }
+    }
+
+    private fun sameNetwork24(a: String, b: String): Boolean {
+        val x = a.split('.')
+        val y = b.split('.')
+        return x.size == 4 && y.size == 4 && x.take(3) == y.take(3)
+    }
+
+    /** Lower = likelier to be the card the analyzer's cable can reach. */
+    private fun addressRank(a: LocalAddress): Int {
+        val octets = a.ip.split('.').mapNotNull { it.toIntOrNull() }
+        val second = octets.getOrNull(1) ?: 0
+        return when {
+            a.ip.startsWith("169.254.") -> 5                              // no DHCP answered; nothing routes
+            a.looksVirtual -> 4                                            // Hyper-V / VirtualBox / VPN / WSL
+            a.ip.startsWith("100.") && second in 64..127 -> 3              // CGNAT: Tailscale and friends
+            a.ip.startsWith("192.168.") || a.ip.startsWith("10.") -> 0     // the ordinary lab LAN
+            a.ip.startsWith("172.") && second in 16..31 -> 1               // a real LAN, but also Docker's default
+            else -> 2
+        }
     }
 
     private fun firewall(cfg: InstrumentConfig, status: InstrumentStatus?, facts: LinkFacts): LinkCheckRow {
@@ -227,11 +341,24 @@ object LinkCheck {
         }
         val profile = fw.profile?.let { " ($it)" } ?: ""
         if (fw.enabled == false) return LinkCheckRow("firewall", LinkState.OK, title, "Off$profile — not blocking")
+        // An explicit inbound Block rule wins over every allow rule in Windows,
+        // so "Add firewall rule" cannot clear it (and is deliberately not
+        // offered here): the block itself has to go. This is what a Cancel on
+        // the "Windows Security Alert" popup leaves behind, and it is the
+        // commonest cause of "port is LISTENING but nothing ever arrives".
+        if (fw.blockedByRule != null && bytes == 0L) return LinkCheckRow("firewall", LinkState.BLOCKED, title,
+            "On$profile · inbound rule \"${fw.blockedByRule}\" BLOCKS port $port",
+            "A block rule beats any allow rule, so adding one won't help — the block has to be deleted. " +
+                "In an Administrator Command Prompt: ${NetshParser.deleteRuleCommand(fw.blockedByRule)} " +
+                "(or Windows Security ▸ Firewall ▸ Advanced settings ▸ Inbound Rules ▸ \"${fw.blockedByRule}\" ▸ Delete).")
+        // A rule was found, but netsh could not name the profile in force — the
+        // row stays OK and says why it might still be wrong.
+        val caveat = fw.note?.let { " · $it" } ?: ""
         return when {
             fw.ruleByPort != null -> LinkCheckRow("firewall", LinkState.OK, title,
-                "On$profile · inbound rule \"${fw.ruleByPort}\" allows port $port")
+                "On$profile · inbound rule \"${fw.ruleByPort}\" allows port $port$caveat")
             fw.ruleByProgram != null -> LinkCheckRow("firewall", LinkState.OK, title,
-                "On$profile · inbound rule \"${fw.ruleByProgram}\" allows the BNM Lab program")
+                "On$profile · inbound rule \"${fw.ruleByProgram}\" allows the BNM Lab program$caveat")
             bytes > 0L -> LinkCheckRow("firewall", LinkState.OK, title,
                 "On$profile, no rule found for port $port — but the analyzer has already reached this PC, so it isn't blocking")
             else -> LinkCheckRow("firewall", LinkState.BLOCKED, title,
@@ -256,8 +383,17 @@ object LinkCheck {
         val bytes = status?.bytesIn ?: 0L
         if (bytes > 0L) return LinkCheckRow("reachable", LinkState.OK, title,
             "$host doesn't answer ping, but the analyzer has connected to this PC — some analyzers ignore ping")
-        val ip = facts.localIpv4.firstOrNull() ?: "this PC"
-        return LinkCheckRow("reachable", LinkState.BLOCKED, title, "No answer from $host (${ping.detail})",
+        val ip = analyzerFacingIps(cfg, facts).firstOrNull() ?: "this PC"
+        // A ping nobody answered proves nothing — Mindray/Agappe embedded LIS
+        // stacks drop ICMP as a matter of course, and this row sits BEFORE
+        // "connected", so calling it BLOCKED would send the lab to re-crimp a
+        // working cable instead of pressing Send on the analyzer. Only the ping
+        // tool's own unreachable/unknown-host verdict is evidence of a fault.
+        if (ping.outcome != PingOutcome.UNREACHABLE) return LinkCheckRow("reachable", LinkState.UNKNOWN, title,
+            "No ping answer from $host (${ping.detail}) — many analyzers ignore ping, so this proves nothing",
+            "Nothing to fix from this row alone. If the analyzer stays quiet, confirm its address really is $host " +
+                "and that it is on the same network as $ip (same first three numbers).")
+        return LinkCheckRow("reachable", LinkState.BLOCKED, title, "$host cannot be reached (${ping.detail})",
             "Check the analyzer's network cable and that its IP is on the same network as $ip (same first three numbers). " +
                 "If the address changed, correct it here.")
     }
@@ -273,6 +409,9 @@ object LinkCheck {
             "Edit the analyzer and pick the COM port the analyzer's cable is plugged into.", LinkAction.CHOOSE_SERIAL_PORT)
         if (!facts.environmentKnown) return LinkCheckRow("port_present", LinkState.UNKNOWN, title,
             "Serial ports can only be checked on the lab PC.")
+        // Enumerating USB-serial drivers takes a moment; until it returns, an
+        // empty list is "not read yet", not "this PC has no serial ports".
+        if (!facts.factsRead) return LinkCheckRow("port_present", LinkState.UNKNOWN, title, "Checking…")
         val present = facts.serialPorts.any { it.equals(port, ignoreCase = true) }
         if (present) return LinkCheckRow("port_present", LinkState.OK, title,
             "Found · ports on this PC: ${facts.serialPorts.joinToString(", ")}")
@@ -316,7 +455,8 @@ object LinkCheck {
         }
         val since = status?.boundAt?.let { " since ${time(it)}" } ?: ""
         val where = if (cfg.transport == InstrumentTransport.SERIAL) cfg.serialPort ?: "the port"
-            else (facts.localIpv4.firstOrNull() ?: "this PC's IP") + " port ${cfg.tcpPort ?: "?"}"
+            else analyzerFacingIps(cfg, facts).joinToString(" or ").ifEmpty { "this PC's IP" } +
+                " port ${cfg.tcpPort ?: "?"}"
         val hint = if (cfg.transport == InstrumentTransport.SERIAL)
             "On the analyzer, press Send / Transmit (and turn on auto-transmit so every sample is sent). Then run a sample."
         else "On the analyzer's LIS / host settings, set the host to $where, TCP client mode, and enable auto-transmit. " +
@@ -352,34 +492,45 @@ object LinkCheck {
         return LinkCheckRow("understood", LinkState.OK, title, "$parsed of $framesIn frames carried a result$note")
     }
 
-    private fun matched(cfg: InstrumentConfig, status: InstrumentStatus?, logs: LinkLogSummaries): LinkCheckRow {
+    /** [applied] = a result has landed on an order (live or claimed); [waiting] = the open claim queue. */
+    private fun matched(
+        cfg: InstrumentConfig,
+        status: InstrumentStatus?,
+        logs: LinkLogSummaries,
+        applied: Boolean,
+        waiting: Long,
+    ): LinkCheckRow {
         val title = "Result matched to an order"
         val parsed = status?.framesParsed ?: 0L
-        val applied = status?.framesApplied ?: 0L
-        val unmatched = status?.framesUnmatched ?: 0L
         // verify_pending only BLOCKS once a result actually exists to be held: naming
         // it the blocker while nothing has arrived would point the lab at the last
         // step when the analyzer has not even reached the first one.
-        if (parsed == 0L) return LinkCheckRow("matched", LinkState.WAITING, title,
+        if (parsed == 0L && !applied && waiting <= 0L) return LinkCheckRow("matched", LinkState.WAITING, title,
             if (cfg.verifyPending) "No result yet · when one arrives it waits until the bench presses Verified"
             else "No result yet")
         if (cfg.verifyPending) return LinkCheckRow("matched", LinkState.BLOCKED, title,
             "Results wait in \"Waiting for an order\" until the bench presses Verified",
             "BNM support changed this analyzer's settings. Run one known sample, check its values against the order, " +
                 "then press Verified on this page.", LinkAction.PRESS_VERIFIED)
-        if (applied > 0L) {
+        if (applied) {
             val last = logs.lastApplied?.let { "last: ${quote(it.summary, cfg)} at ${time(it.at)}" }
-                ?: "$applied applied"
-            val waiting = if (unmatched > 0L) " · $unmatched waiting for an order" else ""
-            return LinkCheckRow("matched", LinkState.OK, title, last + waiting,
-                if (unmatched > 0L) "Some results arrived with a sample id that matches no order — assign them under " +
+                ?: "${status?.framesApplied ?: 0L} applied"
+            val more = if (waiting > 0L) " · $waiting waiting for an order" else ""
+            return LinkCheckRow("matched", LinkState.OK, title, last + more,
+                if (waiting > 0L) "Some results arrived with a sample id that matches no order — assign them under " +
                     "\"Waiting for an order\", and key the accession number as the sample id on the analyzer." else null,
-                if (unmatched > 0L) LinkAction.ASSIGN_WAITING_RESULTS else null)
+                if (waiting > 0L) LinkAction.ASSIGN_WAITING_RESULTS else null)
         }
+        // Parsed, not applied, nothing queued: the counters are mid-flight (the
+        // queue insert follows the parse) or the ingest job died between them.
+        // Either way nothing is waiting on an accession, so this must not read
+        // as "0 results waiting for an order" in red.
+        if (waiting <= 0L) return LinkCheckRow("matched", LinkState.WAITING, title,
+            "A result was read but has not been filed yet")
         val reason = logs.lastQueued?.summary?.removePrefix(LinkLogSummaries.QUEUED_PREFIX)?.trimStart(' ', '—', '-')
             ?.let { quote(it, cfg) }
         return LinkCheckRow("matched", LinkState.BLOCKED, title,
-            "$unmatched result${if (unmatched == 1L) "" else "s"} waiting for an order" + (reason?.let { " — $it" } ?: ""),
+            "$waiting result${if (waiting == 1L) "" else "s"} waiting for an order" + (reason?.let { " — $it" } ?: ""),
             "The analyzer's sample id must be the order's accession number (the number on the tube's sticker) — " +
                 "key it on the analyzer before running the sample. The results that already arrived can be assigned " +
                 "under \"Waiting for an order\".", LinkAction.ASSIGN_WAITING_RESULTS)
@@ -387,9 +538,14 @@ object LinkCheck {
 
     // ── verdict ──
 
-    private fun verdictOf(rows: List<LinkCheckRow>, status: InstrumentStatus?, logs: LinkLogSummaries): String {
+    private fun verdictOf(
+        rows: List<LinkCheckRow>,
+        status: InstrumentStatus?,
+        logs: LinkLogSummaries,
+        applied: Boolean,
+    ): String {
         rows.firstOrNull { it.state == LinkState.BLOCKED }?.let { return "Blocked at: ${it.title}" }
-        if ((status?.framesApplied ?: 0L) > 0L) {
+        if (applied) {
             val at = logs.lastApplied?.at ?: status?.lastFrameAt
             val acc = logs.lastApplied?.let { appliedAccession(it.summary) }
             return "Linked — last result ${time(at)}" + (acc?.let { ", applied to $it" } ?: "")
@@ -415,9 +571,9 @@ object LinkCheck {
         return "Linked"
     }
 
-    private fun verdictStateOf(rows: List<LinkCheckRow>, status: InstrumentStatus?): LinkState = when {
+    private fun verdictStateOf(rows: List<LinkCheckRow>, applied: Boolean): LinkState = when {
         rows.any { it.state == LinkState.BLOCKED } -> LinkState.BLOCKED
-        (status?.framesApplied ?: 0L) > 0L -> LinkState.OK
+        applied -> LinkState.OK
         rows.any { it.state == LinkState.WAITING } -> LinkState.WAITING
         rows.any { it.state == LinkState.UNKNOWN } -> LinkState.UNKNOWN
         else -> LinkState.OK
@@ -458,16 +614,20 @@ object LinkCheck {
         logs.lastRx?.let { appendLine("Last rx:    ${time(it.at)} ${quote(it.summary, cfg)}") }
         logs.lastInfo?.let { appendLine("Last info:  ${time(it.at)} ${quote(it.summary, cfg)}") }
         logs.lastError?.let { appendLine("Last error: ${time(it.at)} ${quote(it.summary, cfg)}") }
-        appendLine("PC: ipv4=${facts.localIpv4.ifEmpty { listOf("-") }.joinToString(",")} " +
-            "serial=${facts.serialPorts.ifEmpty { listOf("-") }.joinToString(",")} " +
+        val ipv4 = facts.localIpv4.joinToString(",") { a ->
+            a.ip + (a.iface.takeIf { it.isNotBlank() }?.let { "($it)" } ?: "")
+        }.ifEmpty { if (facts.factsRead) "-" else "reading" }
+        appendLine("PC: ipv4=$ipv4 " +
+            "serial=${facts.serialPorts.ifEmpty { listOf(if (facts.factsRead) "-" else "reading") }.joinToString(",")} " +
             "firewall=${facts.firewall?.let { fw ->
                 when {
                     !fw.applicable -> "n/a"
                     !fw.known -> "unknown(${fw.note ?: "?"})"
                     else -> "${if (fw.enabled == true) "on" else "off"}${fw.profile?.let { "/$it" } ?: ""} " +
-                        "rulePort=${fw.ruleByPort ?: "-"} ruleProgram=${fw.ruleByProgram ?: "-"}"
+                        "rulePort=${fw.ruleByPort ?: "-"} ruleProgram=${fw.ruleByProgram ?: "-"} " +
+                        "block=${fw.blockedByRule ?: "-"}"
                 }
-            } ?: "-"} ping=${facts.ping?.let { "${if (it.reachable) "ok" else "fail"} ${it.detail}" } ?: "-"}")
+            } ?: "-"} ping=${facts.ping?.let { "${it.outcome.name.lowercase()} ${it.detail}" } ?: "-"}")
     }.trimEnd()
 
     // ── helpers ──
@@ -479,7 +639,9 @@ object LinkCheck {
         return FrameScrubber.maskIds(readable)
     }
 
-    private fun isLoopback(ip: String) = ip == "127.0.0.1" || ip == "::1" || ip.equals("localhost", ignoreCase = true)
+    /** The Test-connection self-probe dials 127.0.0.1 — never show that as the analyzer. */
+    internal fun isLoopback(ip: String) = ip == "127.0.0.1" || ip == "::1" ||
+        ip.equals("localhost", ignoreCase = true) || ip.startsWith("127.")
 
     /** "2026-09-25T10:42:07.123Z" → "2026-09-25 10:42"; missing → "—". */
     internal fun time(iso: String?): String = iso?.replace('T', ' ')?.take(16) ?: "—"

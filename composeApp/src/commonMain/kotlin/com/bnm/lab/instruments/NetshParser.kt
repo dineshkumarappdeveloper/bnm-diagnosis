@@ -22,13 +22,38 @@ object NetshParser {
         val protocol: String,
         val localPort: String?,
         val program: String?,
+        /**
+         * The `Profiles:` line — "Domain,Private,Public", or "Any". Windows
+         * scopes a rule to the profile that was active when it was created, and
+         * enforces it only there: the allow rule Windows wrote when the lab
+         * clicked Allow on a Private network does nothing after the router is
+         * swapped and the new one is classified Public.
+         */
+        val profiles: String? = null,
     ) {
+        val isInbound: Boolean
+            get() = enabled && direction.equals("In", ignoreCase = true)
         val isInboundAllow: Boolean
-            get() = enabled && direction.equals("In", ignoreCase = true) && action.equals("Allow", ignoreCase = true)
+            get() = isInbound && action.equals("Allow", ignoreCase = true)
+        val isInboundBlock: Boolean
+            get() = isInbound && action.equals("Block", ignoreCase = true)
+
+        /** True when this rule is enforced on [active] — the profile(s) `show currentprofile` reports as on. */
+        fun appliesToProfile(active: List<String>): Boolean {
+            if (active.isEmpty()) return true                    // profile not named: assume it counts
+            val mine = profiles?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: return true
+            if (mine.isEmpty() || mine.any { it.equals("Any", ignoreCase = true) }) return true
+            return mine.any { m -> active.any { it.equals(m, ignoreCase = true) } }
+        }
 
         /** TCP (or Any) whose LocalPort is Any, equals [port], lists it, or spans it. */
-        fun allowsTcpPort(port: Int): Boolean {
-            if (!isInboundAllow) return false
+        fun allowsTcpPort(port: Int): Boolean = isInboundAllow && coversTcpPort(port)
+
+        /** Same executable as [exePath] — exact path, or the same file name (installers move, names don't). */
+        fun allowsProgram(exePath: String?): Boolean = isInboundAllow && coversProgram(exePath)
+
+        /** Port match only — the action is the caller's business (an allow and a block match alike). */
+        fun coversTcpPort(port: Int): Boolean {
             if (!(protocol.equals("TCP", ignoreCase = true) || protocol.equals("Any", ignoreCase = true))) return false
             val lp = localPort?.trim() ?: return protocol.equals("Any", ignoreCase = true)
             if (lp.equals("Any", ignoreCase = true)) return true
@@ -46,9 +71,8 @@ object NetshParser {
             }
         }
 
-        /** Same executable as [exePath] — exact path, or the same file name (installers move, names don't). */
-        fun allowsProgram(exePath: String?): Boolean {
-            if (!isInboundAllow) return false
+        /** Program match only — see [coversTcpPort]. */
+        fun coversProgram(exePath: String?): Boolean {
             val prog = program?.trim()?.takeIf { it.isNotEmpty() && !it.equals("Any", ignoreCase = true) } ?: return false
             val exe = exePath?.trim()?.takeIf { it.isNotEmpty() } ?: return false
             if (prog.equals(exe, ignoreCase = true)) return true
@@ -103,6 +127,7 @@ object NetshParser {
                 protocol = f["protocol"] ?: "",
                 localPort = f["localport"],
                 program = f["program"],
+                profiles = f["profiles"],
             )
         }
         for (raw in output.lineSequence()) {
@@ -140,13 +165,32 @@ object NetshParser {
             note = "rules could not be read")
         if (rulesOutput.isNotBlank() && !looksParsable(rulesOutput)) return FirewallFacts(applicable = true, known = false,
             enabled = true, profile = profile.profile, note = "rule list not understood (non-English Windows?)")
-        val rules = parseRules(rulesOutput)
+        // Only rules enforced on the profile the machine is actually on count:
+        // an allow rule scoped to Private is not enforced once the network is
+        // classified Public, and crediting it would declare the one check that
+        // could catch a dropped SYN satisfied.
+        val active = profile.profile?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }.orEmpty()
+        val rules = parseRules(rulesOutput).filter { it.appliesToProfile(active) }
         return FirewallFacts(
             applicable = true, known = true, enabled = true, profile = profile.profile,
             ruleByPort = rules.firstOrNull { it.allowsTcpPort(port) }?.name,
             ruleByProgram = rules.firstOrNull { it.allowsProgram(exePath) }?.name,
+            blockedByRule = rules.firstOrNull {
+                it.isInboundBlock && (it.coversTcpPort(port) || it.coversProgram(exePath))
+            }?.name,
+            note = if (active.isEmpty())
+                "the active firewall profile is not named, so a rule scoped to another profile could still block"
+            else null,
         )
     }
+
+    /**
+     * Delete one rule by name, for an Administrator Command Prompt. The only
+     * cure for an inbound Block rule: no allow rule can outrank it, so the
+     * Link check hands this over instead of offering "Add firewall rule".
+     */
+    fun deleteRuleCommand(name: String): String =
+        "netsh advfirewall firewall delete rule name=\"$name\" dir=in"
 
     /** The exact command a person can run in an Administrator Command Prompt. */
     fun addRuleCommand(port: Int): String =

@@ -66,6 +66,8 @@ fun LinkCheckPanel(
     status: InstrumentStatus?,
     logs: LinkLogSummaries,
     facts: LinkFacts,
+    /** Results of THIS analyzer still in the claim queue — the DB truth, not a session counter. */
+    queued: Int,
     environment: LinkEnvironment,
     engine: InstrumentEngine,
     /** Re-read the PC facts now (the screen owns the snapshot). */
@@ -78,7 +80,7 @@ fun LinkCheckPanel(
     LaunchedEffect(Unit) {
         while (isActive) { delay(2_000); tick++ }
     }
-    val report = remember(cfg, status, logs, facts, tick) { LinkCheck.evaluate(cfg, status, logs, facts) }
+    val report = remember(cfg, status, logs, facts, queued, tick) { LinkCheck.evaluate(cfg, status, logs, facts, queued) }
 
     var busy by remember { mutableStateOf(false) }
     var testResult by remember(cfg.id) { mutableStateOf<List<String>?>(null) }
@@ -87,6 +89,12 @@ fun LinkCheckPanel(
 
     LinkCheckBody(
         report = report,
+        // Only when a firewall answer was actually read AND there is a port to
+        // allow. The "Checking…" row carries no action, so a press can neither
+        // fire a UAC prompt before anything has been read nor hit the
+        // `tcpPort ?: return` below and do nothing at all.
+        canAddRule = cfg.tcpPort != null &&
+            report.rows.any { it.step == "firewall" && it.action == LinkAction.ADD_FIREWALL_RULE },
         busy = busy,
         testResult = testResult,
         ruleMessage = ruleMessage,
@@ -183,6 +191,8 @@ private suspend fun testConnection(
 @Composable
 fun LinkCheckBody(
     report: LinkCheckReport,
+    /** Whether "Add firewall rule" can do anything — see [LinkCheckPanel]. */
+    canAddRule: Boolean,
     busy: Boolean,
     testResult: List<String>?,
     ruleMessage: String?,
@@ -204,8 +214,7 @@ fun LinkCheckBody(
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onCheckAgain, enabled = !busy) { Text("Check again") }
             TextButton(onClick = onTest, enabled = !busy) { Text(if (busy) "Testing…" else "Test connection") }
-            if (report.blockedAt?.action == LinkAction.ADD_FIREWALL_RULE ||
-                report.rows.any { it.step == "firewall" && it.state == LinkState.UNKNOWN }) {
+            if (canAddRule) {
                 TextButton(onClick = onAddRule, enabled = !busy) { Text("Add firewall rule") }
             }
             TextButton(onClick = onCopyReport) { Text("Copy report") }
