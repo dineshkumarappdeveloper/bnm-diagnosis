@@ -219,6 +219,8 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
     // Remote support's "check one known sample first" flag (2026-09-25) —
     // appended last, like Instruments.sq.
     driver.addColumn("instruments", "verify_pending", "INTEGER NOT NULL DEFAULT 0")
+    // The analyzer's own address for the Link check's ping (2026-09-25) — appended last.
+    driver.addColumn("instruments", "analyzer_host", "TEXT")
 
     // ── Remote support audit trail (SupportAudit.sq). Belongs to the computer,
     // not the tenant — deliberately absent from TenantReset. ──

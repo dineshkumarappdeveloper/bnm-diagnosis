@@ -675,7 +675,10 @@ class RemoteToolsTest {
                 "transport TEXT NOT NULL, serial_port TEXT, baud INTEGER NOT NULL DEFAULT 115200, tcp_port INTEGER, " +
                 "enabled INTEGER NOT NULL DEFAULT 1, param_map_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)", 0)
         driver.execute(null, "INSERT INTO instruments VALUES ('old', 'Old', 'mispa_count_x', 'serial', 'COM3', 115200, NULL, 1, NULL, 'a', 'b')", 0)
-        repeat(2) { driver.addColumn("instruments", "verify_pending", "INTEGER NOT NULL DEFAULT 0") }
+        repeat(2) {
+            driver.addColumn("instruments", "verify_pending", "INTEGER NOT NULL DEFAULT 0")
+            driver.addColumn("instruments", "analyzer_host", "TEXT")   // SELECT * needs every later column too
+        }
         val db = AppDatabase(driver)
         val row = db.instrumentsQueries.instrumentById("old").executeAsOne()
         assertEquals(0L, row.verify_pending)

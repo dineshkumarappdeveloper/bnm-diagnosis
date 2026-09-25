@@ -576,6 +576,7 @@ class RemoteTools(
             baud = baud, tcpPort = tcpPort, enabled = enabled, paramMapJson = paramMapJson,
             createdAt = existing?.createdAt ?: "", updatedAt = existing?.updatedAt ?: "",
             verifyPending = (existing?.verifyPending ?: false) || needsVerify,
+            analyzerHost = existing?.analyzerHost,
         )
         val savedId = engine.saveInstrument(cfg)
         val after = engine.instrumentById(savedId)
@@ -702,6 +703,8 @@ class RemoteTools(
         put("serial_port", cfg.serialPort)
         put("baud", cfg.baud)
         put("tcp_port", cfg.tcpPort)
+        // The lab's own note of where the analyzer lives — the Link check pings it.
+        put("analyzer_host", cfg.analyzerHost)
         put("enabled", cfg.enabled)
         put("param_map_json", cfg.paramMapJson?.let { runCatching { json.parseToJsonElement(it) }.getOrNull() } ?: JsonNull)
         put("verify_pending", cfg.verifyPending)

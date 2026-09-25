@@ -14,7 +14,6 @@ import com.bnm.lab.lab.LabRepository
 import com.bnm.lab.lab.LabStatus
 import com.bnm.lab.lab.LabTest
 import io.ktor.network.selector.SelectorManager
-import io.ktor.network.sockets.InetSocketAddress
 import io.ktor.network.sockets.aSocket
 import io.ktor.network.sockets.openReadChannel
 import io.ktor.network.sockets.openWriteChannel
@@ -376,9 +375,13 @@ class InstrumentEngine(
                 logRow(cfg, "info", "Listening on TCP port $port", null)
                 while (currentCoroutineContext().isActive) {
                     val socket = server.accept()
-                    (socket.remoteAddress as? InetSocketAddress)?.hostname?.let { ip ->
-                        update(cfg.id) { it.copy(peerIp = ip) }
-                    }
+                    // "Test connection" dials 127.0.0.1 and is accepted like any
+                    // client; letting it stamp peerIp would erase the one fact
+                    // that says WHICH box is talking — and put "peer=127.0.0.1"
+                    // in the support report the lab pastes to BNM.
+                    peerIpOf(socket.remoteAddress)
+                        ?.takeIf { !LinkCheck.isLoopback(it) }
+                        ?.let { ip -> update(cfg.id) { it.copy(peerIp = ip) } }
                     scope.launch {
                         // One assembler per connection: analyzers open, send, close.
                         // HL7 analyzers wait for an ACK on the same socket, so the
@@ -910,6 +913,7 @@ class InstrumentEngine(
                 if (cfg.enabled) 1L else 0L, cfg.paramMapJson,
                 cfg.createdAt.ifBlank { now }, now,
                 if (cfg.verifyPending) 1L else 0L,
+                cfg.analyzerHost?.trim()?.ifBlank { null },
             )
         }
         restart(id)
@@ -1010,6 +1014,7 @@ class InstrumentEngine(
         enabled = enabled == 1L, paramMapJson = param_map_json,
         createdAt = created_at, updatedAt = updated_at,
         verifyPending = verify_pending == 1L,
+        analyzerHost = analyzer_host,
     )
 
     companion object {
