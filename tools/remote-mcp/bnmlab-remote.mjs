@@ -279,11 +279,20 @@ export class LabLink {
         // The relay pairs us on `join`; if the code is wrong we get an error frame
         // (or a close) before anything answers `initialize`, and #onMessage /
         // #onClose reject the pending request with the reason.
-        const init = await this.#request('initialize', {
-            protocolVersion: PROTOCOL_VERSION,
-            capabilities: {},
-            clientInfo: { name: SERVER_NAME, version: VERSION },
-        });
+        let init;
+        try {
+            init = await this.#request('initialize', {
+                protocolVersion: PROTOCOL_VERSION,
+                capabilities: {},
+                clientInfo: { name: SERVER_NAME, version: VERSION },
+            });
+        } catch (e) {
+            // A handshake that never finished (a timeout, or `no_lab` because the
+            // lab dropped between join and initialize) must not leave the socket
+            // open on the relay's one support seat.
+            this.disconnect('handshake failed');
+            throw e;
+        }
         this.#notify('notifications/initialized');
         this.state = 'connected';
         this.peer = 'lab';

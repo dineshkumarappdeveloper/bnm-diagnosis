@@ -322,6 +322,18 @@ test('after no_lab a fresh lab_connect is not refused as busy — the old socket
     assert.equal(relay.sockets.length, 2);
 });
 
+test('a lab that drops between join and initialize fails lab_connect without leaving a socket on the seat', async () => {
+    const { relay, link } = setup({ labAway: true });
+    const res = await runTool(link, 'lab_connect', { code: relay.code });
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /lab's connection to the relay dropped/);
+    assert.equal(link.state, 'disconnected');
+    assert.equal(relay.sockets[0].closed?.by, 'client');
+    relay.labAway = false;
+    const again = await runTool(link, 'lab_connect', { code: relay.code });
+    assert.equal(again.isError, false, textOf(again));
+});
+
 test('a fatal relay error frame hangs the socket up instead of leaving it open', async () => {
     const { relay, link } = setup();
     await runTool(link, 'lab_connect', { code: relay.code });

@@ -123,6 +123,8 @@ export class FakeRelay {
         this.metaShape = opts.metaShape ?? '_meta';
         /** Relay ack after a good join: 'none' | 'joined' | 'ready'. */
         this.joinAck = opts.joinAck ?? 'none';
+        /** Lab seat empty: every forwarded frame is answered `no_lab`, socket left open. */
+        this.labAway = opts.labAway ?? false;
         this.tools = opts.tools ?? DEFAULT_TOOLS;
         this.now = opts.now ?? Date.now;
 
@@ -200,6 +202,7 @@ export class FakeRelay {
         }
         if (!sock.paired) return; // the relay drops frames from unpaired sockets
         this.received.push(msg);
+        if (this.labAway) return this.noLab();
         this.#lab(sock, msg);
     }
 
