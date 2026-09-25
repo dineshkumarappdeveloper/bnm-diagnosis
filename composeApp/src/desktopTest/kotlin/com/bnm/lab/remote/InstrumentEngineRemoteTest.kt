@@ -7,6 +7,8 @@ import com.bnm.lab.instruments.InstrumentConfig
 import com.bnm.lab.instruments.InstrumentEngine
 import com.bnm.lab.instruments.InstrumentTransport
 import com.bnm.lab.instruments.Mllp
+import com.bnm.lab.instruments.SerialHandle
+import com.bnm.lab.instruments.openSerialPort
 import com.bnm.lab.lab.LabOrder
 import com.bnm.lab.lab.LabRepository
 import com.bnm.lab.lab.Patient
@@ -41,11 +43,15 @@ import kotlin.test.assertTrue
  */
 class InstrumentEngineRemoteTest {
 
-    private class Bench(dispatcher: CoroutineDispatcher = Dispatchers.Default) {
+    private class Bench(
+        dispatcher: CoroutineDispatcher = Dispatchers.Default,
+        openSerial: (String, Int, (ByteArray) -> Unit, (String?) -> Unit) -> SerialHandle? = ::openSerialPort,
+    ) {
         val db: AppDatabase = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY).let { AppDatabase.Schema.create(it); AppDatabase(it) }
         val repo = LabRepository(db, ApiClient.json)
         // A huge heal interval: the tests call healOnce() themselves.
-        val engine = InstrumentEngine(db, repo, ApiClient.json, healIntervalMs = 3_600_000L, dispatcher = dispatcher)
+        val engine = InstrumentEngine(db, repo, ApiClient.json, healIntervalMs = 3_600_000L, dispatcher = dispatcher,
+            openSerial = openSerial)
         val acks = mutableListOf<String>()
         val reply: suspend (ByteArray) -> Unit = { acks += it.decodeToString() }
 
@@ -249,6 +255,36 @@ class InstrumentEngineRemoteTest {
                 assertNotNull(it.boundAt)
             }
         } finally { runCatching { blocker.close() }; b.close() }
+    }
+
+    @Test
+    fun `a serial port that dies while it is opening keeps its fault`() = runBlocking<Unit> {
+        // jSerialComm reports a disconnect from its own thread, and on a
+        // re-plugged USB adapter that can land while the port is still being
+        // opened — i.e. before the launcher publishes. TCP defers its work and
+        // is safe; serial opens inside prepareListener, so this is the one
+        // place a launcher can still write over a verdict it did not make.
+        var deadOnArrival = true
+        val b = Bench(openSerial = { _, _, _, onClosed ->
+            if (deadOnArrival) onClosed("Serial device disconnected")
+            object : SerialHandle { override fun close() = Unit }
+        })
+        try {
+            val id = b.engine.saveInstrument(InstrumentConfig(id = "", name = "Mispa", driver = "mispa_count_x",
+                transport = InstrumentTransport.SERIAL, serialPort = "ttyUSB0", baud = 115200))
+            b.engine.status.value.getValue(id).let {
+                assertEquals("error", it.state, "a 'listening' here has no port behind it, and healOnce only retries errors")
+                assertNull(it.boundAt)
+            }
+
+            // Adapter back in: the retry the surviving fault makes possible.
+            deadOnArrival = false
+            b.engine.healOnce()
+            b.engine.status.value.getValue(id).let {
+                assertEquals("listening", it.state)
+                assertNotNull(it.boundAt)
+            }
+        } finally { b.close() }
     }
 
     @Test

@@ -104,6 +104,9 @@ class InstrumentEngine(
      *  `scope.launch` — that is what makes the launch ordering below
      *  reproducible instead of a race nobody can schedule. */
     dispatcher: CoroutineDispatcher = Dispatchers.Default,
+    /** How a serial port is opened. A test substitutes one that can fail, or
+     *  report the device gone, on cue — [openSerialPort] wants real hardware. */
+    private val openSerial: (String, Int, (ByteArray) -> Unit, (String?) -> Unit) -> SerialHandle? = ::openSerialPort,
 ) {
     private val scope = CoroutineScope(
         SupervisorJob() + dispatcher +
@@ -240,6 +243,7 @@ class InstrumentEngine(
                         ?: continue
                     if (!cfg.enabled) continue
                     listeners.remove(id)?.close()
+                    val snapshot = _status.value[id]
                     val launch = prepareListener(cfg)
                     if (cfg.transport == InstrumentTransport.TCP && launch.status.state == "listening") {
                         // The accept loop reports the real verdict (bound, or the
@@ -249,7 +253,7 @@ class InstrumentEngine(
                         launch.start?.invoke()
                         continue
                     }
-                    setStatus(id, launch.status)
+                    publishLaunch(id, snapshot, launch.status)
                     launch.start?.invoke()
                 }
             }
@@ -266,17 +270,38 @@ class InstrumentEngine(
      * [healOnce] to retry. Must run under [restartMutex].
      */
     private fun relaunch(cfg: InstrumentConfig) {
+        val snapshot = _status.value[cfg.id]
         val launch = if (!cfg.enabled) Launch(InstrumentStatus("off", "Disabled")) else prepareListener(cfg)
-        var before: InstrumentStatus? = null
-        var after: InstrumentStatus = launch.status
-        _status.update { m ->
-            before = m[cfg.id]
-            // This listener is new until its own accept loop says otherwise.
-            after = carry(before?.copy(boundAt = null), launch.status)
-            m + (cfg.id to after)
-        }
-        logTransition(cfg.id, before, after)
+        publishLaunch(cfg.id, snapshot, launch.status)
         launch.start?.invoke()
+    }
+
+    /**
+     * Publish a launcher's verdict — unless the transport has already given a
+     * better one. TCP defers its work to [Launch.start], but SERIAL opens its
+     * port inside [prepareListener], and a device that vanishes while the port
+     * is opening reports itself through `onClosed` BEFORE this line: an
+     * optimistic "listening" written over that would leave a dead port reading
+     * `listening`, which [healOnce] never retries because it only looks at
+     * `error`. The comparison rides inside the same compare-and-set as the
+     * write, so nothing can slip between the two. [snapshot] is what the entry
+     * was before the transport was touched.
+     */
+    private fun publishLaunch(id: String, snapshot: InstrumentStatus?, fresh: InstrumentStatus) {
+        var before: InstrumentStatus? = null
+        var after: InstrumentStatus? = null
+        _status.update { m ->
+            before = m[id]
+            if (before !== snapshot) {
+                after = null
+                return@update m
+            }
+            // This listener is new until its own accept loop says otherwise.
+            val next = carry(before?.copy(boundAt = null), fresh)
+            after = next
+            m + (id to next)
+        }
+        after?.let { logTransition(id, before, it) }
     }
 
     /** Stop every listener without touching config. Used by the tenant-switch
@@ -319,10 +344,10 @@ class InstrumentEngine(
                     // chunks sequentially on its listener thread, and the
                     // assembler's single consumer preserves that order —
                     // separate coroutine launches would not.
-                    val handle = openSerialPort(
+                    val handle = openSerial(
                         portName, cfg.baud,
-                        onData = { bytes -> assembler.submit(bytes) },
-                        onClosed = { reason ->
+                        { bytes -> assembler.submit(bytes) },                     // onData
+                        { reason ->                                               // onClosed
                             setStatus(cfg.id, InstrumentStatus("error", reason ?: "Serial port closed"))
                             scope.launch { logRow(cfg, "error", reason ?: "Serial port closed", null) }
                         },
