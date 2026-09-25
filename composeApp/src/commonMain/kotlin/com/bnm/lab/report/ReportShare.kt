@@ -1,5 +1,6 @@
 package com.bnm.lab.report
 
+import com.bnm.lab.api.Constants
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
@@ -44,22 +45,45 @@ object ReportShare {
         token != null && token.length >= 40 && token.all { it in '0'..'9' || it in 'a'..'f' }
 
     /**
-     * The report page on BNMClient's site. It reads the token from the
-     * FRAGMENT, fetches the published snapshot from `admin-lab /reports/view`
-     * and draws the report (and its PDF) in the patient's browser — the server
-     * keeps the data, never a PDF.
+     * The link a QR printed NOW should encode. Two links exist, and which one
+     * is correct is a question about the rollout, not a preference:
      *
-     * The token rides after `#` on purpose: a browser never sends the fragment,
-     * so it stays out of Cloudflare's logs and every Referer header.
+     *  - [resolverUrl] — `admin-lab /reports/r/<token>`, the public resolver on
+     *    the India ref. Every report BNM Lab has ever printed carries it, so it
+     *    must live for as long as that paper does. It decides AT SCAN TIME what
+     *    to do: 302 to the web page once that page is live, serve the report the
+     *    old way until then. It therefore works in every state of the rollout.
+     *  - [REPORT_PAGE_URL]`#<token>` — BNMClient's report page, which reads the
+     *    token from the FRAGMENT, fetches the published snapshot from
+     *    `admin-lab /reports/view` and draws the report (and its PDF) in the
+     *    patient's browser. The token rides after `#` on purpose: a browser
+     *    never sends the fragment, so the capability stays out of Cloudflare's
+     *    logs and every Referer header. That is the better link, and the one to
+     *    end up on.
      *
-     * Paper printed before this link existed encodes the backend resolver
-     * (`…/functions/v1/admin-lab/reports/r/<token>`). That route redirects here
-     * and has to live for as long as those sheets do.
+     * But paper cannot be recalled. A sheet printed with the page link on the
+     * day before the page ships is dead forever — and worse than a 404, because
+     * BNMClient's `_redirects` serves its SPA shell for any unknown path, so the
+     * patient lands on a phone-OTP screen and the link merely LOOKS like it
+     * worked. So the page link is printed only once the server has said the page
+     * is live ([pageLive]: the heartbeat's `report_page_live`, persisted by
+     * `LicenseManager` so an offline print still knows the last answer).
+     *
+     * Default false, deliberately: a caller that forgets prints the link that
+     * works in every world.
      */
-    fun resolveUrl(token: String): String = "$REPORT_PAGE_URL#$token"
+    fun resolveUrl(token: String, pageLive: Boolean = false): String =
+        if (pageLive) "$REPORT_PAGE_URL#$token" else resolverUrl(token)
 
-    /** Where [resolveUrl] points. Printed paper is permanent: never change it
-     *  to a page that is not live in production. */
+    /**
+     * The permanent backend resolver. NEVER rename, retire, or move it off the
+     * India ref: it is printed on paper that is already in patients' hands.
+     */
+    fun resolverUrl(token: String): String =
+        "${Constants.EDGE_FUNCTIONS_BASE_URL}/admin-lab/reports/r/$token"
+
+    /** Where [resolveUrl] points once the page is live. Printed paper is
+     *  permanent: never change it to a page that is not live in production. */
     const val REPORT_PAGE_URL = "https://app.bnmapp.com/r/"
 
     /**
@@ -69,12 +93,12 @@ object ReportShare {
      *
      * ECC level M (15% recovery): the code is printed at ~20 mm on paper that
      * gets folded into an envelope, and M is the level every consumer scanner is
-     * tuned for. The 90-byte link fits a 41-module symbol at M; H would push it
-     * to a 53-module one, i.e. smaller modules in the same 20 mm — worse, not
-     * better.
+     * tuned for. The page link (90 bytes) fits a 41-module symbol at M and the
+     * resolver (138 bytes) a 49-module one; H would push either to the next size
+     * up, i.e. smaller modules in the same 20 mm — worse, not better.
      */
-    fun qrFor(token: String): ReportQr? {
-        val url = resolveUrl(token)
+    fun qrFor(token: String, pageLive: Boolean = false): ReportQr? {
+        val url = resolveUrl(token, pageLive)
         val matrix = QrEncoder.encode(url, QrEncoder.ECC_M) ?: return null
         return ReportQr(url = url, matrix = matrix, caption = CAPTION, note = NOTE)
     }

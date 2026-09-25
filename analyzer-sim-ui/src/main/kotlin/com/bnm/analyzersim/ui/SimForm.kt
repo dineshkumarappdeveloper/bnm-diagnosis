@@ -33,8 +33,14 @@ data class SimForm(
     /** Self-identifying on purpose: an id that could pass for a real accession
      *  is one tail-match away from a patient's order. */
     val sampleId: String = "BNMTEST-0001",
-    /** Bump the trailing number after every run, so a five-sample rehearsal
-     *  does not file five results onto one accession. */
+    /**
+     * Advance the trailing number PER SAMPLE, so a five-sample rehearsal is
+     * five accessions rather than five results fighting over one, and the next
+     * run starts after the batch this one used.
+     *
+     * Ignored when the id box holds a pattern or a comma list: those are an
+     * enumeration the engineer wrote out, and they cycle.
+     */
     val autoIncrementId: Boolean = true,
     val count: String = "1",
     val intervalSeconds: String = "0",
@@ -87,7 +93,12 @@ data class SimForm(
         // A Mindray cannot be on a cable; drop back to TCP rather than leaving
         // a radio selected that the Send button would then refuse.
         val nextTransport = if (next == Analyzer.MISPA) transport else TransportKind.TCP
-        return copy(analyzer = next, port = nextPort, transport = nextTransport)
+        // The Mispa format carries no unit field at all, so there is nothing for
+        // "bad units" to spoil. Drop the tick rather than leave it set over a
+        // frame it cannot change — a fault that is quietly a no-op is worse than
+        // a missing one.
+        val nextFaults = if (next == Analyzer.MINDRAY) faults else faults.copy(badUnits = false)
+        return copy(analyzer = next, port = nextPort, transport = nextTransport, faults = nextFaults)
     }
 
     /** Ignored for a Mindray, which has nowhere to hear its ACK on a cable. */
@@ -98,41 +109,66 @@ data class SimForm(
     fun withHost(next: String): SimForm =
         copy(host = next, liveLab = if (next.trim() == host.trim()) liveLab else false)
 
-    /** What the run will use, once [problems] is empty. */
-    fun toOptions(): Options = Options(
-        analyzer = analyzer,
-        host = host.trim(),
-        port = port.trim().toIntOrNull() ?: analyzer.defaultPort,
-        serialPort = if (transport == TransportKind.SERIAL && serialAllowed) serialPort.trim() else null,
-        baud = baud.trim().toIntOrNull() ?: 115200,
-        ids = Cli.expandIds(sampleId.trim()).ifEmpty { listOf(sampleId.trim()) },
-        count = count.trim().toIntOrNull() ?: 1,
-        intervalSeconds = intervalSeconds.trim().toDoubleOrNull() ?: 0.0,
-        profile = profile,
-        patientName = patientName.trim().ifBlank { null },
-        patientId = patientId.trim().ifBlank { null },
-        qc = qc,
-        histograms = histograms,
-        cbcOnly = cbcOnly && analyzer == Analyzer.MINDRAY,
-        image = image,
-        seed = seed.trim().toLongOrNull() ?: 1L,
-        unknownCode = faults.unknownCode,
-        badUnits = faults.badUnits,
-        noSpecimen = faults.noSpecimen,
-        faults = Faults(
-            truncated = faults.truncated,
-            garbage = faults.garbage,
-            slowChunksMs = if (faults.slowChunks) faults.slowChunksMs.trim().toLongOrNull() ?: 40L else null,
-            duplicate = faults.duplicate,
-            burst = if (faults.burst) faults.burstCount.trim().toIntOrNull() ?: 5 else 0,
-            hang = faults.hang,
-        ),
-        liveLab = liveLab,
-    )
+    /** The id box as a list: one id, or the several a comma list or `{1..5}` names. */
+    private fun expandedIds(): List<String> =
+        Cli.expandIds(sampleId.trim()).ifEmpty { listOf(sampleId.trim()) }
 
-    /** The form after a run, with the id advanced if the engineer asked for that. */
-    fun afterRun(): SimForm =
-        if (autoIncrementId) copy(sampleId = nextSampleId(sampleId)) else this
+    /** What the run will use, once [problems] is empty. */
+    fun toOptions(): Options {
+        val ids = expandedIds()
+        return Options(
+            analyzer = analyzer,
+            host = host.trim(),
+            port = port.trim().toIntOrNull() ?: analyzer.defaultPort,
+            serialPort = if (transport == TransportKind.SERIAL && serialAllowed) serialPort.trim() else null,
+            baud = baud.trim().toIntOrNull() ?: 115200,
+            ids = ids,
+            // The tick is about ONE id advancing. A pattern or a comma list already
+            // names every accession it wants, so it cycles — see Options.sampleIds.
+            autoIncrementIds = autoIncrementId && ids.size == 1,
+            count = count.trim().toIntOrNull() ?: 1,
+            intervalSeconds = intervalSeconds.trim().toDoubleOrNull() ?: 0.0,
+            profile = profile,
+            patientName = patientName.trim().ifBlank { null },
+            patientId = patientId.trim().ifBlank { null },
+            qc = qc,
+            histograms = histograms,
+            cbcOnly = cbcOnly && analyzer == Analyzer.MINDRAY,
+            image = image,
+            seed = seed.trim().toLongOrNull() ?: 1L,
+            unknownCode = faults.unknownCode,
+            // Mindray-only, like cbcOnly above: the Mispa frame has no unit field to
+            // spoil. A preset saved on a Mindray and loaded on a Mispa would
+            // otherwise carry a tick that changes not one byte.
+            badUnits = faults.badUnits && analyzer == Analyzer.MINDRAY,
+            noSpecimen = faults.noSpecimen,
+            faults = Faults(
+                truncated = faults.truncated,
+                garbage = faults.garbage,
+                slowChunksMs = if (faults.slowChunks) faults.slowChunksMs.trim().toLongOrNull() ?: 40L else null,
+                duplicate = faults.duplicate,
+                burst = if (faults.burst) faults.burstCount.trim().toIntOrNull() ?: 5 else 0,
+                hang = faults.hang,
+            ),
+            liveLab = liveLab,
+        )
+    }
+
+    /**
+     * The form after a run, with the id advanced PAST THE WHOLE BATCH the run
+     * just sent.
+     *
+     * A five-sample run consumes five accessions, so the next run has to start
+     * at the sixth. Advancing by one would put run two back on top of run one's
+     * second sample — the same overwrite the per-sample sequence exists to
+     * avoid, only one run later and far harder to spot.
+     */
+    fun afterRun(): SimForm {
+        // A pattern or a comma list is an enumeration the engineer wrote out;
+        // rewriting 'ACC-S1-000{1..5}' as 'ACC-S1-0006' would destroy it.
+        if (!autoIncrementId || expandedIds().size != 1) return this
+        return copy(sampleId = nextSampleId(toOptions().sampleIds.last()))
+    }
 
     /**
      * Everything wrong with the form, in the words the engineer needs. Empty
@@ -238,16 +274,9 @@ data class FormProblem(val field: FormField, val message: String)
 /**
  * The next id in a sequence: SIM-0001 → SIM-0002, ACC-S1-00042 → ACC-S1-00043.
  *
- * The width of the trailing digits is kept, because an accession that lost its
- * leading zeros matches nothing in BNM Lab — except when the number overflows
- * its width (0099 → 0100 keeps four; 99 → 100 has to grow). An id that ends in
- * no digits at all gets a counter rather than repeating itself forever.
+ * One line, delegating to the core's [com.bnm.analyzersim.nextSpecimenId],
+ * because the CLI advances ids too and two implementations would eventually
+ * disagree about a leading zero — at which point the window's "+1 per run"
+ * would point at an accession the command line never generates.
  */
-fun nextSampleId(id: String): String {
-    val trimmed = id.trim()
-    val digits = trimmed.takeLastWhile { it.isDigit() }
-    if (digits.isEmpty()) return if (trimmed.isEmpty()) "BNMTEST-0002" else "$trimmed-2"
-    val stem = trimmed.dropLast(digits.length)
-    val next = (digits.toLongOrNull() ?: 0L) + 1
-    return stem + next.toString().padStart(digits.length, '0')
-}
+fun nextSampleId(id: String): String = com.bnm.analyzersim.nextSpecimenId(id)

@@ -42,9 +42,14 @@ object Constants {
     /**
      * BNM's remote-support relay (Cloudflare Worker, `relay/`). The app dials
      * OUT to `<url>/v1/lab` over WebSocket only while the owner has started a
-     * support session — nothing listens on the lab PC. Placeholder host until
-     * the relay is deployed; a developer overrides it with the `BNM_RELAY_URL`
-     * environment variable (read in `RemoteSupportService`).
+     * support session — nothing listens on the lab PC.
+     *
+     * This host is BOUND to the Worker by `relay/wrangler.toml` (a
+     * `custom_domain` route), and `RelayHostTest` fails the build if the two
+     * ever drift: a shipped installer carries this string forever, so a relay
+     * published anywhere else is a feature that is dead on arrival for every
+     * lab. A developer points a local build at `wrangler dev` with the
+     * `BNM_RELAY_URL` environment variable (read in `RemoteSupportService`).
      */
     const val REMOTE_RELAY_URL = "wss://lab-relay.bnmapp.com"
 }

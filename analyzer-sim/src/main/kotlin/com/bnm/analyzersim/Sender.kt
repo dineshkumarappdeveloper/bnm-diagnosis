@@ -61,7 +61,49 @@ class Sender(
     ) : this(o, PrintingSendListener(out), clock, transportOverride)
 
     /** What one shape of run ended up doing. */
-    private data class Outcome(val kind: RunKind, val total: Int, val failed: Int, val exitCode: Int)
+    private data class Outcome(
+        val kind: RunKind,
+        val total: Int,
+        val failed: Int,
+        val exitCode: Int,
+        /** Connections still open when the run gave up — see [RunFinished.stragglers]. */
+        val stragglers: Int = 0,
+    )
+
+    /** One id per sample, settled before the first frame — see [Options.sampleIds]. */
+    private val sampleIds: List<String> = o.sampleIds
+
+    /**
+     * Set by [cancel]. Checked between samples and between write chunks, which
+     * is what makes Stop mean something.
+     *
+     * A flag rather than [Thread.interrupt] alone, because interruption only
+     * lands on a thread that is sleeping or waiting: `Socket.connect`,
+     * `OutputStream.write` and a socket read are all deaf to it, so a run with
+     * no interval between samples — the default — used to send every remaining
+     * frame after Stop was pressed and then report a clean finish.
+     */
+    @Volatile
+    private var cancelled = false
+
+    /** Burst children, so [cancel] can reach the threads it did not start. */
+    private val burstThreads = java.util.Collections.synchronizedList(mutableListOf<Thread>())
+
+    /**
+     * Stop the run at the next safe point: before the next sample, before the
+     * next chunk of a dribbled frame. The sample already on the wire finishes —
+     * half a frame left behind by a Stop would be a fault the engineer did not
+     * ask for.
+     */
+    fun cancel() {
+        cancelled = true
+        synchronized(burstThreads) { burstThreads.forEach { it.interrupt() } }
+    }
+
+    /** Throws if [cancel] has been called; the caller unwinds to an ABORTED run. */
+    private fun checkCancelled() {
+        if (cancelled || Thread.currentThread().isInterrupted) throw InterruptedException("stopped")
+    }
 
     /** Process exit code: 0 when every sample went out as intended. */
     fun run(): Int {
@@ -73,6 +115,11 @@ class Sender(
                 o.faults.burst > 0 -> burst(factory)
                 else -> sequential(factory)
             }
+        } catch (e: InterruptedException) {
+            // Asked for, not gone wrong: no failure line. Clear the flag so the
+            // transport closes below instead of throwing on its way out.
+            Thread.interrupted()
+            Outcome(RunKind.ABORTED, o.samples, o.samples, 1, stragglers = liveBurstThreads())
         } catch (e: Exception) {
             listener.failed(Failure(null, explain(e)))
             Outcome(RunKind.ABORTED, o.samples, o.samples, 1)
@@ -81,9 +128,13 @@ class Sender(
         }
         // Always, including after a failure — a window that never hears this
         // would spin forever on a refused connection.
-        listener.finished(RunFinished(outcome.kind, outcome.total, outcome.failed, outcome.exitCode))
+        listener.finished(
+            RunFinished(outcome.kind, outcome.total, outcome.failed, outcome.exitCode, outcome.stragglers)
+        )
         return outcome.exitCode
     }
+
+    private fun liveBurstThreads(): Int = synchronized(burstThreads) { burstThreads.count { it.isAlive } }
 
     // ── the three shapes a run can take ──
 
@@ -92,6 +143,10 @@ class Sender(
         val shared = if (factory.perSample) null else factory.open()
         try {
             for (index in 0 until o.samples) {
+                // Before the sleep, not instead of it: at the default interval
+                // of 0 there is no sleep to be interrupted, and this is then the
+                // only place a Stop can land.
+                checkCancelled()
                 if (index > 0 && o.intervalSeconds > 0) Thread.sleep((o.intervalSeconds * 1000).toLong())
                 val transport = shared ?: factory.open()
                 try {
@@ -121,11 +176,38 @@ class Sender(
                     factory.open().use { t -> if (!sendOne(index, t)) failures.incrementAndGet() }
                 }.onFailure {
                     failures.incrementAndGet()
-                    listener.failed(Failure(index, explain(it)))
+                    // A Stop is not a fault: the summary already says the run
+                    // was stopped, and n "connection refused" lines under it
+                    // would send the engineer looking for a network problem.
+                    if (it !is InterruptedException) listener.failed(Failure(index, explain(it)))
                 }
-            }.apply { name = "sim-burst-$index"; start() }
+            }.apply {
+                name = "sim-burst-$index"
+                // Daemon: a burst child stuck in a write must not keep the whole
+                // app alive after its window has been closed.
+                isDaemon = true
+                start()
+            }
         }
-        threads.forEach { it.join() }
+        // Tracked before the first join, so a Stop reaches children that the
+        // interrupted parent thread would otherwise abandon still sending.
+        synchronized(burstThreads) { burstThreads.addAll(threads) }
+        try {
+            threads.forEach { it.join() }
+            // cancel() interrupts the children but cannot interrupt this thread
+            // if it was never told to stop by an interrupt of its own. Without
+            // this a cancelled burst would still report itself as a completed
+            // one, with its children's aborts counted as connection failures.
+            checkCancelled()
+        } catch (e: InterruptedException) {
+            // The parent was interrupted mid-join. Pass it on to the children —
+            // they are the ones holding connections open — and give them a
+            // moment to unwind before reporting what is still live.
+            cancel()
+            val deadline = System.currentTimeMillis() + BURST_STOP_GRACE_MS
+            for (t in threads) t.join((deadline - System.currentTimeMillis()).coerceAtLeast(1))
+            throw e
+        }
         val bad = failures.get()
         return Outcome(RunKind.BURST, n, bad, if (bad == 0) 0 else 1)
     }
@@ -234,7 +316,10 @@ class Sender(
             transport.write(wire.copyOfRange(at, end))
             pieces++
             at = end
-            if (at < wire.size) Thread.sleep(chunkDelay)
+            if (at < wire.size) {
+                checkCancelled()
+                Thread.sleep(chunkDelay)
+            }
         }
         listener.note("  dribbled out in $pieces pieces of $size bytes, ${chunkDelay}ms apart")
     }
@@ -242,7 +327,9 @@ class Sender(
     // ── building ──
 
     internal fun specFor(index: Int): SampleSpec = SampleSpec(
-        specimenId = if (o.noSpecimen) null else o.ids[index % o.ids.size],
+        // One id per sample, decided once for the whole run: a burst indexes
+        // into this out of order, so it cannot be a running counter.
+        specimenId = if (o.noSpecimen) null else sampleIds[index % sampleIds.size],
         patientId = o.patientId,
         patientName = o.patientName,
         profile = o.profile,
@@ -308,6 +395,18 @@ class Sender(
             "--qc changes nothing on this link. The Mispa Count X format carries no processing-id field, " +
                 "so this goes out as an ordinary patient frame and BNM Lab WILL file it as a patient " +
                 "result. QC handling can only be rehearsed on the Mindray link.")
+        if (o.badUnits && o.analyzer == Analyzer.MISPA) add(
+            "--bad-units changes nothing on this link. The Mispa Count X format carries no unit field at " +
+                "all, so there is nothing for the app to fail to convert and this frame is byte-for-byte " +
+                "a clean one. Unit handling can only be rehearsed on the Mindray link.")
+        // A repeated accession is not a fault the engineer asked for, and it is
+        // invisible in the transcript — every sample looks like it went out.
+        // Only the app knows that the fifth result overwrote the first.
+        if (!o.noSpecimen && o.samples > 1 && sampleIds.distinct().size == 1) add(
+            "All ${o.samples} samples carry the SAME specimen id (${sampleIds.first()}). BNM Lab files " +
+                "each onto the order with that accession, so each result overwrites the last and this run " +
+                "cannot show that none were lost. Drop --id and the simulator advances its own sequence, " +
+                "as an analyzer does.")
     }
 
     /** The banner shown before a live-lab run, which is the only warning between
@@ -321,9 +420,13 @@ class Sender(
             "  ! Specimen id(s): " + summariseIds() + "\n" +
             "  " + "!".repeat(66)
 
-    private fun summariseIds(): String =
-        if (o.ids.size <= 3) o.ids.joinToString(", ")
-        else "${o.ids.first()} … ${o.ids.last()} (${o.ids.size})"
+    /** The ids this run will actually put on the wire — not the ids it was
+     *  given, which for an advancing sequence is one id standing for many. */
+    private fun summariseIds(): String {
+        val distinct = sampleIds.distinct()
+        return if (distinct.size <= 3) distinct.joinToString(", ")
+        else "${distinct.first()} … ${distinct.last()} (${distinct.size})"
+    }
 
     private fun faultSummary(): String = buildList {
         if (o.faults.truncated) add("truncated")
@@ -333,17 +436,23 @@ class Sender(
         if (o.faults.burst > 0) add("burst ${o.faults.burst}")
         if (o.faults.hang) add("hang")
         if (o.unknownCode) add("unknown-code")
-        if (o.badUnits) add("bad-units")
+        // Only where they change the frame. The Mispa format has neither a QC
+        // field nor a unit field, and a summary line naming a fault over a
+        // byte-for-byte clean frame is the lie the engineer would read as
+        // "the app's handling of this was exercised". The caveats above say so
+        // in words instead.
+        if (o.badUnits && o.analyzer == Analyzer.MINDRAY) add("bad-units")
         if (o.noSpecimen) add("no-specimen")
-        // Only where it changes the frame: the Mispa has no QC field, and a
-        // summary line saying "qc" over a plain patient frame is a lie the
-        // engineer would take to mean the app's QC handling had been exercised.
         if (o.qc && o.analyzer == Analyzer.MINDRAY) add("qc")
     }.joinToString(", ")
 
     private fun percentOf(part: Int, whole: Int): Int = if (whole == 0) 0 else part * 100 / whole
 
     companion object {
+        /** How long a stopped burst is given to unwind before the run reports
+         *  how many of its connections are still open. */
+        private const val BURST_STOP_GRACE_MS = 2_000L
+
         private val STAMP: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
 
         /** Deliberate nonsense: no frame start for either driver, and a stray

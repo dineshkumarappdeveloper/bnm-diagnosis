@@ -73,11 +73,40 @@ class ValuesTest {
      */
     @Test
     fun `the red-cell indices are ones a patient could actually have`() {
+        // Physics, not a reference range. MCHC is haemoglobin per unit packed
+        // cell volume, and above roughly 37 g/dL it is past what a red cell can
+        // hold in solution — a value no analyzer has ever measured, whatever the
+        // patient has. These bounds hold for EVERY profile, critical included:
+        // "critical" means panic WBC, HGB and PLT, not impossible arithmetic.
         for (profile in Profile.entries) for (seed in -200L..200L) {
             val c = cbcFor(profile, seed)
             assertTrue(c.mchc in 25.0..39.0,
                 "$profile seed $seed: MCHC ${c.mchc} g/dL cannot exist in vivo ($c)")
             assertTrue(c.mch in 18.0..40.0, "$profile seed $seed: MCH ${c.mch} pg ($c)")
+            assertTrue(c.mcv in 50.0..130.0, "$profile seed $seed: MCV ${c.mcv} fL ($c)")
+        }
+    }
+
+    @Test
+    fun `every profile but critical keeps MCHC, MCH and MCV in the everyday envelope`() {
+        // The tighter envelope, for every profile the engineer might leave
+        // selected by accident. `random` is the one that has to earn this: it
+        // draws freely, and three independent uniforms for HGB, RBC and MCV are
+        // each plausible alone and jointly impossible — which is how a rehearsal
+        // once produced MCHC 185 g/L against a 320-360 range and looked to a
+        // pathologist like the app had corrupted the numbers. Vary the picture,
+        // not the physics; deliberately extreme values live in `critical`.
+        val everyday = Profile.entries.filter { it != Profile.CRITICAL }
+        for (profile in everyday) for (seed in -500L..500L) {
+            val c = cbcFor(profile, seed)
+            assertTrue(c.mchc in 28.0..37.0,
+                "$profile seed $seed: MCHC ${c.mchc} g/dL is outside the everyday envelope ($c)")
+            assertTrue(c.mch in 18.0..38.0, "$profile seed $seed: MCH ${c.mch} pg ($c)")
+            assertTrue(c.mcv in 60.0..120.0, "$profile seed $seed: MCV ${c.mcv} fL ($c)")
+            // The indices have to agree with the primaries they are derived
+            // from, or the frame teaches nobody anything about the link.
+            assertEquals(round1(c.rbc * c.mcv / 10.0), round1(c.hct), "$profile seed $seed: HCT")
+            assertTrue(c.hgb > 0.0 && c.rbc > 0.0, "$profile seed $seed: a count at or below zero ($c)")
         }
     }
 

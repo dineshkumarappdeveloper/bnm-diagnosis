@@ -46,8 +46,10 @@ object LinkTest {
                 "machine name on a lab network.")
         } catch (e: NoRouteToHostException) {
             LinkTestResult(false, "No route to $host. The two machines are not on the same network.")
-        } catch (e: Exception) {
-            LinkTestResult(false, explain(e))
+        } catch (t: Throwable) {
+            // Throwable: see checkSerial. A probe that dies without a verdict
+            // leaves the button spinning forever.
+            LinkTestResult(false, explain(t))
         }
     }
 
@@ -61,9 +63,18 @@ object LinkTest {
             // listening" will chase the wrong fault next.
             LinkTestResult(true, "Opened $name at $baud 8-N-1. A cable is one-way, so this proves the " +
                 "adapter on THIS machine — not that BNM Lab is listening on the other end.")
-        } catch (e: Exception) {
-            LinkTestResult(false, "Could not open $name — it is already in use (a terminal program still " +
-                "holding it?), or the adapter is unplugged.")
+        } catch (t: Throwable) {
+            // Throwable, not Exception: jSerialComm raises an UnsatisfiedLinkError
+            // (an Error) when it cannot unpack its native library — a locked-down
+            // %TEMP%, antivirus quarantine, a jlink image that lost
+            // jdk.unsupported. Those are client-PC conditions, and on them the
+            // engineer needs a sentence, not a probe that never answers.
+            LinkTestResult(false, if (t is Exception)
+                "Could not open $name — it is already in use (a terminal program still holding it?), " +
+                    "or the adapter is unplugged."
+            else
+                "Serial support could not start on this machine: ${t.message ?: t::class.java.simpleName}. " +
+                    "The TCP link does not need it.")
         }
     }
 

@@ -159,7 +159,10 @@ $$$20260101090000$1$ACC-S1-00042$PAT-9001$6.68$4.82$256$14.0$43.9$91.1$29.0$31.9
 
 Real Mispa units are the Indian ones already (g/dL, %, 10^3/µL), and the
 protocol carries no unit field at all, which is why `--bad-units` is a Mindray
-flag.
+flag. Ask for it on a Mispa anyway and the run opens with a caveat saying the
+frame is byte-for-byte a clean one, and the `FAULTS:` line does not name it —
+a fault named over a frame it did not change is how an engineer ticks unit
+handling off the commissioning list having tested nothing.
 
 **Worth knowing on a Mispa install:** because the frame carries no units, the
 app has nothing to convert *from* and stores the number exactly as sent. A
@@ -202,7 +205,7 @@ socket and a one-way cable has no way to carry one.
 | Flag | Meaning |
 | --- | --- |
 | `--id <ids>` | specimen id: one, a comma list, or a pattern — `'ACC-S1-000{1..5}'` expands to five, leading zeros kept. **Quote the pattern**: bash, zsh and Git Bash expand braces before the JVM sees them, and the tool would get five loose words |
-| `--count <n>` | how many samples (default: one per id; the ids cycle if count is larger) |
+| `--count <n>` | how many samples. With **no** `--id` the default id advances per sample as a real analyzer's sequence does — `BNMTEST-0001`, `-0002`, … — so a five-sample run is five accessions. An `--id` you typed is **pinned**: every sample carries it, and a comma list or a pattern cycles. A run that repeats one accession says so before it starts, because BNM Lab files each result onto the same order and the last one wins |
 | `--interval <s>` | seconds between samples |
 | `--profile <name>` | see below |
 | `--patient "<name>"` | patient name — Mindray `PID-5`; the Mispa format carries none |
@@ -228,7 +231,7 @@ socket and a one-way cable has no way to carry one.
 | `--garbage` | sends bytes that are not a frame at all | bytes counted, frames 0, no result |
 | `--slow-chunks <ms>` | 64-byte pieces, `ms` apart | one normal result — this is the reassembly test |
 | `--unknown-code` | Mindray: an OBX under a code no driver map holds. Mispa: a 21st header field | a normal result; the surprise value is kept under the analyzer's own label (Mindray) or dropped (Mispa) — never mapped onto a real parameter |
-| `--bad-units` | Mindray: HGB in a unit the converter cannot bridge | the value still lands, plus a red log row "Unit not converted — stored as the analyzer sent it" |
+| `--bad-units` | **Mindray only**: HGB in a unit the converter cannot bridge. On a Mispa it changes nothing and the run says so — that format has no unit field to spoil | the value still lands, plus a red log row "Unit not converted — stored as the analyzer sent it" |
 | `--no-specimen` | Mispa specimen `0` / empty Mindray `OBR-3` | the **claim queue**, reason "no specimen id keyed on the analyzer" |
 | `--duplicate` | the same frame twice on one connection | two frames; the second must not double-apply |
 | `--burst <n>` | n connections at once (**TCP only**) | n results, none lost |

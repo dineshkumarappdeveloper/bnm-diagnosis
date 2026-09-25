@@ -363,7 +363,7 @@ fun App() {
                     when (hb) {
                         is LabHeartbeatResult.Ok -> {
                             AppLog.i("Licence", "heartbeat ok (mode=${hb.mode} seats=${hb.seats} expires=${hb.expiresAt})")
-                            licenseManager.applyHeartbeat(hb.licenseJwt, hb.mode, hb.seats, hb.expiresAt, hb.labName, hb.seatNo)
+                            licenseManager.applyHeartbeat(hb.licenseJwt, hb.mode, hb.seats, hb.expiresAt, hb.labName, hb.seatNo, hb.reportPageLive)
                         }
                         is LabHeartbeatResult.Blocked -> {
                             AppLog.w("Licence", "heartbeat: this device's licence is BLOCKED — new work gated")

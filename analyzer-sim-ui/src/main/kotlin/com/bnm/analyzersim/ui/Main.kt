@@ -1,5 +1,6 @@
 package com.bnm.analyzersim.ui
 
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.unit.DpSize
@@ -24,7 +25,15 @@ fun main(args: Array<String>) {
 
     application {
         val scope = rememberCoroutineScope()
-        val state = remember { SimState(PresetStore(), scope).also { it.refreshSerialPorts() } }
+        val state = remember { SimState(PresetStore(), scope) }
+        // NOT inside the remember above. Enumerating serial ports is
+        // jSerialComm's first call: it unpacks a native library into the temp
+        // directory and walks the OS device tree, which on a client's Windows
+        // laptop takes seconds. Done in the composition it ran on the AWT thread
+        // BEFORE the Window below existed, so a double-clicked installer icon
+        // drew nothing at all and the engineer launched the app again. As an
+        // effect it runs after this pass, and off the UI thread besides.
+        LaunchedEffect(Unit) { state.refreshSerialPorts(announce = false) }
         Window(
             onCloseRequest = ::exitApplication,
             title = "BNM Analyzer Simulator",

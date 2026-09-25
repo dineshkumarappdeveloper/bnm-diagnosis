@@ -76,9 +76,84 @@ class SimFormTest {
 
     @Test
     fun `five runs of the rehearsal preset are five accessions`() {
-        var form = SimForm().copy(sampleId = "SIM-0001", autoIncrementId = true)
+        var form = SimForm().copy(sampleId = "SIM-0001", count = "1", autoIncrementId = true)
         val ids = (1..5).map { form.sampleId.also { _ -> form = form.afterRun() } }
         assertEquals(listOf("SIM-0001", "SIM-0002", "SIM-0003", "SIM-0004", "SIM-0005"), ids)
+    }
+
+    /**
+     * ONE run of five, not five runs of one — which is what the shipped
+     * "Commissioning rehearsal" preset does and what step 9 of the README's
+     * rehearsal script asks for.
+     *
+     * This used to send BNMTEST-0001 five times: `toOptions` put the single id
+     * in `ids` and the 5 in `count`, and the core picked `ids[index % 1]` every
+     * time. Five results landed on one order, each overwriting the last, so the
+     * step that exists to prove "none lost" was the one step that could not.
+     */
+    @Test
+    fun `one run of the rehearsal preset puts five DIFFERENT accessions on the wire`() {
+        val rehearsal = PresetStore.BUILT_IN.first { it.name == "Commissioning rehearsal" }.toForm()
+        assertEquals("5", rehearsal.count, "the preset is no longer a five-sample run")
+        assertTrue(rehearsal.autoIncrementId, "the preset no longer asks for advancing ids")
+
+        val ids = rehearsal.toOptions().sampleIds
+        assertEquals(5, ids.size)
+        assertEquals(ids.size, ids.distinct().size, "the rehearsal still files five results onto one order: $ids")
+        assertEquals(
+            listOf("BNMTEST-0001", "BNMTEST-0002", "BNMTEST-0003", "BNMTEST-0004", "BNMTEST-0005"),
+            ids,
+        )
+    }
+
+    @Test
+    fun `the next run starts after the whole batch, not on top of it`() {
+        val after = SimForm().copy(sampleId = "SIM-0001", count = "5", autoIncrementId = true).afterRun()
+        assertEquals("SIM-0006", after.sampleId,
+            "run two would have reused run one's accessions")
+    }
+
+    @Test
+    fun `a burst consumes an accession per connection`() {
+        val form = SimForm().copy(sampleId = "SIM-0001", count = "1",
+            faults = FaultForm(burst = true, burstCount = "4"))
+        assertEquals(listOf("SIM-0001", "SIM-0002", "SIM-0003", "SIM-0004"), form.toOptions().sampleIds)
+        assertEquals("SIM-0005", form.afterRun().sampleId)
+    }
+
+    @Test
+    fun `a pattern in the id box is an enumeration — it cycles, and the box is left alone`() {
+        val form = SimForm().copy(sampleId = "ACC-S1-000{1..3}", count = "3", autoIncrementId = true)
+        assertEquals(listOf("ACC-S1-0001", "ACC-S1-0002", "ACC-S1-0003"), form.toOptions().sampleIds)
+        assertEquals("ACC-S1-000{1..3}", form.afterRun().sampleId,
+            "advancing rewrote the pattern into a single id and destroyed it")
+    }
+
+    @Test
+    fun `with auto-increment off a five-sample run really does reuse one accession`() {
+        // Not a bug — the engineer asked for it, and the core warns in the
+        // transcript. What matters is that the tick means something.
+        val form = SimForm().copy(sampleId = "ACC-S1-00042", count = "5", autoIncrementId = false)
+        assertEquals(List(5) { "ACC-S1-00042" }, form.toOptions().sampleIds)
+    }
+
+    /**
+     * `MispaFrames` never reads badUnits — that format has no unit field — so a
+     * tick carried over from a Mindray would put "bad-units" in the transcript
+     * over a byte-for-byte clean frame.
+     */
+    @Test
+    fun `bad units cannot survive a switch to the Mispa, which has no units to spoil`() {
+        val mindray = SimForm().copy(faults = FaultForm(badUnits = true))
+        assertTrue(mindray.toOptions().badUnits, "a Mindray run must still be able to spoil the unit")
+
+        val mispa = mindray.withAnalyzer(Analyzer.MISPA)
+        assertTrue(!mispa.faults.badUnits, "the tick survived the switch")
+        assertTrue(!mispa.toOptions().badUnits)
+
+        // And a preset saved on a Mindray, loaded onto a Mispa, cannot smuggle it in.
+        val loaded = SimForm().copy(analyzer = Analyzer.MISPA, faults = FaultForm(badUnits = true))
+        assertTrue(!loaded.toOptions().badUnits, "a preset carried the no-op fault onto a Mispa")
     }
 
     @Test
@@ -135,7 +210,10 @@ class SimFormTest {
         assertEquals("192.168.1.50", o.host)
         assertEquals(5500, o.port)
         assertEquals(listOf("ACC-S1-0001", "ACC-S1-0002", "ACC-S1-0003"), o.ids)
-        assertEquals(3, o.samples)
+        assertEquals(3, o.count)
+        // A burst IS its samples: four connections carrying one frame each. This
+        // form ticks every fault at once, and Sender.burst is the one that runs.
+        assertEquals(4, o.samples)
         assertEquals(2.5, o.intervalSeconds)
         assertEquals(Profile.CRITICAL, o.profile)
         assertEquals("Asha Menon", o.patientName)

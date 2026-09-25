@@ -188,16 +188,23 @@ class ReportSnapshotTest {
     }
 
     @Test
-    fun `the printed link is the app page with the token in the fragment, and no QR rides in the data`() {
+    fun `the printed link resolves either way, and no QR rides in the data`() {
         val token = ReportShare.newToken()
+        // Default: the permanent resolver (see ReportLinkTest for why).
         val qr = assertNotNull(ReportShare.qrFor(token))
-        assertEquals("https://app.bnmapp.com/r/#$token", qr.url)
-        assertEquals(41, qr.matrix.size, "90 bytes at ECC M is a version-6 symbol")
+        assertEquals(ReportShare.resolverUrl(token), qr.url)
+        assertEquals(49, qr.matrix.size, "138 bytes at ECC M is a version-8 symbol")
         assertEquals("Scan to view this report", qr.caption)
+
+        // Once BNM says the page is live, the token moves into the fragment.
+        val onPage = assertNotNull(ReportShare.qrFor(token, pageLive = true))
+        assertEquals("https://app.bnmapp.com/r/#$token", onPage.url)
+        assertEquals(41, onPage.matrix.size, "90 bytes at ECC M is a version-6 symbol")
 
         val sample = sampleReportDoc()
         val json = buildReportSnapshot(sample).toString()
-        assertTrue(sample.qr!!.url.substringAfter('#') !in json, "the token never rides in the snapshot")
+        val sampleToken = sample.qr!!.url.substringAfterLast('/').substringAfter('#')
+        assertTrue(sampleToken.isNotBlank() && sampleToken !in json, "the token never rides in the snapshot")
         assertTrue("bnmapp.com" !in json && "supabase" !in json)
     }
 

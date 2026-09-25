@@ -171,6 +171,37 @@ class SenderFaultsTest {
         assertTrue(capture.allBytes.contentEquals(plain.allBytes))
     }
 
+    /**
+     * `--bad-units` spoils the HGB unit in [MindrayFrames] and is read nowhere
+     * in [MispaFrames] — that format has no unit field. The banner used to print
+     * "FAULTS: bad-units" over a byte-for-byte clean frame, so an engineer saw
+     * the fault named, saw no unit-mismatch row in BNM Lab, and ticked unit
+     * handling off the commissioning list having tested nothing.
+     */
+    @Test
+    fun `bad units on the Mispa says it changes nothing, and the banner stops claiming it`() {
+        val capture = Capture()
+        val (code, out) = run(listOf("mispa", "--bad-units", "--id", "ACC-S1-00042"), capture)
+        assertEquals(0, code)
+        assertTrue(out.text.contains("carries no unit field at all"), out.text)
+        // The caveat names the flag on purpose; the FAULTS line must not, because
+        // that line is read as "this run exercised these".
+        assertTrue(out.text.lines().none { it.startsWith("  FAULTS:") },
+            "the banner still names the fault:\n${out.text}")
+        val plain = Capture()
+        run(listOf("mispa", "--id", "ACC-S1-00042"), plain)
+        assertTrue(capture.allBytes.contentEquals(plain.allBytes),
+            "if the frame differs at all, the caveat is the thing that is wrong")
+    }
+
+    @Test
+    fun `bad units on the Mindray really does spoil the unit, and is still announced`() {
+        val capture = Capture(goodAck)
+        val (_, out) = run(listOf("mindray", "--bad-units", "--id", "ACC-S1-00042"), capture)
+        assertTrue(out.text.contains("FAULTS: bad-units"), out.text)
+        assertTrue(capture.allBytes.decodeToString().contains("bogus/L"), "the HGB unit was not spoiled")
+    }
+
     @Test
     fun `qc on the Mindray is a real QC run and is still announced as one`() {
         val capture = Capture(goodAck)

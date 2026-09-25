@@ -112,7 +112,7 @@ Table `support_audit(id TEXT PK, session_id TEXT, at TEXT, tool TEXT, summary TE
 
 ## 8. Constants, config, docs
 
-- `api/Constants.kt`: `REMOTE_RELAY_URL = "wss://lab-relay.bnmapp.com"` (placeholder; overridable by env `BNM_RELAY_URL` for dev, read in `RemoteSupportService`).
+- `api/Constants.kt`: `REMOTE_RELAY_URL = "wss://lab-relay.bnmapp.com"` — bound to the Worker by `relay/wrangler.toml` (`custom_domain` route) and pinned to it by `RelayHostTest`; overridable by env `BNM_RELAY_URL` for dev, read in `RemoteSupportService`.
 - `docs/remote-support/RUNBOOK.md`: how a session runs end to end (lab side, engineer side, what to do when the analyzer is not linking — a checklist: firewall, IP, port, baud, driver, mapping, verify_pending).
 - CLAUDE.md: Remote support section (consent gate, PHI rules, never add a tool that writes clinical data, key rotation).
 

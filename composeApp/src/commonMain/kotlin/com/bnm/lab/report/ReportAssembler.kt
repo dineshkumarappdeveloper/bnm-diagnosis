@@ -184,7 +184,11 @@ class ReportAssembler(
         if (!publishable) return null
         if (license.state.value.isStandalone) return null
         val token = runCatching { repo.reportShareToken(orderId, accessionNo) }.getOrNull() ?: return null
-        return ReportShare.qrFor(token)
+        // Which link goes on the paper is the server's call, not this build's:
+        // the page link is printed only once a heartbeat has said the page is
+        // live. Everything else prints the permanent resolver, which forwards to
+        // the page the day it ships. See ReportShare.resolveUrl.
+        return ReportShare.qrFor(token, pageLive = license.state.value.reportPageLive)
     }
 
     companion object {
