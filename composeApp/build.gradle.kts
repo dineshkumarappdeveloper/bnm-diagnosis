@@ -105,6 +105,7 @@ kotlin {
             implementation(libs.ktor.client.content.negotiation)
             implementation(libs.ktor.serialization.kotlinx.json)
             implementation(libs.ktor.client.logging)
+            implementation(libs.ktor.client.websockets) // remote support session to BNM's relay (remote/)
             implementation(libs.ktor.network) // raw TCP for ESC/POS network thermal printers
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.kotlinx.coroutines.core)

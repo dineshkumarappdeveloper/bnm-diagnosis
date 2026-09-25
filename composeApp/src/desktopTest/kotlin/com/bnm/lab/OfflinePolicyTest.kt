@@ -50,6 +50,15 @@ class OfflinePolicyTest {
     }
 
     @Test
+    fun `a remote support session runs only because the owner started it`() {
+        // Same shape as the master-catalog pull: never on a timer, never at
+        // startup — the OWNER pressing Start is the whole permission.
+        assertTrue(OfflinePolicy.allowsRemoteSupport(userInitiated = true))
+        assertFalse(OfflinePolicy.allowsRemoteSupport(userInitiated = false))
+        assertTrue("remote support session" in OfflinePolicy.summary(true), OfflinePolicy.summary(true))
+    }
+
+    @Test
     fun `the operator is told in one line what this licence does with the network`() {
         val offline = OfflinePolicy.summary(true)
         assertTrue("Offline edition" in offline && "nothing leaves this computer" in offline, offline)
