@@ -244,9 +244,9 @@ fun App() {
     // ── P3: additive lab sync (push/pull lab_entities + EMR inbox). The app is
     // the system of record — every phase is best-effort and never blocks UI. ──
     // Report publishing rides the normal sync sweep: printing works offline, and
-    // the PDF reaches the server (making the printed QR resolvable) whenever
-    // connectivity next returns. Standalone licences never get here — both the
-    // engine and ReportUploader return early for them.
+    // the report snapshot reaches the server (making the printed QR resolvable)
+    // whenever connectivity next returns. Standalone licences never get here —
+    // both the engine and ReportUploader return early for them.
     val reportUploader = remember(labRepo, staffRepo, labApi) {
         ReportUploader(labRepo, labApi, ReportAssembler(labRepo, staffRepo))
     }

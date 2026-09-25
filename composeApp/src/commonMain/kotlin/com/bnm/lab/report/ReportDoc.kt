@@ -198,7 +198,7 @@ class ReportSignature(
 }
 
 /**
- * The "scan to download this report" block. [matrix] is already encoded, so the
+ * The "scan to view this report" block. [matrix] is already encoded, so the
  * renderers only ever fill rectangles — no image codec, no resolution ceiling.
  *
  * A doc carries this ONLY when the report can actually resolve: standalone
@@ -207,7 +207,7 @@ class ReportSignature(
  * than no QR at all.
  */
 class ReportQr(
-    /** What the QR encodes — the public admin-lab resolver for this report. */
+    /** What the QR encodes — this report's app.bnmapp.com page (see [ReportShare.resolveUrl]). */
     val url: String,
     val matrix: QrMatrix,
     /** Printed under the code so a patient knows what they are looking at. */
@@ -612,8 +612,8 @@ fun sampleReportDoc(
     verifierSignature = sampleVerifierSignature(),
     // The preview exists to check the LAYOUT, and the QR block moves
     // "Verified by" across, so it has to be here. The token is deliberately
-    // fake: this sheet is never handed to a patient, and scanning it 404s
-    // exactly like any other unknown token (see admin-lab's resolver).
+    // fake: this sheet is never handed to a patient, and scanning it lands on
+    // "not valid" exactly like any other unknown token (admin-lab /reports/view).
     qr = ReportShare.qrFor(SAMPLE_QR_TOKEN),
     generatedAt = "2026-08-25 13:47",
 )

@@ -6,9 +6,10 @@ import com.russhwolf.settings.Settings
  * P3 sync watermarks & cursors (multiplatform-settings, same store as the
  * other prefs holders). Watermarks are epoch millis of the newest LOCAL stamp
  * pushed per entity; cursors are the server `seq` high-water per stream.
+ *
+ * [s] is the test seam (an in-memory store); production uses the no-arg store.
  */
-class SyncPrefs {
-    private val s: Settings = Settings()
+class SyncPrefs(private val s: Settings = Settings()) {
 
     /** Newest local stamp already pushed for [entity] (epoch ms; 0 = never). */
     fun lastPushAt(entity: String): Long = s.getLong("$K_PUSH_AT$entity", 0L)
@@ -41,6 +42,15 @@ class SyncPrefs {
         get() = s.getBoolean(K_TICK_REPULL, false)
         set(v) = s.putBoolean(K_TICK_REPULL, v)
 
+    /**
+     * Whether this install has put its PDF-era published reports back in the
+     * upload queue once, so they republish as the report snapshot the
+     * app.bnmapp.com page reads (same token, same printed QR).
+     */
+    var reportsRequeuedForSnapshot: Boolean
+        get() = s.getBoolean(K_REPORTS_SNAPSHOT_REQUEUE, false)
+        set(v) = s.putBoolean(K_REPORTS_SNAPSHOT_REQUEUE, v)
+
     /** `clinical_lab_orders` EMR-inbox cursor (server seq). */
     var emrCursor: Long
         get() = s.getLong(K_EMR_CURSOR, 0L)
@@ -65,5 +75,6 @@ class SyncPrefs {
         const val K_LAST_SYNC = "sync_last_at"
         const val K_DISABLED = "sync_disabled_no_business"
         const val K_TICK_REPULL = "sync_pathologist_tick_repulled"
+        const val K_REPORTS_SNAPSHOT_REQUEUE = "sync_reports_requeued_for_snapshot"
     }
 }

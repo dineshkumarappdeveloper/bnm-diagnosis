@@ -23,6 +23,7 @@ import android.print.PrintDocumentAdapter
 import android.print.PrintDocumentInfo
 import android.print.PrintManager
 import androidx.core.content.FileProvider
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -73,16 +74,30 @@ actual fun writeLabReportPdf(doc: ReportDoc): String {
     val dir = File(ctx.cacheDir, "reports").apply { mkdirs() }
     val safe = doc.accession.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "lab" }
     val file = File(dir, "$safe-report.pdf")
+    renderReport(doc) { pdf -> FileOutputStream(file).use { pdf.writeTo(it) } }
+    return file.absolutePath
+}
+
+actual fun renderLabReportPdfBytes(doc: ReportDoc): ByteArray? {
+    // Same gate as writeLabReportPdf: no Activity yet means no report.
+    reportContext ?: return null
+    val out = ByteArrayOutputStream()
+    renderReport(doc) { it.writeTo(out) }
+    return out.toByteArray()
+}
+
+/** Lay [doc] out and hand the finished document to [save] — the file (or
+ *  buffer) is only opened once every page has drawn. */
+private inline fun renderReport(doc: ReportDoc, save: (PdfDocument) -> Unit) {
     val painter = AndroidReportPainter(doc)
     val total = painter.paginate()
     val pdf = PdfDocument()
     try {
         painter.renderInto(pdf, total)
-        FileOutputStream(file).use { pdf.writeTo(it) }
+        save(pdf)
     } finally {
         pdf.close()
     }
-    return file.absolutePath
 }
 
 actual fun openPdf(path: String): String {

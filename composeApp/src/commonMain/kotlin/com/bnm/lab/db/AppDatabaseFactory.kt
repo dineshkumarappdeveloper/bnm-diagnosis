@@ -184,8 +184,13 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
     driver.execute(null,
         "CREATE TABLE IF NOT EXISTS lab_reports (order_id TEXT NOT NULL PRIMARY KEY, " +
         "token TEXT NOT NULL, accession_no TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', " +
-        "published_at TEXT, expires_at TEXT, sha256 TEXT, created_at TEXT NOT NULL, updated_at TEXT)", 0)
+        "published_at TEXT, expires_at TEXT, sha256 TEXT, created_at TEXT NOT NULL, updated_at TEXT, " +
+        "attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT)", 0)
     driver.execute(null, "CREATE UNIQUE INDEX IF NOT EXISTS lab_reports_token ON lab_reports(token)", 0)
+    // Upload retries (2026-09-15) — appended after updated_at, in the SAME
+    // order as LabReports.sq (SELECT * maps positionally).
+    driver.addColumn("lab_reports", "attempts", "INTEGER NOT NULL DEFAULT 0")
+    driver.addColumn("lab_reports", "next_attempt_at", "TEXT")
 
     // ── I0/I1: analyzer interfacing (instruments + traffic log + claim queue
     // + measured result graphs) ──
