@@ -59,9 +59,13 @@ say *listening*. The simulator names the driver key you need, top left.
    - *Nothing is listening on 5500 …* — BNM Lab is not running, the instrument
      row is disabled, the port is a digit out, or Windows Firewall is eating it.
 4. **Set the sample.** The specimen id is the accession on the tube. Leave
-   **+1 per run** on and each Send uses the next one (SIM-0001, SIM-0002 …), so
-   a five-sample rehearsal is five accessions rather than five results fighting
-   over one. Pick a profile; `critical` is the one that should reach the
+   **+1 per run** on and every SAMPLE takes the next one (SIM-0001, SIM-0002 …),
+   so a five-sample rehearsal is five accessions rather than five results
+   fighting over one, and the next run starts after the batch this one used.
+   A pattern such as `ACC-S1-000{1..5}` is an enumeration and is left exactly as
+   typed. Turn the tick off and every sample carries the one id — useful for
+   proving the app does not double-apply, and the transcript warns you that it
+   cannot prove anything about results being lost. Pick a profile; `critical` is the one that should reach the
    call-out list.
 5. **Press Send.** Each sample appears in the transcript on the right: the id,
    the headline values, the bytes that left this machine, and what BNM Lab said

@@ -22,10 +22,24 @@ import kotlinx.coroutines.launch
 class SimState(
     private val store: PresetStore,
     private val scope: CoroutineScope,
-    /** Swapped in tests so a run can be driven without a socket. */
-    private val runner: (SimState, ForwardingSendListener) -> Unit = { state, listener ->
-        Sender(state.form.toOptions(), listener).run()
+    /**
+     * Builds the run. Swapped in tests so one can be driven without a socket.
+     *
+     * Returns the [Sender] rather than running it, so [stop] has something to
+     * call [Sender.cancel] on — and it is built on the UI thread, before the
+     * worker starts, so a Stop pressed immediately cannot race a null handle.
+     */
+    private val runner: (SimForm, ForwardingSendListener) -> Sender = { form, listener ->
+        Sender(form.toOptions(), listener)
     },
+    /**
+     * The blocking link probe. Swapped in tests so they can raise the failures a
+     * client's PC raises — including the Errors that used to leave the button a
+     * disabled spinner for the rest of the session.
+     */
+    private val probe: (SimForm) -> LinkTestResult = LinkTest::check,
+    /** The blocking serial-port enumeration, swapped for the same reason. */
+    private val ports: () -> List<String> = LinkTest::serialPorts,
 ) {
     var form by mutableStateOf(SimForm())
     var blocks by mutableStateOf(emptyList<TranscriptBlock>())
@@ -44,10 +58,14 @@ class SimState(
         private set
     var testingLink by mutableStateOf(false)
         private set
+    /** True while the serial ports are being enumerated off the UI thread. */
+    var scanningPorts by mutableStateOf(false)
+        private set
     /** A one-line answer to the last thing the engineer pressed. */
     var status by mutableStateOf<String?>(null)
 
     private var worker: Thread? = null
+    private var sender: Sender? = null
 
     val presetPath: String get() = store.path
 
@@ -60,11 +78,39 @@ class SimState(
         linkResult = null
     }
 
-    fun refreshSerialPorts() {
-        serialPorts = LinkTest.serialPorts()
-        status = if (serialPorts.isEmpty())
-            "No serial ports on this machine. Plug the USB adapter in and press Refresh."
-        else "Serial ports: ${serialPorts.joinToString(", ")}"
+    /**
+     * Enumerate the serial ports, OFF the UI thread.
+     *
+     * jSerialComm's first call extracts its native library into the temp
+     * directory and then walks the OS device tree. On a client's Windows laptop
+     * — antivirus watching %TEMP%, or a wedged USB-serial driver — that is
+     * seconds, and this used to run inside the composition, BEFORE the window
+     * existed. The engineer double-clicked an installer icon that drew nothing
+     * and started the app a second time. The Mindray/TCP user, who is the
+     * common case, was paying it for a list they never open.
+     *
+     * [announce] is false for the first scan at launch: the status line should
+     * say what the window is for, not report on a list nobody asked for.
+     */
+    fun refreshSerialPorts(announce: Boolean = true) {
+        if (scanningPorts) return
+        scanningPorts = true
+        val answer = Channel<List<String>>(1)
+        Thread({
+            try {
+                answer.trySend(ports())
+            } finally {
+                answer.close()
+            }
+        }, "analyzer-sim-ports").apply { isDaemon = true }.start()
+        scope.launch {
+            serialPorts = answer.receiveCatching().getOrNull().orEmpty()
+            if (announce) status = if (serialPorts.isEmpty())
+                "No serial ports on this machine. Plug the USB adapter in and press Refresh."
+            else "Serial ports: ${serialPorts.joinToString(", ")}"
+            // Last, so that "not scanning" means everything it settles is settled.
+            scanningPorts = false
+        }
     }
 
     // ── presets ──
@@ -95,10 +141,31 @@ class SimState(
         status = null
         val snapshot = form
         val answer = Channel<LinkTestResult>(1)
-        Thread({ answer.trySend(LinkTest.check(snapshot)) }, "analyzer-sim-linktest")
-            .apply { isDaemon = true }.start()
+        Thread({
+            // Throwable, not Exception, and a finally that closes the channel.
+            // jSerialComm's static initialiser raises an ERROR when it cannot
+            // unpack its native library — a locked-down %TEMP%, antivirus
+            // quarantine, a jlink image missing jdk.unsupported — and an Error
+            // escaping here used to kill this thread before it answered. The
+            // receive below then waited forever, the button stayed a disabled
+            // spinner for the rest of the session, and the engineer was told
+            // nothing at all, on exactly the machine where the link test is
+            // the thing they need most.
+            try {
+                answer.trySend(probe(snapshot))
+            } catch (t: Throwable) {
+                answer.trySend(LinkTestResult(false,
+                    "The link test could not run on this machine: " +
+                        (t.message ?: t::class.java.simpleName)))
+            } finally {
+                answer.close()
+            }
+        }, "analyzer-sim-linktest").apply { isDaemon = true }.start()
         scope.launch {
-            linkResult = answer.receive()
+            // receiveCatching: a closed-without-a-value channel still has to
+            // clear the spinner, or the button is dead until the app restarts.
+            linkResult = answer.receiveCatching().getOrNull()
+                ?: LinkTestResult(false, "The link test ended without an answer. Press it again.")
             testingLink = false
         }
     }
@@ -120,9 +187,14 @@ class SimState(
 
         val events = Channel<SimEvent>(Channel.UNLIMITED)
         val listener = ForwardingSendListener { events.trySend(it) }
+        // Built here, on the UI thread: Stop needs a handle on it, and building
+        // it inside the worker would leave a window in which Stop had nothing
+        // to cancel. The constructor opens nothing — run() does.
+        val run = runner(form, listener)
+        sender = run
         val thread = Thread({
             try {
-                runner(this, listener)
+                run.run()
             } finally {
                 events.close()
             }
@@ -137,24 +209,34 @@ class SimState(
                 if (stopping && event is SimEvent.Failed) continue
                 blocks = applyEvent(blocks, event)
             }
-            running = false
             worker = null
-            // The id advances once per RUN, not once per sample: five samples
-            // two seconds apart are five accessions, and the sixth run starts
-            // after them.
+            sender = null
+            // The id advances per SAMPLE inside the run (Options.sampleIds);
+            // this moves the box PAST the whole batch, so the next run starts
+            // at the sixth accession rather than back on top of the second.
+            // A stopped run advances nothing: it did not send the batch.
             if (!stopping) form = form.afterRun()
             stopping = false
+            // Last, so "not running" means the transcript, the id box and the
+            // buttons have all already settled.
+            running = false
         }
     }
 
     /**
-     * Interrupt the sender. It lands at the next sleep between samples, so a
-     * single sample already waiting out its ACK timeout finishes first — the
-     * button says "Stopping…" rather than pretending otherwise.
+     * Call the run off.
+     *
+     * Both halves matter. [Sender.cancel] sets a flag the sender checks between
+     * samples and between write chunks — the only thing that works at the
+     * default interval of 0, where there is no sleep for an interrupt to land
+     * on; the interrupt then wakes a sender that IS sleeping out an interval so
+     * it does not sit there until the next tick. The sample already on the wire
+     * finishes either way, which is what "Stopping…" on the button means.
      */
     fun stop() {
         if (!running) return
         stopping = true
+        sender?.cancel()
         worker?.interrupt()
     }
 

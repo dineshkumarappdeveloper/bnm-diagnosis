@@ -207,7 +207,9 @@ class ReportSignature(
  * than no QR at all.
  */
 class ReportQr(
-    /** What the QR encodes — this report's app.bnmapp.com page (see [ReportShare.resolveUrl]). */
+    /** What the QR encodes: the permanent `admin-lab /reports/r/` resolver, or
+     *  this report's app.bnmapp.com page once that page is live — the choice is
+     *  [ReportShare.resolveUrl]'s. */
     val url: String,
     val matrix: QrMatrix,
     /** Printed under the code so a patient knows what they are looking at. */
@@ -613,7 +615,9 @@ fun sampleReportDoc(
     // The preview exists to check the LAYOUT, and the QR block moves
     // "Verified by" across, so it has to be here. The token is deliberately
     // fake: this sheet is never handed to a patient, and scanning it lands on
-    // "not valid" exactly like any other unknown token (admin-lab /reports/view).
+    // "not valid" exactly like any other unknown token. The preview encodes the
+    // resolver link (the default, and the denser of the two symbols), so the
+    // layout is checked against the worst case a lab actually prints.
     qr = ReportShare.qrFor(SAMPLE_QR_TOKEN),
     generatedAt = "2026-08-25 13:47",
 )

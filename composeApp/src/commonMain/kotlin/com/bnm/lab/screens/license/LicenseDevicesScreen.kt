@@ -183,6 +183,7 @@ fun LicenseDevicesScreen(
                                                     is LabHeartbeatResult.Ok -> {
                                                         licenseManager.applyHeartbeat(
                                                             hb.licenseJwt, hb.mode, hb.seats, hb.expiresAt, hb.labName,
+                                                            reportPageLive = hb.reportPageLive,
                                                         )
                                                         val nowStandalone = licenseManager.state.value.isStandalone
                                                         licenceMessage = when {
@@ -302,6 +303,7 @@ fun LicenseDevicesScreen(
                                                         is LabHeartbeatResult.Ok -> {
                                                             licenseManager.applyHeartbeat(
                                                                 hb.licenseJwt, hb.mode, hb.seats, hb.expiresAt, hb.labName,
+                                                                reportPageLive = hb.reportPageLive,
                                                             )
                                                             renewalMessage = "Licence refreshed."
                                                         }

@@ -1,6 +1,8 @@
 package com.bnm.analyzersim
 
 import java.util.Locale
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.roundToLong
 
 /**
@@ -129,8 +131,43 @@ enum class Profile(val cliName: String, val summary: String) {
  * 20 000 /cumm) — so "send a critical and watch it reach the call-out list" is
  * a rehearsal an engineer can actually run, not a guess.
  */
-fun cbcFor(profile: Profile, seed: Long): Cbc {
-    val rng = Rng(seed)
+fun cbcFor(profile: Profile, seed: Long): Cbc = drawCbc(profile, Rng(seed)).withPossibleHaemoglobin()
+
+/**
+ * The lowest and highest haemoglobin concentration a red cell can actually
+ * carry, in g/dL of packed cells.
+ *
+ * Above about 36.5 the cell is past what haemoglobin will stay in solution at;
+ * below about 28 there is not enough of it in the cell for the cell to exist.
+ * Neither is a reference range — a profile is free to be as abnormal as it
+ * likes between them, and CRITICAL is.
+ */
+private const val MCHC_FLOOR = 28.0
+private const val MCHC_CEILING = 36.5
+
+/**
+ * Pull HGB into the band the red cells could actually carry.
+ *
+ * Each profile draws its primaries independently, which is what makes two
+ * seeds two different patients — but HGB, RBC and MCV are not independent in a
+ * body. MCHC is HGB over RBC x MCV, so a draw that happens to put a high
+ * haemoglobin on top of small cells asks for a concentration no cell can hold:
+ * the frame parses, the arithmetic agrees with itself, and the pathologist
+ * reading the rehearsal concludes BNM Lab corrupted the numbers. It is the same
+ * joint impossibility the RANDOM profile avoids by deriving HGB outright.
+ *
+ * A draw that was always possible is returned UNTOUCHED, so a seed keeps the
+ * exact frame it has always emitted; only an impossible one is moved, and only
+ * as far as the nearest edge. The rounding goes INWARD, because the tenth HGB
+ * is reported at could otherwise carry the concentration straight back out.
+ */
+private fun Cbc.withPossibleHaemoglobin(): Cbc = when {
+    mchc > MCHC_CEILING -> copy(hgb = floor(hct * MCHC_CEILING / 100.0 * 10.0) / 10.0)
+    mchc < MCHC_FLOOR -> copy(hgb = ceil(hct * MCHC_FLOOR / 100.0 * 10.0) / 10.0)
+    else -> this
+}
+
+private fun drawCbc(profile: Profile, rng: Rng): Cbc {
     return when (profile) {
         Profile.NORMAL -> Cbc(
             wbc = round2(7.2 + rng.jitter(1.4)),

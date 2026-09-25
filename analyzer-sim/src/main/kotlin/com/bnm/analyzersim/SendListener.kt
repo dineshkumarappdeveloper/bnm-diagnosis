@@ -177,6 +177,16 @@ data class RunFinished(
     val failed: Int,
     /** What the process exits with: 0 only when everything went out as intended. */
     val exitCode: Int,
+    /**
+     * Connections that were STILL OPEN when a stopped run gave up waiting for
+     * them — a stopped burst, whose children may be blocked in a write that no
+     * interrupt can reach.
+     *
+     * Reported rather than hidden because "Stopped — nothing further was sent"
+     * over threads that are still dribbling frames into a lab is the one
+     * sentence this tool must never print.
+     */
+    val stragglers: Int = 0,
 ) {
     val ok: Boolean get() = exitCode == 0
 }
@@ -256,7 +266,11 @@ class PrintingSendListener(private val out: Printer) : SendListener {
                 else "Done — ${summary.failed} of ${summary.total} failed."
             )
             // A hang says its own last word; an aborted run already printed the failure.
-            RunKind.HANG, RunKind.ABORTED -> Unit
+            RunKind.HANG -> Unit
+            RunKind.ABORTED -> if (summary.stragglers > 0) out.warn(
+                "Stopped, but ${summary.stragglers} connection(s) were still open and may still be " +
+                    "sending. Check the Instruments screen before treating this run as ended."
+            )
         }
     }
 }

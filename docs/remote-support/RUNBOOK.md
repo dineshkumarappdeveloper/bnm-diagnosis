@@ -17,8 +17,11 @@ the staff member with the OWNER role (only they can start a session);
   half must be compiled into the build the lab runs (`RemoteSupportKeys.kt`).
   Until then use the dev key in `tools/remote-mcp/test/` — `lab.overview`
   reports `support_key: dev` on such builds.
-- The relay's engineer token (`BNM_SUPPORT_TOKEN`) and URL. On this branch the
-  URL is the placeholder `wss://lab-relay.bnmapp.com`.
+- The relay's engineer token (`BNM_SUPPORT_TOKEN`) and URL. The URL is
+  `wss://lab-relay.bnmapp.com` — the host `relay/wrangler.toml` binds to the
+  Worker and the one every lab build dials. Until that Worker is deployed
+  (`relay/README.md`, "Secrets and deploy"), no session can connect from any
+  lab: check `curl https://lab-relay.bnmapp.com/v1/health` first.
 - Registered: `claude mcp add bnmlab-remote -e BNM_RELAY_URL=… -e BNM_SUPPORT_TOKEN=… -- node /abs/path/tools/remote-mcp/bnmlab-remote.mjs`.
 
 ## 1. The lab's side — what to tell the person at the PC
