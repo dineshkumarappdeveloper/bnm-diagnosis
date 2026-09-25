@@ -40,6 +40,20 @@ So:
 
 ---
 
+## The easy way: the window
+
+Most people should not be reading this page. There is a packaged desktop app —
+same simulator, same core, same safety rules, no terminal and no flags — in
+[`../analyzer-sim-ui`](../analyzer-sim-ui/README.md). Install it, pick the
+analyzer, type the lab PC's address, press Send, read the transcript. It also
+tells you what BNM Lab should be showing for whatever you ticked, which is the
+part a command line cannot do.
+
+This page is for the command line: scripting a run, a machine with no display,
+or reaching for something the window does not expose (`--dry-run`, `--verbose`).
+
+---
+
 ## Run it
 
 ```bash
@@ -145,7 +159,10 @@ $$$20260101090000$1$ACC-S1-00042$PAT-9001$6.68$4.82$256$14.0$43.9$91.1$29.0$31.9
 
 Real Mispa units are the Indian ones already (g/dL, %, 10^3/µL), and the
 protocol carries no unit field at all, which is why `--bad-units` is a Mindray
-flag.
+flag. Ask for it on a Mispa anyway and the run opens with a caveat saying the
+frame is byte-for-byte a clean one, and the `FAULTS:` line does not name it —
+a fault named over a frame it did not change is how an engineer ticks unit
+handling off the commissioning list having tested nothing.
 
 **Worth knowing on a Mispa install:** because the frame carries no units, the
 app has nothing to convert *from* and stores the number exactly as sent. A
@@ -188,7 +205,7 @@ socket and a one-way cable has no way to carry one.
 | Flag | Meaning |
 | --- | --- |
 | `--id <ids>` | specimen id: one, a comma list, or a pattern — `'ACC-S1-000{1..5}'` expands to five, leading zeros kept. **Quote the pattern**: bash, zsh and Git Bash expand braces before the JVM sees them, and the tool would get five loose words |
-| `--count <n>` | how many samples (default: one per id; the ids cycle if count is larger) |
+| `--count <n>` | how many samples. With **no** `--id` the default id advances per sample as a real analyzer's sequence does — `BNMTEST-0001`, `-0002`, … — so a five-sample run is five accessions. An `--id` you typed is **pinned**: every sample carries it, and a comma list or a pattern cycles. A run that repeats one accession says so before it starts, because BNM Lab files each result onto the same order and the last one wins |
 | `--interval <s>` | seconds between samples |
 | `--profile <name>` | see below |
 | `--patient "<name>"` | patient name — Mindray `PID-5`; the Mispa format carries none |
@@ -214,7 +231,7 @@ socket and a one-way cable has no way to carry one.
 | `--garbage` | sends bytes that are not a frame at all | bytes counted, frames 0, no result |
 | `--slow-chunks <ms>` | 64-byte pieces, `ms` apart | one normal result — this is the reassembly test |
 | `--unknown-code` | Mindray: an OBX under a code no driver map holds. Mispa: a 21st header field | a normal result; the surprise value is kept under the analyzer's own label (Mindray) or dropped (Mispa) — never mapped onto a real parameter |
-| `--bad-units` | Mindray: HGB in a unit the converter cannot bridge | the value still lands, plus a red log row "Unit not converted — stored as the analyzer sent it" |
+| `--bad-units` | **Mindray only**: HGB in a unit the converter cannot bridge. On a Mispa it changes nothing and the run says so — that format has no unit field to spoil | the value still lands, plus a red log row "Unit not converted — stored as the analyzer sent it" |
 | `--no-specimen` | Mispa specimen `0` / empty Mindray `OBR-3` | the **claim queue**, reason "no specimen id keyed on the analyzer" |
 | `--duplicate` | the same frame twice on one connection | two frames; the second must not double-apply |
 | `--burst <n>` | n connections at once (**TCP only**) | n results, none lost |
@@ -355,7 +372,11 @@ A simulator nobody checks drifts, and then an engineer commissions a lab
 against a frame no analyzer would ever send. Three layers stop that:
 
 - `./gradlew :analyzer-sim:test` — frame structure, value consistency, curve
-  shape, the CLI, and what each fault actually puts on the wire.
+  shape, the CLI, and what each fault actually puts on the wire. Including
+  `CliTranscriptParityTest`, which pins a whole dry run's output word for word:
+  the transcript is a user interface — the rehearsal below tells an engineer
+  which line to look for — so a refactor (`SendListener`, which the window is
+  built on) must not quietly reword it.
 - `composeApp/src/desktopTest/.../AnalyzerSimFidelityTest.kt` — every profile on
   both analyzers, built by this tool and read back by the **real** drivers
   (`MispaCountX.parse`, `MindrayBc5x.parse`). Values, units, ids, patient
@@ -368,6 +389,12 @@ against a frame no analyzer would ever send. Three layers stop that:
 
 There is also a manual bench for the packaged jar (`AnalyzerSimBench`), opt-in
 via environment variables — see its KDoc.
+
+The window in `../analyzer-sim-ui` is a front end on this module, not a copy of
+it: it builds `Options`, runs them through the same `Cli.validate` (so the
+live-lab gate and the serial refusals hold there too), hands them to the same
+`Sender` and renders the same `SendListener` events the CLI prints. Anything you
+change here reaches both.
 
 The two things most worth knowing if you change this tool:
 

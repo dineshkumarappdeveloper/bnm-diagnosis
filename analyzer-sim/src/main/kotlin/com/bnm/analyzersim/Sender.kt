@@ -36,10 +36,15 @@ class RecordingPrinter(private val verbose: Boolean = true) : Printer {
  * came back" from "the connection was refused" from "the app ACKed but with
  * an error code", and those three look identical from the app's side of the
  * cable.
+ *
+ * What happened is reported as [SendListener] events, never by printing: the
+ * CLI hands in a [PrintingSendListener] and the window hands in its own. Both
+ * front ends therefore see the same run, and neither has to read the other's
+ * sentences.
  */
 class Sender(
     private val o: Options,
-    private val out: Printer,
+    private val listener: SendListener,
     /** yyyyMMddHHmmss; injected so a test gets a frame it can predict. */
     private val clock: () -> String = { LocalDateTime.now().format(STAMP) },
     /** Swaps the real socket out. Only the tests pass this — the CLI never does,
@@ -47,32 +52,101 @@ class Sender(
     private val transportOverride: TransportFactory? = null,
 ) {
 
+    /** The CLI's way in: a printer is a listener that prints. */
+    constructor(
+        o: Options,
+        out: Printer,
+        clock: () -> String = { LocalDateTime.now().format(STAMP) },
+        transportOverride: TransportFactory? = null,
+    ) : this(o, PrintingSendListener(out), clock, transportOverride)
+
+    /** What one shape of run ended up doing. */
+    private data class Outcome(
+        val kind: RunKind,
+        val total: Int,
+        val failed: Int,
+        val exitCode: Int,
+        /** Connections still open when the run gave up — see [RunFinished.stragglers]. */
+        val stragglers: Int = 0,
+    )
+
+    /** One id per sample, settled before the first frame — see [Options.sampleIds]. */
+    private val sampleIds: List<String> = o.sampleIds
+
+    /**
+     * Set by [cancel]. Checked between samples and between write chunks, which
+     * is what makes Stop mean something.
+     *
+     * A flag rather than [Thread.interrupt] alone, because interruption only
+     * lands on a thread that is sleeping or waiting: `Socket.connect`,
+     * `OutputStream.write` and a socket read are all deaf to it, so a run with
+     * no interval between samples — the default — used to send every remaining
+     * frame after Stop was pressed and then report a clean finish.
+     */
+    @Volatile
+    private var cancelled = false
+
+    /** Burst children, so [cancel] can reach the threads it did not start. */
+    private val burstThreads = java.util.Collections.synchronizedList(mutableListOf<Thread>())
+
+    /**
+     * Stop the run at the next safe point: before the next sample, before the
+     * next chunk of a dribbled frame. The sample already on the wire finishes —
+     * half a frame left behind by a Stop would be a fault the engineer did not
+     * ask for.
+     */
+    fun cancel() {
+        cancelled = true
+        synchronized(burstThreads) { burstThreads.forEach { it.interrupt() } }
+    }
+
+    /** Throws if [cancel] has been called; the caller unwinds to an ABORTED run. */
+    private fun checkCancelled() {
+        if (cancelled || Thread.currentThread().isInterrupted) throw InterruptedException("stopped")
+    }
+
     /** Process exit code: 0 when every sample went out as intended. */
     fun run(): Int {
-        out.info(banner())
-        for (caveat in caveats()) out.warn(caveat)
+        listener.runStarted(runStart())
         val factory = factory()
-        return try {
+        val outcome = try {
             when {
                 o.faults.hang -> hang(factory)
                 o.faults.burst > 0 -> burst(factory)
                 else -> sequential(factory)
             }
+        } catch (e: InterruptedException) {
+            // Asked for, not gone wrong: no failure line. Clear the flag so the
+            // transport closes below instead of throwing on its way out.
+            Thread.interrupted()
+            Outcome(RunKind.ABORTED, o.samples, o.samples, 1, stragglers = liveBurstThreads())
         } catch (e: Exception) {
-            out.warn(explain(e))
-            1
+            listener.failed(Failure(null, explain(e)))
+            Outcome(RunKind.ABORTED, o.samples, o.samples, 1)
         } finally {
             (factory as? AutoCloseable)?.let { runCatching { it.close() } }
         }
+        // Always, including after a failure — a window that never hears this
+        // would spin forever on a refused connection.
+        listener.finished(
+            RunFinished(outcome.kind, outcome.total, outcome.failed, outcome.exitCode, outcome.stragglers)
+        )
+        return outcome.exitCode
     }
+
+    private fun liveBurstThreads(): Int = synchronized(burstThreads) { burstThreads.count { it.isAlive } }
 
     // ── the three shapes a run can take ──
 
-    private fun sequential(factory: TransportFactory): Int {
+    private fun sequential(factory: TransportFactory): Outcome {
         var failures = 0
         val shared = if (factory.perSample) null else factory.open()
         try {
             for (index in 0 until o.samples) {
+                // Before the sleep, not instead of it: at the default interval
+                // of 0 there is no sleep to be interrupted, and this is then the
+                // only place a Stop can land.
+                checkCancelled()
                 if (index > 0 && o.intervalSeconds > 0) Thread.sleep((o.intervalSeconds * 1000).toLong())
                 val transport = shared ?: factory.open()
                 try {
@@ -84,9 +158,7 @@ class Sender(
         } finally {
             shared?.close()
         }
-        out.info(if (failures == 0) "Done — ${o.samples} sample(s) sent."
-        else "Done — ${o.samples - failures} of ${o.samples} sent, $failures failed.")
-        return if (failures == 0) 0 else 1
+        return Outcome(RunKind.SEQUENTIAL, o.samples, failures, if (failures == 0) 0 else 1)
     }
 
     /**
@@ -94,9 +166,9 @@ class Sender(
      * same instant. The app accepts each connection on its own coroutine, and
      * this is the only way to prove that from outside.
      */
-    private fun burst(factory: TransportFactory): Int {
+    private fun burst(factory: TransportFactory): Outcome {
         val n = o.faults.burst
-        out.info("Burst: opening $n connections at once.")
+        listener.note("Burst: opening $n connections at once.")
         val failures = AtomicInteger(0)
         val threads = (0 until n).map { index ->
             Thread {
@@ -104,14 +176,40 @@ class Sender(
                     factory.open().use { t -> if (!sendOne(index, t)) failures.incrementAndGet() }
                 }.onFailure {
                     failures.incrementAndGet()
-                    out.warn("connection $index: ${explain(it)}")
+                    // A Stop is not a fault: the summary already says the run
+                    // was stopped, and n "connection refused" lines under it
+                    // would send the engineer looking for a network problem.
+                    if (it !is InterruptedException) listener.failed(Failure(index, explain(it)))
                 }
-            }.apply { name = "sim-burst-$index"; start() }
+            }.apply {
+                name = "sim-burst-$index"
+                // Daemon: a burst child stuck in a write must not keep the whole
+                // app alive after its window has been closed.
+                isDaemon = true
+                start()
+            }
         }
-        threads.forEach { it.join() }
+        // Tracked before the first join, so a Stop reaches children that the
+        // interrupted parent thread would otherwise abandon still sending.
+        synchronized(burstThreads) { burstThreads.addAll(threads) }
+        try {
+            threads.forEach { it.join() }
+            // cancel() interrupts the children but cannot interrupt this thread
+            // if it was never told to stop by an interrupt of its own. Without
+            // this a cancelled burst would still report itself as a completed
+            // one, with its children's aborts counted as connection failures.
+            checkCancelled()
+        } catch (e: InterruptedException) {
+            // The parent was interrupted mid-join. Pass it on to the children —
+            // they are the ones holding connections open — and give them a
+            // moment to unwind before reporting what is still live.
+            cancel()
+            val deadline = System.currentTimeMillis() + BURST_STOP_GRACE_MS
+            for (t in threads) t.join((deadline - System.currentTimeMillis()).coerceAtLeast(1))
+            throw e
+        }
         val bad = failures.get()
-        out.info(if (bad == 0) "Done — all $n connections completed." else "Done — $bad of $n failed.")
-        return if (bad == 0) 0 else 1
+        return Outcome(RunKind.BURST, n, bad, if (bad == 0) 0 else 1)
     }
 
     /**
@@ -119,16 +217,16 @@ class Sender(
      * listening state with no frames — which is what a lab sees when the
      * analyzer's LIS setting points at BNM Lab but nobody has pressed Send.
      */
-    private fun hang(factory: TransportFactory): Int {
+    private fun hang(factory: TransportFactory): Outcome {
         val holdSeconds = if (o.intervalSeconds > 0) o.intervalSeconds else 30.0
         factory.open().use { t ->
-            out.info("Connected: ${t.describe}")
-            out.info("Holding the link open for ${fmt(holdSeconds, 1)}s without sending anything.")
-            out.info("BNM Lab should show this address as the peer, bytes 0, frames 0.")
+            listener.note("Connected: ${t.describe}")
+            listener.note("Holding the link open for ${fmt(holdSeconds, 1)}s without sending anything.")
+            listener.note("BNM Lab should show this address as the peer, bytes 0, frames 0.")
             Thread.sleep((holdSeconds * 1000).toLong())
         }
-        out.info("Closed. The app should log the connection closing with no frames.")
-        return 0
+        listener.note("Closed. The app should log the connection closing with no frames.")
+        return Outcome(RunKind.HANG, 0, 0, 0)
     }
 
     // ── one sample ──
@@ -138,9 +236,20 @@ class Sender(
         val frame = frameBytes(spec)
         val wire = applyWireFaults(frame)
 
-        out.info("")
-        out.info("[${index + 1}/${o.samples}] ${describe(spec)}")
-        out.detail(render(wire))
+        listener.sampleStarted(
+            SampleStarted(
+                index = index,
+                total = o.samples,
+                specimenId = spec.specimenId,
+                // Not spec.qc: --qc on a Mispa changes no byte of the frame, and
+                // a transcript that says "QC" over a plain patient frame is read
+                // as "the app's QC handling was exercised". runStarted's caveats
+                // are where the engineer is told the flag did nothing.
+                qc = spec.qc && o.analyzer == Analyzer.MINDRAY,
+                cbc = spec.cbc,
+                frame = render(wire),
+            )
+        )
 
         val started = System.nanoTime()
         writeWire(transport, wire)
@@ -150,19 +259,19 @@ class Sender(
             // not double-apply it.
             writeWire(transport, wire)
             sent += wire.size
-            out.info("  sent the same frame twice (--duplicate)")
         }
-        out.info("  $sent bytes out over ${transport.describe}")
+        listener.bytesSent(BytesSent(index, sent, transport.describe, o.faults.duplicate))
 
         if (o.faults.truncated) {
-            out.info("  cut at ${percentOf(wire.size, frame.size)}% and closing — the app should never see a complete frame")
+            listener.note("  cut at ${percentOf(wire.size, frame.size)}% and closing — " +
+                "the app should never see a complete frame")
             return true
         }
         if (o.faults.garbage) {
-            out.info("  that was not a frame: the app should count the bytes and frame nothing")
+            listener.note("  that was not a frame: the app should count the bytes and frame nothing")
             return true
         }
-        return awaitAck(transport, started)
+        return awaitAck(index, transport, started)
     }
 
     /**
@@ -170,32 +279,24 @@ class Sender(
      * one — saying "no ACK" about a Mispa cable would send an engineer hunting
      * a fault that does not exist.
      */
-    private fun awaitAck(transport: AnalyzerTransport, startedNanos: Long): Boolean {
-        if (o.dryRun) return true                      // nothing was sent, so nothing can answer
-        if (o.analyzer != Analyzer.MINDRAY) {
-            out.info("  one-way protocol — no ACK is expected")
-            return true
+    private fun awaitAck(index: Int, transport: AnalyzerTransport, startedNanos: Long): Boolean {
+        val outcome = when {
+            o.dryRun -> AckOutcome.DryRun(index)                 // nothing was sent, so nothing can answer
+            o.analyzer != Analyzer.MINDRAY -> AckOutcome.NotExpected(index)
+            o.ackTimeoutMs <= 0 -> AckOutcome.NotWaited(index)
+            else -> {
+                val reply = transport.readReply(o.ackTimeoutMs)
+                val elapsedMs = (System.nanoTime() - startedNanos) / 1_000_000
+                val ack = if (reply.isEmpty()) null else SimMllp.readAck(reply.decodeToString())
+                when {
+                    reply.isEmpty() -> AckOutcome.Missing(index, o.ackTimeoutMs / 1000.0)
+                    ack == null -> AckOutcome.Unreadable(index, reply.size, render(reply).take(200))
+                    else -> AckOutcome.Received(index, elapsedMs, ack)
+                }
+            }
         }
-        if (o.ackTimeoutMs <= 0) {
-            out.info("  not waiting for an ACK (--no-ack-wait) — the app still sends one; nobody reads it")
-            return true
-        }
-        val reply = transport.readReply(o.ackTimeoutMs)
-        val elapsedMs = (System.nanoTime() - startedNanos) / 1_000_000
-        if (reply.isEmpty()) {
-            out.warn("  no ACK within ${fmt(o.ackTimeoutMs / 1000.0, 1)}s — a real BC-5130 would mark this " +
-                "sample 'transmission failed' and may retransmit")
-            return false
-        }
-        val ack = SimMllp.readAck(reply.decodeToString())
-        if (ack == null) {
-            out.warn("  ${reply.size} bytes came back but no MSA segment could be read: " +
-                render(reply).take(200))
-            return false
-        }
-        out.info("  ACK after ${elapsedMs}ms: $ack${if (ack.accepted) "" else "  <- NOT an accept"}")
-        out.detail("  " + ack.raw.replace('\r', '\n').trim().replace("\n", "\n  "))
-        return ack.accepted
+        listener.ackReceived(outcome)
+        return outcome.ok
     }
 
     private fun writeWire(transport: AnalyzerTransport, wire: ByteArray) {
@@ -215,15 +316,20 @@ class Sender(
             transport.write(wire.copyOfRange(at, end))
             pieces++
             at = end
-            if (at < wire.size) Thread.sleep(chunkDelay)
+            if (at < wire.size) {
+                checkCancelled()
+                Thread.sleep(chunkDelay)
+            }
         }
-        out.info("  dribbled out in $pieces pieces of $size bytes, ${chunkDelay}ms apart")
+        listener.note("  dribbled out in $pieces pieces of $size bytes, ${chunkDelay}ms apart")
     }
 
     // ── building ──
 
     internal fun specFor(index: Int): SampleSpec = SampleSpec(
-        specimenId = if (o.noSpecimen) null else o.ids[index % o.ids.size],
+        // One id per sample, decided once for the whole run: a burst indexes
+        // into this out of order, so it cannot be a running counter.
+        specimenId = if (o.noSpecimen) null else sampleIds[index % sampleIds.size],
         patientId = o.patientId,
         patientName = o.patientName,
         profile = o.profile,
@@ -252,7 +358,7 @@ class Sender(
         else -> frame
     }
 
-    // ── transcript ──
+    // ── what the run is ──
 
     private fun factory(): TransportFactory = when {
         transportOverride != null -> transportOverride
@@ -260,6 +366,23 @@ class Sender(
         o.usesSerial -> SerialTransport.factory(o.serialPort!!, o.baud)
         else -> TcpClientTransport.factory(o.host, o.port)
     }
+
+    private fun runStart() = RunStart(
+        analyzer = o.analyzer,
+        link = when {
+            o.dryRun -> "dry run, nothing is sent"
+            o.usesSerial -> "serial ${o.serialPort} @ ${o.baud} 8-N-1"
+            else -> "TCP ${o.host}:${o.port} (the simulator dials out, as the analyzer does)"
+        },
+        samples = o.samples,
+        profile = o.profile,
+        seed = o.seed,
+        cbcOnly = o.cbcOnly,
+        faults = faultSummary(),
+        specimenIds = if (o.noSpecimen) "none keyed (--no-specimen)" else summariseIds(),
+        liveLabWarning = if (!o.dryRun && !o.usesSerial && !Cli.isLoopback(o.host)) liveLabWarning() else null,
+        caveats = caveats(),
+    )
 
     /**
      * What this run will NOT do, said before it does anything.
@@ -272,6 +395,18 @@ class Sender(
             "--qc changes nothing on this link. The Mispa Count X format carries no processing-id field, " +
                 "so this goes out as an ordinary patient frame and BNM Lab WILL file it as a patient " +
                 "result. QC handling can only be rehearsed on the Mindray link.")
+        if (o.badUnits && o.analyzer == Analyzer.MISPA) add(
+            "--bad-units changes nothing on this link. The Mispa Count X format carries no unit field at " +
+                "all, so there is nothing for the app to fail to convert and this frame is byte-for-byte " +
+                "a clean one. Unit handling can only be rehearsed on the Mindray link.")
+        // A repeated accession is not a fault the engineer asked for, and it is
+        // invisible in the transcript — every sample looks like it went out.
+        // Only the app knows that the fifth result overwrote the first.
+        if (!o.noSpecimen && o.samples > 1 && sampleIds.distinct().size == 1) add(
+            "All ${o.samples} samples carry the SAME specimen id (${sampleIds.first()}). BNM Lab files " +
+                "each onto the order with that accession, so each result overwrites the last and this run " +
+                "cannot show that none were lost. Drop --id and the simulator advances its own sequence, " +
+                "as an analyzer does.")
     }
 
     /** The banner shown before a live-lab run, which is the only warning between
@@ -285,25 +420,13 @@ class Sender(
             "  ! Specimen id(s): " + summariseIds() + "\n" +
             "  " + "!".repeat(66)
 
-    private fun banner(): String = buildString {
-        appendLine("BNM Analyzer Simulator — ${o.analyzer.label}")
-        appendLine("  driver the lab must have selected: ${o.analyzer.driverKey}")
-        appendLine("  link: " + when {
-            o.dryRun -> "dry run, nothing is sent"
-            o.usesSerial -> "serial ${o.serialPort} @ ${o.baud} 8-N-1"
-            else -> "TCP ${o.host}:${o.port} (the simulator dials out, as the analyzer does)"
-        })
-        appendLine("  samples: ${o.samples} · profile ${o.profile.cliName} · seed ${o.seed}" +
-            if (o.cbcOnly) " · CBC-only run (no differential)" else "")
-        val faults = faultSummary()
-        if (faults.isNotEmpty()) appendLine("  FAULTS: $faults")
-        appendLine("  specimen id(s): " + if (o.noSpecimen) "none keyed (--no-specimen)" else summariseIds())
-        if (!o.dryRun && !o.usesSerial && !Cli.isLoopback(o.host)) append(liveLabWarning())
+    /** The ids this run will actually put on the wire — not the ids it was
+     *  given, which for an advancing sequence is one id standing for many. */
+    private fun summariseIds(): String {
+        val distinct = sampleIds.distinct()
+        return if (distinct.size <= 3) distinct.joinToString(", ")
+        else "${distinct.first()} … ${distinct.last()} (${distinct.size})"
     }
-
-    private fun summariseIds(): String =
-        if (o.ids.size <= 3) o.ids.joinToString(", ")
-        else "${o.ids.first()} … ${o.ids.last()} (${o.ids.size})"
 
     private fun faultSummary(): String = buildList {
         if (o.faults.truncated) add("truncated")
@@ -313,30 +436,28 @@ class Sender(
         if (o.faults.burst > 0) add("burst ${o.faults.burst}")
         if (o.faults.hang) add("hang")
         if (o.unknownCode) add("unknown-code")
-        if (o.badUnits) add("bad-units")
+        // Only where they change the frame. The Mispa format has neither a QC
+        // field nor a unit field, and a summary line naming a fault over a
+        // byte-for-byte clean frame is the lie the engineer would read as
+        // "the app's handling of this was exercised". The caveats above say so
+        // in words instead.
+        if (o.badUnits && o.analyzer == Analyzer.MINDRAY) add("bad-units")
         if (o.noSpecimen) add("no-specimen")
-        // Only where it changes the frame: the Mispa has no QC field, and a
-        // summary line saying "qc" over a plain patient frame is a lie the
-        // engineer would take to mean the app's QC handling had been exercised.
         if (o.qc && o.analyzer == Analyzer.MINDRAY) add("qc")
     }.joinToString(", ")
-
-    private fun describe(spec: SampleSpec): String {
-        val c = spec.cbc
-        val id = spec.specimenId ?: "(no specimen id)"
-        return "$id · WBC ${fmt(c.wbc, 2)} · RBC ${fmt(c.rbc, 2)} · HGB ${fmt(c.hgb, 1)} g/dL · " +
-            "PLT ${fmt(c.plt, 0)}" +
-            if (spec.qc && o.analyzer == Analyzer.MINDRAY) " · QC" else ""
-    }
 
     private fun percentOf(part: Int, whole: Int): Int = if (whole == 0) 0 else part * 100 / whole
 
     companion object {
+        /** How long a stopped burst is given to unwind before the run reports
+         *  how many of its connections are still open. */
+        private const val BURST_STOP_GRACE_MS = 2_000L
+
         private val STAMP: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
 
         /** Deliberate nonsense: no frame start for either driver, and a stray
          *  newline so it cannot accidentally look like an HL7 segment. */
-        private val GARBAGE = " ÿ<<not a frame>>\nþQQQ 2f8a1c\n".toByteArray(Charsets.ISO_8859_1)
+        private val GARBAGE = " ÿ<<not a frame>>\nþQQQ 2f8a1c\n".toByteArray(Charsets.ISO_8859_1)
 
         /**
          * A frame as a human can read it: CR becomes a line break and any long
