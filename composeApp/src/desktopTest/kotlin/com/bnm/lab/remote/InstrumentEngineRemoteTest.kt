@@ -15,6 +15,10 @@ import com.bnm.lab.remote.RemoteTestFixtures.freePort
 import com.bnm.lab.remote.RemoteTestFixtures.mispa
 import com.bnm.lab.remote.RemoteTestFixtures.oru
 import com.bnm.lab.remote.RemoteTestFixtures.waitFor
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import java.net.ServerSocket
@@ -37,11 +41,11 @@ import kotlin.test.assertTrue
  */
 class InstrumentEngineRemoteTest {
 
-    private class Bench {
+    private class Bench(dispatcher: CoroutineDispatcher = Dispatchers.Default) {
         val db: AppDatabase = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY).let { AppDatabase.Schema.create(it); AppDatabase(it) }
         val repo = LabRepository(db, ApiClient.json)
         // A huge heal interval: the tests call healOnce() themselves.
-        val engine = InstrumentEngine(db, repo, ApiClient.json, healIntervalMs = 3_600_000L)
+        val engine = InstrumentEngine(db, repo, ApiClient.json, healIntervalMs = 3_600_000L, dispatcher = dispatcher)
         val acks = mutableListOf<String>()
         val reply: suspend (ByteArray) -> Unit = { acks += it.decodeToString() }
 
@@ -158,8 +162,66 @@ class InstrumentEngineRemoteTest {
         } finally { b.close() }
     }
 
+    @Test
+    fun `two analyzers counting at once never lose an increment`() = runBlocking<Unit> {
+        val b = Bench()
+        try {
+            val a = b.hl7("A")
+            val c = b.hl7("C")
+            // QC frames: acknowledged and ignored, so no order or claim-queue
+            // writes get in the way of the two assemblers hammering the map.
+            val frame = Mllp.wrap(oru("QC-01", processingId = "Q"))
+            val ack: suspend (ByteArray) -> Unit = { }
+            val n = 40
+            val pump: suspend (InstrumentConfig) -> Unit = { cfg ->
+                repeat(n) { b.engine.ingestBytes(cfg, frame, chunk = 7, reply = ack) }
+            }
+            listOf(async(Dispatchers.Default) { pump(a) }, async(Dispatchers.Default) { pump(c) }).awaitAll()
+            for (cfg in listOf(a, c)) {
+                val st = b.status(cfg)
+                assertEquals(frame.size.toLong() * n, st.bytesIn, "${cfg.name}: every byte counted")
+                assertEquals(n.toLong(), st.framesIn, "${cfg.name}: every frame counted")
+                assertEquals(n.toLong(), st.framesIgnored, "${cfg.name}: every QC frame counted as ignored")
+                assertEquals(n.toLong(), st.acksSent, "${cfg.name}: every ACK counted")
+            }
+        } finally { b.close() }
+    }
 
+    @Test
+    fun `a launcher never writes over the verdict of the job it just started`() = runBlocking<Unit> {
+        // On an immediate dispatcher the accept loop binds — or fails to — inside
+        // `scope.launch`, so every launcher below runs when the real verdict is
+        // already in the map. That is the ordering the bench hits by chance when
+        // a sibling's port is slow to open; here it happens every run.
+        val b = Bench(dispatcher = Dispatchers.Unconfined)
+        val port = freePort()
+        val blocker = ServerSocket(port)
+        try {
+            val blocked = b.engine.saveInstrument(InstrumentConfig(id = "", name = "Blocked", driver = "mindray_hl7",
+                transport = InstrumentTransport.TCP, tcpPort = port))
+            b.engine.status.value.getValue(blocked).let {
+                assertEquals("error", it.state, "restart(id): a phantom 'listening' has no listener behind it")
+                assertNull(it.boundAt)
+            }
 
+            val free = b.engine.saveInstrument(InstrumentConfig(id = "", name = "Free", driver = "mindray_hl7",
+                transport = InstrumentTransport.TCP, tcpPort = freePort()))
+            b.engine.restartAll()
+            assertEquals("error", b.engine.status.value.getValue(blocked).state,
+                "restartAll: the bind failure must outlive the whole pass")
+            assertNotNull(b.engine.status.value.getValue(free).boundAt,
+                "restartAll: a listener that bound keeps its bind time")
+
+            // The port is free now: the heal pass must keep what the accept loop
+            // published, not write the old error back over a listener that works.
+            blocker.close()
+            b.engine.healOnce()
+            b.engine.status.value.getValue(blocked).let {
+                assertEquals("listening", it.state, "healOnce: a working listener would be closed again next pass")
+                assertNotNull(it.boundAt)
+            }
+        } finally { runCatching { blocker.close() }; b.close() }
+    }
 
     @Test
     fun `restart(id) rebinds only that listener and keeps its counters`() = runBlocking<Unit> {
