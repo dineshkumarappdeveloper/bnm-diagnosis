@@ -86,6 +86,8 @@ object MindrayBc5x {
         val specimenId: String?,
         val patientId: String?,
         val patientName: String?,
+        /** PID-8, normalised to the app's own 'M' | 'F' | 'O'; null when unusable. */
+        val patientSex: String?,
         val date: String?,
         val sequenceId: String?,
         /** Analyzer name → OBX-5 numeric text (NM rows only). */
@@ -219,6 +221,7 @@ object MindrayBc5x {
             specimenId = obr?.field(3)?.trim()?.takeIf { it.isNotEmpty() },
             patientId = pid?.component(3, 1)?.trim()?.takeIf { it.isNotEmpty() },
             patientName = patientName(pid),
+            patientSex = patientSex(pid),
             date = obr?.field(7)?.trim()?.takeIf { it.isNotEmpty() }
                 ?: msh?.field(7)?.trim()?.takeIf { it.isNotEmpty() },
             sequenceId = msg.controlId.trim().takeIf { it.isNotEmpty() },
@@ -240,6 +243,24 @@ object MindrayBc5x {
         val middle = pid.component(5, 3).trim()
         return listOf(first, middle, last).filter { it.isNotEmpty() }
             .joinToString(" ").takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * PID-8 → the app's own sex code, or null. The spelled-out forms are here
+     * because the BC-5130 protocol's own sample message sends "Male".
+     *
+     * HL7's table 0001 also carries U (unknown), A (ambiguous) and N (not
+     * applicable). None of them is "Other": they are the analyzer saying it does
+     * not know, and turning that into a stored 'O' would silently pick the
+     * reference range a report is printed against. Null instead — the form then
+     * asks, which is the honest answer. Matched exactly rather than by first
+     * letter for the same reason: "Unknown" must not become an 'O' either.
+     */
+    private fun patientSex(pid: Hl7Segment?): String? = when (pid?.field(8)?.trim()?.uppercase()) {
+        "M", "MALE" -> "M"
+        "F", "FEMALE" -> "F"
+        "O", "OTHER" -> "O"
+        else -> null
     }
 
     private fun kindFromName(name: String): String? = when {

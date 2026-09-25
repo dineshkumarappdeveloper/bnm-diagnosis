@@ -169,6 +169,70 @@ fun List<ClaimCandidate>.filterForClaim(query: String): List<ClaimCandidate> {
 }
 
 /**
+ * Which body the Assign picker draws — decided here rather than inside the
+ * `when` on the screen, because which of these states offers a way out is a
+ * rule worth pinning.
+ *
+ * It was not: "Create order from this result" reached only [NOTHING_OPEN], the
+ * state a lab sees when NOTHING is waiting for results at all. The way an
+ * unregistered sample actually surfaces is [NOTHING_MATCHED] — a busy worklist,
+ * the operator types the patient's name, nothing comes back — and that state was
+ * a dead end that sent them back to the queue for the trip this feature exists
+ * to remove. Both are "there is no order here"; both carry the same button.
+ */
+enum class ClaimPickerState {
+    /** The orders are still being read. */
+    READING,
+
+    /** The read FAILED — the app knows nothing about the worklist, so it says nothing. */
+    READ_FAILED,
+
+    /** Nothing at all is waiting for results. */
+    NOTHING_OPEN,
+
+    /** The operator searched, and nothing matched. */
+    NOTHING_MATCHED,
+
+    /** There are orders to pick from. */
+    ROWS;
+
+    /** The two no-result states, and only those, offer the registration. */
+    val offersCreateOrder: Boolean get() = this == NOTHING_OPEN || this == NOTHING_MATCHED
+
+    /** Which kind of nothing this is; null when there is something to show. */
+    fun noResultSentence(query: String): String? = when (this) {
+        NOTHING_OPEN -> "No order is waiting for results."
+        NOTHING_MATCHED -> "Nothing matches “${query.trim()}”."
+        else -> null
+    }
+}
+
+fun claimPickerState(candidates: ClaimCandidates?, error: String?, query: String): ClaimPickerState {
+    // Before either "nothing is here" sentence: on a failed read the app knows
+    // NOTHING about the worklist, and telling the bench to register the patient
+    // again on the strength of a read that did not happen is how the same sample
+    // gets billed twice.
+    if (candidates == null) {
+        return if (error == null) ClaimPickerState.READING else ClaimPickerState.READ_FAILED
+    }
+    if (candidates.open.isEmpty() && query.isBlank()) return ClaimPickerState.NOTHING_OPEN
+    if (candidates.open.filterForClaim(query).isEmpty()) return ClaimPickerState.NOTHING_MATCHED
+    return ClaimPickerState.ROWS
+}
+
+/**
+ * The whole no-result paragraph: which nothing this is, then the way out of it.
+ *
+ * [canCreateOrder] false is a seat that cannot register; the advice then keeps
+ * its old (honest, dead-end) wording rather than promising a button that is not
+ * there.
+ */
+fun noOrderAdvice(sentence: String, canCreateOrder: Boolean): String =
+    sentence + " If this sample was never registered, " +
+        if (canCreateOrder) "create the order for it here — the patient and the test come with it."
+        else "register it first — the result keeps waiting here until you do."
+
+/**
  * What pressing Enter assigns to — the bench barcode scanner's whole world,
  * and NOTHING else.
  *

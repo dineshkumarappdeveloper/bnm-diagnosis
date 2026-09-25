@@ -668,6 +668,12 @@ class InstrumentEngine(
             driver = cfg.driver,
             specimenId = frame.specimenId,
             patientId = frame.patientId,
+            // Carried, not dropped: the whole premise of "Create order from this
+            // result" is that the bench DID key the patient in. Throwing the name
+            // away here made the operator read it off the analyzer's screen and
+            // retype it, which is how "Aasha Menon" becomes a second patient.
+            patientName = frame.patientName,
+            patientSex = frame.patientSex,
             date = frame.date,
             sequenceId = frame.sequenceId,
             params = frame.params,
@@ -982,30 +988,34 @@ class InstrumentEngine(
      * a human chose this order, a wrong-patient claim surfacing a week later
      * looks exactly like a frame that matched on its own. The log line below is
      * the only place the difference is written down.
+     *
+     * On [Dispatchers.Default] as a WHOLE, not just around the row read: the
+     * caller is a button handler on Main, and `payload_json` for a BC-5130 run
+     * carries base64 scattergrams and 128-point histograms. Decoding that on the
+     * UI thread freezes the very spinner the handler just switched on.
      */
-    suspend fun claimUnmatched(resultId: String, accessionNo: String, by: Staff? = null): Result<String> = runCatching {
-        val row = withContext(Dispatchers.Default) { q.unmatchedById(resultId).executeAsOneOrNull() }
-            ?: error("That result is gone")
-        require(row.status == "unmatched") { "Already ${row.status} — nothing to apply" }
-        val stored = json.decodeFromString(StoredInstrumentFrame.serializer(), row.payload_json)
-        val typed = accessionNo.trim()
-        val order = labRepo.orderByAccession(typed)
-            ?: labRepo.orderByAccession(typed.uppercase())
-            ?: labRepo.orderByAccession(typed.lowercase())
-            ?: error("No order with accession $typed")
-        require(order.status in ENTRY_OPEN) { "Order ${order.accessionNo} is ${order.status} — results are locked" }
-        val cfg = row.instrument_id?.let { id ->
-            withContext(Dispatchers.Default) { q.instrumentById(id).executeAsOneOrNull()?.toModel() }
-        } ?: InstrumentConfig(id = "", name = FALLBACK_INSTRUMENT_NAME, driver = stored.driver,
-            transport = InstrumentTransport.TCP)
-        val outcome = applyFrameToOrder(cfg, stored, order)
-        if (!outcome.matched) error("No test on ${order.accessionNo} takes these parameters — check the ordered tests")
+    suspend fun claimUnmatched(resultId: String, accessionNo: String, by: Staff? = null): Result<String> =
         withContext(Dispatchers.Default) {
-            q.markResultApplied(order.id, nowIso(), by?.name, by?.id, resultId)
+            runCatching {
+                val row = q.unmatchedById(resultId).executeAsOneOrNull() ?: error("That result is gone")
+                require(row.status == "unmatched") { "Already ${row.status} — nothing to apply" }
+                val stored = json.decodeFromString(StoredInstrumentFrame.serializer(), row.payload_json)
+                val typed = accessionNo.trim()
+                val order = labRepo.orderByAccession(typed)
+                    ?: labRepo.orderByAccession(typed.uppercase())
+                    ?: labRepo.orderByAccession(typed.lowercase())
+                    ?: error("No order with accession $typed")
+                require(order.status in ENTRY_OPEN) { "Order ${order.accessionNo} is ${order.status} — results are locked" }
+                val cfg = row.instrument_id?.let { id -> q.instrumentById(id).executeAsOneOrNull()?.toModel() }
+                    ?: InstrumentConfig(id = "", name = FALLBACK_INSTRUMENT_NAME, driver = stored.driver,
+                        transport = InstrumentTransport.TCP)
+                val outcome = applyFrameToOrder(cfg, stored, order)
+                if (!outcome.matched) error("No test on ${order.accessionNo} takes these parameters — check the ordered tests")
+                q.markResultApplied(order.id, nowIso(), by?.name, by?.id, resultId)
+                logRow(cfg, "info", "Claimed by ${actorName(by)} onto ${order.accessionNo} (manual) — ${outcome.summary}", null)
+                outcome.summary
+            }
         }
-        logRow(cfg, "info", "Claimed by ${actorName(by)} onto ${order.accessionNo} (manual) — ${outcome.summary}", null)
-        outcome.summary
-    }
 
     // ── the third way out: register the order this run was meant for ──
 
@@ -1063,12 +1073,17 @@ class InstrumentEngine(
      * Register the order this run was meant for, then put the run on it.
      *
      * The whole point of the feature, and deliberately NOT a new way to make an
-     * order: the patient goes through [LabRepository.upsertPatient], the order
-     * through [LabRepository.createLabOrder] — which allocates the accession
+     * order: a new patient and their order are written together by
+     * [LabRepository.createPatientAndOrder] (an existing patient's order by
+     * [LabRepository.createLabOrder] alone) — which allocates the accession
      * from THIS computer's seat series, snapshots prices and pre-creates the
      * empty result rows — and the numbers land through [claimUnmatched], the
      * single result write path, so flags, frozen ranges, status walking and
      * `entered_by = <instrument name>` behave exactly as a bench entry.
+     *
+     * On [Dispatchers.Default] as a whole, like [createOrderContext] above: the
+     * caller is a button handler on Main and this decodes a payload carrying
+     * base64 scattergrams and 128-point histograms.
      *
      * 🔴 The accession is always the app's. `draft` carries no accession field
      * and the analyzer's specimen text becomes the order's NOTE
@@ -1088,69 +1103,81 @@ class InstrumentEngine(
         draft: CreateOrderDraft,
         by: Staff? = null,
         licence: LicenseState,
-    ): Result<CreatedFromResult> = runCatching {
-        CreateOrderGate.refusal(by, licence)?.let { error(it.detail) }
+    ): Result<CreatedFromResult> = withContext(Dispatchers.Default) {
+        runCatching {
+            CreateOrderGate.refusal(by, licence)?.let { error(it.detail) }
 
-        val row = withContext(Dispatchers.Default) { q.unmatchedById(resultId).executeAsOneOrNull() }
-            ?: error("That result is gone")
-        require(row.status == "unmatched") { "Already ${row.status} — nothing to register" }
-        val stored = json.decodeFromString(StoredInstrumentFrame.serializer(), row.payload_json)
-        val cfg = cfgFor(row)
+            val row = q.unmatchedById(resultId).executeAsOneOrNull() ?: error("That result is gone")
+            require(row.status == "unmatched") { "Already ${row.status} — nothing to register" }
+            val stored = json.decodeFromString(StoredInstrumentFrame.serializer(), row.payload_json)
+            val cfg = cfgFor(row)
 
-        // The same mapping the claim will use, one test wide: validate against
-        // THAT rather than against the ranked list the dialog happened to show,
-        // which may have been read before someone edited the catalog.
-        val test = draft.testId?.let { labRepo.testById(it) }
-            ?: error("Pick the test this run belongs to")
-        val fit = TestFit(test, mapParams(stored.params.keys, test, parseOverrides(cfg.paramMapJson)))
-        validateCreateOrder(draft, listOf(fit), stored.params.size)?.let { error(it) }
+            // The same mapping the claim will use, one test wide: validate against
+            // THAT rather than against the ranked list the dialog happened to show,
+            // which may have been read before someone edited the catalog.
+            val test = draft.testId?.let { labRepo.testById(it) }
+                ?: error("Pick the test this run belongs to")
+            val fit = TestFit(test, mapParams(stored.params.keys, test, parseOverrides(cfg.paramMapJson)))
+            validateCreateOrder(draft, listOf(fit), stored.params.size)?.let { error(it) }
 
-        val reused = draft.reusingPatient
-        val patient = if (reused) {
-            labRepo.patientById(draft.reusePatientId!!) ?: error("That patient is no longer on file")
-        } else {
-            labRepo.upsertPatient(
-                Patient(
-                    id = Uuid.random().toString(),
-                    name = draft.name,
-                    sex = draft.sex ?: "O",
-                    dob = draft.dobClean,
-                    // Exactly as the desk's form stores it: a DOB is the better age
-                    // source, so the typed years are kept only when there is none.
-                    ageYears = if (draft.dobClean == null) draft.ageYears else null,
-                    phone = draft.phoneClean,
-                )
+            val reused = draft.reusingPatient
+            val notes = sampleReferenceNote(stored.specimenId ?: row.specimen_id, cfg.name)
+            val referrerId = draft.referrerId?.takeIf { it.isNotBlank() }
+            // 🔴 ONE unit of work for a new patient. Written as two, a failing
+            // order (SQLITE_BUSY under a backup snapshot is the realistic one)
+            // left the patient row committed behind a registration that never
+            // happened — and the retry, with no phone to match on, wrote a
+            // second copy of the same person past the duplicate guard.
+            val (patient, order) = if (reused) {
+                val onFile = labRepo.patientById(draft.reusePatientId!!)
+                    ?: error("That patient is no longer on file")
+                onFile to labRepo.createLabOrder(
+                    patientId = onFile.id,
+                    testIds = listOf(test.id),
+                    referrerId = referrerId,
+                    priority = draft.priority,
+                    notes = notes,
+                ).getOrElse { error(it.message ?: "Could not register the order") }
+            } else {
+                labRepo.createPatientAndOrder(
+                    patient = Patient(
+                        id = Uuid.random().toString(),
+                        name = draft.name,
+                        sex = draft.sex ?: "O",
+                        dob = draft.dobClean,
+                        // Exactly as the desk's form stores it: a DOB is the better age
+                        // source, so the typed years are kept only when there is none.
+                        ageYears = if (draft.dobClean == null) draft.ageYears else null,
+                        phone = draft.phoneClean,
+                    ),
+                    testIds = listOf(test.id),
+                    referrerId = referrerId,
+                    priority = draft.priority,
+                    notes = notes,
+                ).getOrElse { error(it.message ?: "Could not register the order") }
+            }
+
+            // The one line that says where this order came from. Written before the
+            // claim so the trail reads in the order it happened, and counts only —
+            // this log travels to BNM support, so the patient's name stays out of it
+            // exactly as it does in `describe`.
+            logRow(
+                cfg, "info",
+                "Order ${order.accessionNo} created from a queued analyzer result by ${actorName(by)} — " +
+                    "${if (reused) "existing patient" else "new patient"}, ${test.name}, ${describe(row)}",
+                null,
+            )
+
+            val claim = claimUnmatched(resultId, order.accessionNo, by)
+            CreatedFromResult(
+                order = order,
+                patient = patient,
+                reusedPatient = reused,
+                testName = test.name,
+                claimSummary = claim.getOrNull(),
+                claimError = claim.exceptionOrNull()?.message,
             )
         }
-
-        val order = labRepo.createLabOrder(
-            patientId = patient.id,
-            testIds = listOf(test.id),
-            referrerId = draft.referrerId?.takeIf { it.isNotBlank() },
-            priority = draft.priority,
-            notes = sampleReferenceNote(stored.specimenId ?: row.specimen_id, cfg.name),
-        ).getOrElse { error(it.message ?: "Could not register the order") }
-
-        // The one line that says where this order came from. Written before the
-        // claim so the trail reads in the order it happened, and counts only —
-        // this log travels to BNM support, so the patient's name stays out of it
-        // exactly as it does in `describe`.
-        logRow(
-            cfg, "info",
-            "Order ${order.accessionNo} created from a queued analyzer result by ${actorName(by)} — " +
-                "${if (reused) "existing patient" else "new patient"}, ${test.name}, ${describe(row)}",
-            null,
-        )
-
-        val claim = claimUnmatched(resultId, order.accessionNo, by)
-        CreatedFromResult(
-            order = order,
-            patient = patient,
-            reusedPatient = reused,
-            testName = test.name,
-            claimSummary = claim.getOrNull(),
-            claimError = claim.exceptionOrNull()?.message,
-        )
     }
 
     /**
@@ -1418,7 +1445,8 @@ class InstrumentEngine(
                     else text.trim()
                 MindrayBc5x.parse(body)?.let { f ->
                     StoredInstrumentFrame(
-                        driver = driver, specimenId = f.specimenId, patientId = f.patientId, date = f.date,
+                        driver = driver, specimenId = f.specimenId, patientId = f.patientId,
+                        patientName = f.patientName, patientSex = f.patientSex, date = f.date,
                         sequenceId = f.sequenceId, params = f.params, histograms = f.histograms, meta = f.meta,
                         units = f.units, images = f.images,
                     ) to (if (f.isQc) "QC run — the live path acknowledges and ignores these" else null)

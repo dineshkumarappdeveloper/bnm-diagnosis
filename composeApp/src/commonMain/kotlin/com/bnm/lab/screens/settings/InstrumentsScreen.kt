@@ -69,6 +69,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.bnm.lab.instruments.ClaimCandidate
 import com.bnm.lab.instruments.ClaimCandidates
+import com.bnm.lab.instruments.ClaimPickerState
 import com.bnm.lab.instruments.CreateOrderGate
 import com.bnm.lab.instruments.INSTRUMENT_DRIVERS
 import com.bnm.lab.instruments.InstrumentConfig
@@ -82,11 +83,13 @@ import com.bnm.lab.instruments.LinkFactsSnapshot
 import com.bnm.lab.instruments.LinkLogRow
 import com.bnm.lab.instruments.LinkLogSummaries
 import com.bnm.lab.instruments.QueuedFrame
+import com.bnm.lab.instruments.claimPickerState
 import com.bnm.lab.instruments.driverFor
 import com.bnm.lab.instruments.filterForClaim
 import com.bnm.lab.instruments.gatherLinkFacts
 import com.bnm.lab.instruments.listSerialPorts
 import com.bnm.lab.instruments.narrowsToOneNonAccession
+import com.bnm.lab.instruments.noOrderAdvice
 import com.bnm.lab.instruments.platformLinkEnvironment
 import com.bnm.lab.instruments.scanTargetFor
 import com.bnm.lab.instruments.serialSupported
@@ -668,6 +671,7 @@ internal fun ClaimPickerBody(
 ) {
     val open = candidates?.open.orEmpty()
     val shown = open.filterForClaim(query)
+    val state = claimPickerState(candidates, error, query)
     Column(Modifier.widthIn(max = 520.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(
             "Specimen ${queued.specimenId ?: AnalyzerWorksheet.NO_SPECIMEN} · " +
@@ -691,41 +695,19 @@ internal fun ClaimPickerBody(
             keyboardActions = KeyboardActions(onDone = { scanTargetFor(query, open)?.let(onAssign) }),
             modifier = Modifier.fillMaxWidth(),
         )
-        when {
-            candidates == null && error == null ->
+        when (state) {
+            ClaimPickerState.READING ->
                 Text("Reading the orders…", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
-            // Before either "nothing is here" sentence: on a failed read the app
-            // knows NOTHING about the worklist, and telling the bench to go and
-            // register the patient again on the strength of a read that did not
-            // happen is how the same sample gets billed twice. The error line at
-            // the foot of the dialog carries the actual message.
-            candidates == null ->
-                Unit
-            open.isEmpty() && query.isBlank() -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    if (onCreateOrder == null)
-                        "No order is waiting for results. If this sample was never registered, " +
-                            "register it first — the result keeps waiting here until you do."
-                    else "No order is waiting for results. If this sample was never registered, " +
-                        "create the order for it here — the patient and the test come with it.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                // The advice above was a dead end for as long as this screen has
-                // existed: it told the operator to go and register, with no way
-                // to. It is the primary action here now.
-                onCreateOrder?.let {
-                    Button(onClick = it, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                        Text("Create order from this result")
-                    }
-                }
-            }
-            shown.isEmpty() ->
-                Text("Nothing matches “${query.trim()}”.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            else -> Card(
+            // The error line at the foot of the dialog carries the actual
+            // message; nothing here asserts anything about the worklist.
+            ClaimPickerState.READ_FAILED -> Unit
+            // BOTH no-result states carry the same way out — see ClaimPickerState.
+            ClaimPickerState.NOTHING_OPEN, ClaimPickerState.NOTHING_MATCHED -> NoOrderPane(
+                sentence = state.noResultSentence(query).orEmpty(),
+                onCreateOrder = onCreateOrder, busy = busy,
+            )
+            ClaimPickerState.ROWS -> Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
             ) {
                 LazyColumn(Modifier.heightIn(max = 300.dp)) {
@@ -758,6 +740,31 @@ internal fun ClaimPickerBody(
         error?.let {
             Text(it, style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.error)
+        }
+    }
+}
+
+/**
+ * The picker with nothing to offer — [sentence] says which kind of nothing —
+ * and the one way forward out of it.
+ *
+ * The advice was a dead end for as long as this screen has existed: it told the
+ * operator to go and register, with no way to. It is the primary action here
+ * now, on BOTH no-result states; with no [onCreateOrder] wired (a seat that
+ * cannot register) the old advice stands alone, as before.
+ */
+@Composable
+private fun NoOrderPane(sentence: String, onCreateOrder: (() -> Unit)?, busy: Boolean) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            noOrderAdvice(sentence, canCreateOrder = onCreateOrder != null),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        onCreateOrder?.let {
+            Button(onClick = it, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                Text("Create order from this result")
+            }
         }
     }
 }

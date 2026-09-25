@@ -5,7 +5,9 @@ package com.bnm.lab.instruments
  * connection": pushed through [InstrumentEngine.dryRun] it proves the driver
  * parses and shows which keys the lab's catalog maps — without an analyzer
  * on the bench. The specimen id is `BNMTEST-1`, which dryRun never matches to
- * an order; there is no patient name or id in either frame.
+ * an order; neither frame carries a patient name or id as [forDriver] sends it.
+ * ([mindrayOru] takes demographics for tests that need a run the bench keyed a
+ * patient into — never used by the Link check.)
  */
 object SampleFrames {
     const val SPECIMEN = "BNMTEST-1"
@@ -27,10 +29,22 @@ object SampleFrames {
         return "$$$" + listOf("20260101", "1", SPECIMEN, "").joinToString("$") + "$" + values.joinToString("$") + "###"
     }
 
-    /** A BC-5130 ORU^R01 with the CBC + 5-part differential and an EMPTY PID. Segments end in CR, no MLLP wrap. */
-    fun mindrayOru(): String = listOf(
+    /**
+     * A BC-5130 ORU^R01 with the CBC + 5-part differential. Segments end in CR,
+     * no MLLP wrap.
+     *
+     * The PID is EMPTY by default — the link check's sample must not look like a
+     * patient. Pass [patientName] (`Last^First`), [sex] and [ageYears] for the
+     * other real case: a bench that DID key the patient in, which is what
+     * "Create order from this result" pre-fills its form from.
+     */
+    fun mindrayOru(
+        patientName: String? = null,
+        sex: String? = null,
+        ageYears: Int? = null,
+    ): String = listOf(
         "MSH|^~\\&|BC-5130|Mindray|||20260101090000||ORU^R01|BNMTEST0001|P|2.3.1||||||UNICODE",
-        "PID|1||||||||",
+        pidSegment(patientName, sex),
         "OBR|1||$SPECIMEN|00001^Automated Count^99MRC||20260101085500|20260101085900|||||||||||||||||HM||||||||",
         "OBX|1|IS|08003^Test Mode^99MRC||CBC+5DIFF||||||F",
         "OBX|2|NM|6690-2^WBC^LN||7.20|10*9/L|4.00-10.00|N|||F",
@@ -51,5 +65,15 @@ object SampleFrames {
         "OBX|17|NM|742-7^MON#^LN||0.43|10*9/L|0.12-1.20|N|||F",
         "OBX|18|NM|711-2^EOS#^LN||0.17|10*9/L|0.02-0.50|N|||F",
         "OBX|19|NM|704-7^BAS#^LN||0.03|10*9/L|0.00-0.10|N|||F",
-    ).joinToString("\r") + "\r"
+    ).let { if (ageYears == null) it else it + "OBX|20|NM|30525-0^Age^LN||$ageYears|a|||||F" }
+        .joinToString("\r") + "\r"
+
+    /** PID-1 plus, when given, PID-5 (`Last^First`) and PID-8 — nine fields either way. */
+    private fun pidSegment(patientName: String?, sex: String?): String {
+        val fields = MutableList(9) { "" }
+        fields[0] = "1"
+        patientName?.let { fields[4] = it }
+        sex?.let { fields[7] = it }
+        return "PID|" + fields.joinToString("|")
+    }
 }

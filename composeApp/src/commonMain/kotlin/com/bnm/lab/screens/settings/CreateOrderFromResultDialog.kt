@@ -116,10 +116,22 @@ internal fun CreateOrderFromResultDialog(
         engine.createOrderContext(queued.id)
             .onSuccess { ctx ->
                 context = ctx
-                // Pre-select the best fit; the operator can change it. Null when
-                // nothing in the catalog takes a single parameter — the form then
-                // says so instead of pre-selecting a test that would be refused.
-                draft = draft.copy(testId = ctx.fits.bestFit()?.test?.id)
+                // The form OPENS on what the analyzer was told: the operator keyed
+                // the patient in at the bench, and retyping it here is how one
+                // person becomes two records (see AnalyzerPrefill). Only blanks
+                // are filled — nothing typed is written over — and every field
+                // stays editable, under a line saying where the values came from.
+                //
+                // The test is pre-selected to the best fit. Null when nothing in
+                // the catalog takes a single parameter — the form then says so
+                // instead of pre-selecting a test that would be refused.
+                val pre = ctx.prefill
+                draft = draft.copy(
+                    patientName = draft.patientName.ifBlank { pre.name },
+                    sex = draft.sex ?: pre.sex,
+                    ageText = draft.ageText.ifBlank { pre.ageText },
+                    testId = ctx.fits.bestFit()?.test?.id,
+                )
             }
             .onFailure { error = it.message ?: "Could not read the catalog" }
     }
@@ -330,6 +342,11 @@ private fun FormPane(
         "Age & sex are required — reference ranges depend on them.",
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+    // Marked, never silent: a field that arrived already filled is a field the
+    // operator has to CHECK, and the analyzer's keypad is not the lab's record.
+    context.prefillNote?.let {
+        Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+    }
     OutlinedTextField(
         value = draft.patientName, onValueChange = { onDraft(draft.copy(patientName = it)) },
         label = { Text("Full name *") }, singleLine = true, enabled = !busy,

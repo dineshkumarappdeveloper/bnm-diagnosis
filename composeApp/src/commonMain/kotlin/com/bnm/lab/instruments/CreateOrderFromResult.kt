@@ -58,10 +58,19 @@ data class TestFit(
     /** Nothing of this run lands on this test. Never a legal choice — see [validateCreateOrder]. */
     val fitsNothing: Boolean get() = mapping.isEmpty()
 
+    /**
+     * "parameter" / "parameters" for [of] — decided ONCE, because both sentences
+     * below count the same denominator. Pluralising only the fitting branch is
+     * how the picker came to tell a lab that a result "fills none of the 1
+     * parameters" of an ESR, and the 223-test master catalog is full of
+     * single-analyte tests.
+     */
+    private val unit: String get() = if (of == 1) "parameter" else "parameters"
+
     /** "this result fills 13 of 29 parameters of Complete Blood Count". */
     val note: String
-        get() = if (fitsNothing) "this result fills none of the $of parameters of ${test.name}"
-        else "this result fills $fills of $of parameter${if (of == 1) "" else "s"} of ${test.name}"
+        get() = if (fitsNothing) "this result fills none of the $of $unit of ${test.name}"
+        else "this result fills $fills of $of $unit of ${test.name}"
 }
 
 /**
@@ -119,7 +128,93 @@ data class CreateOrderContext(
 
     /** True when nothing in the catalog takes a single one of these parameters. */
     val nothingFits: Boolean get() = fits.bestFit() == null
+
+    /** What the analyzer itself said about the patient — the form opens on it. */
+    val prefill: AnalyzerPrefill get() = analyzerPrefill(frame)
+
+    /**
+     * The line the form shows above the pre-filled fields; null when the
+     * analyzer sent no demographics and there is nothing to warn about.
+     *
+     * Said out loud on purpose. These values are bench text typed at an
+     * analyzer keypad, not the lab's record, and a form that silently arrives
+     * filled in is a form nobody reads.
+     */
+    val prefillNote: String?
+        get() = prefill.fieldsLabel?.let {
+            "The $it below came from $instrumentName — what was keyed at the analyzer, " +
+                "not the lab's record. Check it against the tube before registering."
+        }
 }
+
+// ── what the analyzer already told us about the patient ──────────────────────
+
+/**
+ * The demographics the run itself carries, in the form's own shapes.
+ *
+ * The feature exists because "I run the sample on the analyzer with the
+ * patient's name and everything" — so throwing that away and handing the
+ * operator a blank form makes them read the name off the analyzer's screen and
+ * retype it. [sameName] is exact (deliberately), so one retyped "Aasha" for
+ * "Asha" walks straight past the duplicate guard and splits the patient in two.
+ * Pre-filling is what keeps the two spellings one spelling.
+ *
+ * Everything here is a SUGGESTION: every field stays editable, and the form
+ * says where the values came from ([CreateOrderContext.prefillNote]).
+ */
+data class AnalyzerPrefill(
+    val name: String = "",
+    /** 'M' | 'F' | 'O', already normalised by the driver; null when unknown. */
+    val sex: String? = null,
+    /** Whole years as digits, or "" — see [analyzerAgeYears]. */
+    val ageText: String = "",
+) {
+    val isEmpty: Boolean get() = name.isBlank() && sex == null && ageText.isBlank()
+
+    /** "name, age and sex" — the fields that arrived, in the order the form draws them. */
+    val fieldsLabel: String?
+        get() {
+            val parts = buildList {
+                if (name.isNotBlank()) add("name")
+                if (sex != null) add("sex")
+                if (ageText.isNotBlank()) add("age")
+            }
+            return when (parts.size) {
+                0 -> null
+                1 -> parts[0]
+                else -> parts.dropLast(1).joinToString(", ") + " and " + parts.last()
+            }
+        }
+}
+
+fun analyzerPrefill(frame: StoredInstrumentFrame): AnalyzerPrefill = AnalyzerPrefill(
+    name = frame.patientName?.trim().orEmpty(),
+    sex = frame.patientSex?.trim()?.uppercase()?.takeIf { it in SEX_CODES },
+    ageText = analyzerAgeYears(frame.meta),
+)
+
+private val SEX_CODES = setOf("M", "F", "O")
+
+/**
+ * The analyzer's age in WHOLE YEARS, or "" when it did not send one — or sent
+ * one in a unit this form's box does not mean.
+ *
+ * The Mindray sends OBX `30525-0` as value plus OBX-6 unit, and the driver
+ * stores the pair ("34 a", "6 mo"). Taking the leading integer regardless would
+ * put 6 in an "Age (years)" box for a six-MONTH-old, and a paediatric haemogram
+ * printed against adult reference ranges is a report that reads normal when it
+ * is not. A unit that is not years is dropped and the operator asked.
+ */
+fun analyzerAgeYears(meta: Map<String, String>): String {
+    val raw = meta["age"]?.trim().orEmpty()
+    val digits = raw.takeWhile { it.isDigit() }
+    if (digits.isEmpty()) return ""
+    val unit = raw.drop(digits.length).trim().lowercase()
+    return if (unit.isEmpty() || unit in AGE_YEAR_UNITS) digits else ""
+}
+
+/** HL7 table 0102 uses `a` for years; analyzers in the field also send these. */
+private val AGE_YEAR_UNITS = setOf("a", "y", "yr", "yrs", "year", "years")
 
 // ── who may do this, and on what licence ─────────────────────────────────────
 

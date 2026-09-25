@@ -126,6 +126,25 @@ class ClaimQueueRenderTest {
     }
 
     @Test
+    fun `the picker searched with nothing matching - still a way to register`() {
+        // The way an unregistered sample actually surfaces in a busy lab: the
+        // worklist is NOT empty, so the blank-query empty state never shows —
+        // the operator types the patient's name and matches nothing. The button
+        // has to be here too, or this is the trip the feature exists to remove.
+        val candidates = ClaimCandidates(
+            frame = frame,
+            open = listOf(candidate("ACC-S1-00041", "Ravi Kumar", "51 y / M", "90000 11111",
+                "Complete Blood Count", matched = 7)),
+            locked = emptyList(),
+            query = "Asha",
+        )
+        render("picker-searched-empty", height = 460) {
+            ClaimPickerBody(queued, "BC-5130 bench 1", candidates, query = "Asha",
+                onQuery = {}, busy = false, error = null, onAssign = {}, onCreateOrder = {})
+        }
+    }
+
+    @Test
     fun `the picker narrowed to one by name - the hint says which key assigns`() {
         val candidates = ClaimCandidates(
             frame = frame,

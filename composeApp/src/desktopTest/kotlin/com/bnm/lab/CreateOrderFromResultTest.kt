@@ -12,6 +12,10 @@ import com.bnm.lab.instruments.InstrumentTransport
 import com.bnm.lab.instruments.Mllp
 import com.bnm.lab.instruments.PRIORITY_URGENT
 import com.bnm.lab.instruments.SampleFrames
+import com.bnm.lab.instruments.StoredInstrumentFrame
+import com.bnm.lab.instruments.TestFit
+import com.bnm.lab.instruments.analyzerAgeYears
+import com.bnm.lab.instruments.analyzerPrefill
 import com.bnm.lab.instruments.bestFit
 import com.bnm.lab.instruments.duplicatesOf
 import com.bnm.lab.instruments.rankTestsForFrame
@@ -71,10 +75,15 @@ class CreateOrderFromResultTest {
             repo.createLabOrder(patientId, testIds = testCodes.map { "seed-${it.lowercase()}" }).getOrThrow()
 
         /** A stranded run, put in the queue by the real listener path (no socket:
-         *  the config carries no TCP port). Specimen BNMTEST-1 matches no order. */
-        suspend fun queueOne(): String {
+         *  the config carries no TCP port). Specimen BNMTEST-1 matches no order.
+         *  The demographics are what the bench keyed at the analyzer, if any. */
+        suspend fun queueOne(
+            patientName: String? = null,
+            sex: String? = null,
+            ageYears: Int? = null,
+        ): String {
             engine.saveInstrument(cfg)
-            engine.ingestBytes(cfg, Mllp.wrap(SampleFrames.mindrayOru()))
+            engine.ingestBytes(cfg, Mllp.wrap(SampleFrames.mindrayOru(patientName, sex, ageYears)))
             return db.instrumentsQueries.listUnmatched().executeAsList().single().id
         }
 
@@ -125,9 +134,14 @@ class CreateOrderFromResultTest {
         assertTrue(ctx.fits.indexOf(best) < ctx.fits.indexOf(hb))
 
         // And an ESR takes nothing a cell counter sent — offered only to a search.
+        // Both sentences count the same denominator, so both pluralise it: the
+        // master catalog is full of one-analyte tests and "none of the 1
+        // parameters" is the wart an operator reads first.
         val esr = assertNotNull(ctx.fits.firstOrNull { it.test.code == "ESR" })
         assertTrue(esr.fitsNothing)
-        assertEquals("this result fills none of the 1 parameters of Erythrocyte Sedimentation Rate", esr.note)
+        assertEquals("this result fills none of the 1 parameter of Erythrocyte Sedimentation Rate", esr.note)
+        assertEquals("this result fills none of the $CBC_PARAMS parameters of Complete Blood Count",
+            TestFit(best.test, emptyMap()).note)
     }
 
     @Test
@@ -171,6 +185,93 @@ class CreateOrderFromResultTest {
         // Reusing a patient skips the demographics: they belong to the record on
         // file and are not retyped, let alone written over.
         assertNull(check(CreateOrderDraft(testId = cbc, reusePatientId = "p-1")))
+    }
+
+    // ── what the analyzer already told us about the patient ──────────────────
+
+    @Test
+    fun `the form opens on the demographics the analyzer was given, marked as the analyzer's`() = runBlocking {
+        val b = stocked()
+        // The feature's own premise: the bench DID key the patient in.
+        val resultId = b.queueOne(patientName = "MENON^ASHA", sex = "Female", ageYears = 34)
+        val ctx = b.engine.createOrderContext(resultId).getOrThrow()
+
+        // Parsed by the driver AND carried onto the stored frame. Dropping them
+        // between the two was what made the operator read the name off the
+        // analyzer's screen and retype it.
+        assertEquals("ASHA MENON", ctx.frame.patientName)
+        assertEquals("F", ctx.frame.patientSex)
+
+        val pre = ctx.prefill
+        assertEquals("ASHA MENON", pre.name)
+        assertEquals("F", pre.sex)
+        assertEquals("34", pre.ageText)
+        assertFalse(pre.isEmpty)
+
+        // Seeded, never silently: bench text is not the lab's record, and a form
+        // that arrives filled in unannounced is a form nobody checks.
+        val note = assertNotNull(ctx.prefillNote)
+        assertTrue("name, sex and age" in note, note)
+        assertTrue("BC-5130 bench 1" in note, note)
+        assertTrue("Check it" in note, note)
+
+        // Every field stays editable and the seeded form validates as it stands.
+        val seeded = CreateOrderDraft(
+            patientName = pre.name, sex = pre.sex, ageText = pre.ageText,
+            testId = ctx.fits.first().test.id,
+        )
+        assertNull(validateCreateOrder(seeded, ctx.fits, ctx.frameParams))
+        val out = b.engine.createOrderForResult(resultId, seeded, tech, currentLicence).getOrThrow()
+        assertEquals("ASHA MENON", out.patient.name, "the name the analyzer was given, not a retyped one")
+        assertEquals("F", out.patient.sex)
+        assertEquals(34L, out.patient.ageYears)
+    }
+
+    @Test
+    fun `an analyzer that keyed nothing pre-fills nothing, and says nothing`() = runBlocking {
+        val b = stocked()
+        val ctx = b.engine.createOrderContext(b.queueOne()).getOrThrow()
+        assertNull(ctx.frame.patientName)
+        assertNull(ctx.frame.patientSex)
+        assertTrue(ctx.prefill.isEmpty)
+        assertNull(ctx.prefillNote, "no note where there is nothing to check")
+        assertNull(analyzerPrefill(StoredInstrumentFrame(driver = "mindray_hl7")).fieldsLabel)
+    }
+
+    @Test
+    fun `the analyzer's age is seeded only when the analyzer said years`() {
+        assertEquals("34", analyzerAgeYears(mapOf("age" to "34 a")), "HL7 table 0102: 'a' is years")
+        assertEquals("42", analyzerAgeYears(mapOf("age" to "42 yr")))
+        assertEquals("7", analyzerAgeYears(mapOf("age" to "7")), "no unit at all is years, as the box is")
+        // 🔴 The whole reason this is not `takeWhile { it.isDigit() }`: a
+        // six-MONTH-old seeded as six YEARS prints a paediatric haemogram
+        // against adult reference ranges, and reads normal when it is not.
+        assertEquals("", analyzerAgeYears(mapOf("age" to "6 mo")))
+        assertEquals("", analyzerAgeYears(mapOf("age" to "18 d")))
+        assertEquals("", analyzerAgeYears(mapOf("age" to "unknown")))
+        assertEquals("", analyzerAgeYears(emptyMap()))
+    }
+
+    @Test
+    fun `an analyzer sex the app cannot store is left for the operator to answer`() = runBlocking {
+        val b = stocked()
+        // HL7 table 0001 also carries U / A / N. None of them is "Other": they
+        // are the analyzer saying it does not know, and a guessed 'O' silently
+        // picks the reference range the report is printed against.
+        val ctx = b.engine.createOrderContext(b.queueOne(patientName = "KUMAR^RAVI", sex = "U")).getOrThrow()
+        assertEquals("RAVI KUMAR", ctx.frame.patientName)
+        assertNull(ctx.frame.patientSex)
+        assertNull(ctx.prefill.sex)
+        assertEquals("name", ctx.prefill.fieldsLabel)
+        // …and the form still refuses to register without one.
+        assertEquals(
+            "Sex is required — reference ranges depend on it",
+            validateCreateOrder(
+                CreateOrderDraft(patientName = ctx.prefill.name, ageText = "51",
+                    testId = ctx.fits.first().test.id),
+                ctx.fits, ctx.frameParams,
+            ),
+        )
     }
 
     // ── what creating actually writes ────────────────────────────────────────
@@ -233,6 +334,34 @@ class CreateOrderFromResultTest {
         assertFalse("Asha" in created, "the traffic log goes to support — no patient names: $created")
         assertFalse("13.8" in created, created)
         assertTrue(b.log().any { it.startsWith("Claimed by") }, "and the ordinary claim line still follows")
+    }
+
+    @Test
+    fun `a patient is never left behind by an order that failed to register`() = runBlocking {
+        val b = stocked()
+        val ravi = Patient(id = "p-ravi", name = "Ravi Kumar", sex = "M", ageYears = 51)
+
+        // The order half fails after the patient half would have written. As two
+        // transactions this committed the patient anyway, said only "failed", and
+        // the operator's retry wrote a SECOND Ravi Kumar — past the duplicate
+        // guard, which returns nothing at all when no phone was typed.
+        val failed = b.repo.createPatientAndOrder(ravi, testIds = listOf("no-such-test"))
+        assertTrue(failed.isFailure)
+        assertTrue("Test not found" in failed.exceptionOrNull()?.message.orEmpty(),
+            failed.exceptionOrNull()?.message.orEmpty())
+        assertNull(b.repo.patientById("p-ravi"), "no orphan: either both rows exist or neither does")
+        assertEquals(0L, b.orderCount())
+        assertTrue(b.engine.duplicatePatients("Ravi Kumar", null).isEmpty())
+
+        // And the retry, which is now the FIRST write, leaves exactly one of each.
+        val (saved, order) = b.repo.createPatientAndOrder(ravi, testIds = listOf("seed-cbc")).getOrThrow()
+        assertEquals("p-ravi", saved.id)
+        assertEquals("p-ravi", order.patientId)
+        assertTrue(order.accessionNo.startsWith(b.repo.ownAccessionSeries()), order.accessionNo)
+        assertEquals(1, b.repo.searchPatients("Ravi Kumar").size)
+        assertEquals(1, b.repo.ordersForPatient("p-ravi").size)
+        assertEquals("Complete Blood Count", b.repo.orderTests(order.id).single().testName)
+        assertTrue(b.repo.resultsForOrder(order.id).isNotEmpty(), "the empty result rows came with it")
     }
 
     // ── the duplicate-patient guard ──────────────────────────────────────────

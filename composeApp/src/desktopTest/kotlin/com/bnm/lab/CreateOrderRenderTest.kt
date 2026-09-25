@@ -45,13 +45,17 @@ import kotlin.test.Test
  */
 class CreateOrderRenderTest {
 
+    /** A run the bench DID key the patient into — the feature's own premise. */
     private val frame = StoredInstrumentFrame(
         driver = "mindray_hl7",
         specimenId = "BNMTEST-1",
+        patientName = "Asha Menon",
+        patientSex = "F",
         params = linkedMapOf(
             "WBC" to "12.40", "RBC" to "4.51", "HGB" to "138", "PLT" to "245",
             "LYM%" to "32.0", "NEU%" to "62.0", "MON%" to "6.0",
         ),
+        meta = mapOf("age" to "34 a"),
         units = mapOf("WBC" to "10*9/L", "RBC" to "10*12/L", "HGB" to "g/L", "PLT" to "10*9/L",
             "LYM%" to "%", "NEU%" to "%", "MON%" to "%"),
     )
@@ -137,8 +141,24 @@ class CreateOrderRenderTest {
     )
 
     @Test
-    fun `the form, pre-filled - the best-fitting test chosen and saying how much of it this run fills`() {
+    fun `the form, pre-filled - the analyzer's own patient, and how much of the test this run fills`() {
+        // The name, sex and age arrived on the frame; the line above them says so
+        // — a form that fills itself in silently is a form nobody checks.
         render("form-prefilled") { body() }
+    }
+
+    @Test
+    fun `the form when the analyzer keyed no patient - blank fields and no note to check`() {
+        val bare = context.copy(frame = frame.copy(patientName = null, patientSex = null, meta = emptyMap()))
+        render("form-empty-patient") {
+            CreateOrderFromResultBody(
+                queued = queued, instrumentName = "BC-5130 bench 1", accessionSeries = "ACC-S2-",
+                refusal = null, context = bare, draft = CreateOrderDraft(testId = "t-cbc"), onDraft = {},
+                testQuery = "", onTestQuery = {}, duplicates = null, onUseExisting = {},
+                onRegisterAnyway = {}, onBackFromDuplicates = {}, created = null, busy = false,
+                error = null, onSubmit = {}, onCancel = {}, onBill = {}, onDone = {},
+            )
+        }
     }
 
     @Test

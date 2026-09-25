@@ -3,13 +3,17 @@ package com.bnm.lab
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import com.bnm.lab.api.ApiClient
 import com.bnm.lab.db.AppDatabase
+import com.bnm.lab.instruments.ClaimCandidates
+import com.bnm.lab.instruments.ClaimPickerState
 import com.bnm.lab.instruments.InstrumentConfig
 import com.bnm.lab.instruments.InstrumentEngine
 import com.bnm.lab.instruments.InstrumentTransport
 import com.bnm.lab.instruments.Mllp
 import com.bnm.lab.instruments.SampleFrames
+import com.bnm.lab.instruments.claimPickerState
 import com.bnm.lab.instruments.filterForClaim
 import com.bnm.lab.instruments.narrowsToOneNonAccession
+import com.bnm.lab.instruments.noOrderAdvice
 import com.bnm.lab.instruments.scanTargetFor
 import com.bnm.lab.lab.LabOrder
 import com.bnm.lab.lab.LabRepository
@@ -147,6 +151,45 @@ class ClaimQueueTest {
         assertEquals(listOf(esr.accessionNo), open.filterForClaim("Kumar").map { it.accessionNo })
         assertTrue(open.filterForClaim("nobody").isEmpty())
         assertEquals(open, open.filterForClaim("  "), "a blank query filters nothing")
+    }
+
+    @Test
+    fun `both no-result states offer the registration, and only a real read says anything`() = runBlocking {
+        val (b, cbc, _) = stocked()
+        val resultId = b.queueOne()
+        val candidates = b.engine.claimCandidates(resultId).getOrThrow()
+        val empty = ClaimCandidates(frame = candidates.frame, open = emptyList(), locked = emptyList())
+
+        // 🔴 The regression this pins. "Create order from this result" used to
+        // reach only NOTHING_OPEN — a lab with an EMPTY worklist. The way an
+        // unregistered sample actually surfaces is the other one: a busy
+        // worklist, the operator types the patient's name, nothing matches. That
+        // was a dead end, and the dead end was the whole trip this feature
+        // removes.
+        assertEquals(ClaimPickerState.NOTHING_OPEN, claimPickerState(empty, null, ""))
+        assertEquals(ClaimPickerState.NOTHING_MATCHED, claimPickerState(candidates, null, "Nobody At All"))
+        assertTrue(claimPickerState(empty, null, "").offersCreateOrder)
+        assertTrue(claimPickerState(candidates, null, "Nobody At All").offersCreateOrder)
+
+        // An empty worklist that was SEARCHED is still a no-result state.
+        assertEquals(ClaimPickerState.NOTHING_MATCHED, claimPickerState(empty, null, "Asha"))
+
+        // The other three states offer nothing, and the failed read says nothing
+        // about the worklist at all: advising "register it again" on the strength
+        // of a read that did not happen is how a sample gets billed twice.
+        assertEquals(ClaimPickerState.READING, claimPickerState(null, null, ""))
+        assertEquals(ClaimPickerState.READ_FAILED, claimPickerState(null, "That result is gone", ""))
+        assertEquals(ClaimPickerState.ROWS, claimPickerState(candidates, null, cbc.accessionNo))
+        listOf(ClaimPickerState.READING, ClaimPickerState.READ_FAILED, ClaimPickerState.ROWS)
+            .forEach { assertFalse(it.offersCreateOrder, it.name) }
+        assertNull(ClaimPickerState.READ_FAILED.noResultSentence(""))
+
+        // Each nothing says which nothing it is, and the advice matches the seat.
+        assertEquals("No order is waiting for results.", ClaimPickerState.NOTHING_OPEN.noResultSentence(""))
+        assertEquals("Nothing matches “Asha”.", ClaimPickerState.NOTHING_MATCHED.noResultSentence(" Asha "))
+        assertTrue("create the order for it here" in noOrderAdvice("Nothing matches “Asha”.", true))
+        assertTrue("register it first" in noOrderAdvice("Nothing matches “Asha”.", false),
+            "a seat that cannot register must not be promised a button")
     }
 
     @Test
