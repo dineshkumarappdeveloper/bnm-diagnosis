@@ -1,0 +1,16 @@
+# Copy to .dev.vars for `npm run dev`. .dev.vars is git-ignored — never commit it.
+
+# Required. The bearer token the engineer's bridge (tools/remote-mcp) sends on
+# GET /v1/support. Any long random string; rotate by changing it here and in
+# the engineer's `claude mcp add … -e BNM_SUPPORT_TOKEN=…`.
+BNM_SUPPORT_TOKEN=change-me-to-a-long-random-string
+
+# Optional. Licence public key as a one-line JWK. Defaults to the production
+# key in src/keys.ts. For the end-to-end smoke test start dev with the TEST
+# key so JWTs from scripts/mint-test-jwt.mjs are accepted:
+#   LAB_LICENSE_PUBLIC_JWK=$(cat test/license-test.public.jwk.json)
+# LAB_LICENSE_PUBLIC_JWK={"kty":"EC","crv":"P-256","x":"…","y":"…"}
+
+# Optional. Milliseconds a freshly opened socket may stay silent (no hello /
+# no join) before the relay closes it. Default 10000.
+# HELLO_TIMEOUT_MS=10000
