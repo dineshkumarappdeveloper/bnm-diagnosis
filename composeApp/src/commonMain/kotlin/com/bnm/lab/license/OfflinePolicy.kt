@@ -62,11 +62,22 @@ object OfflinePolicy {
      */
     fun allowsMasterCatalogPull(userInitiated: Boolean): Boolean = userInitiated
 
+    /**
+     * A remote support session — the app dialling out to BNM's relay so an
+     * engineer can read its diagnostics and fix an analyzer link from the
+     * office. Same category as the catalog pull: it happens ONLY because the
+     * OWNER pressed "Start session", it is time-boxed, and the app never opens
+     * the connection on its own (no beacon, no timer, no start-up check).
+     * [userInitiated] is the whole gate; the consent dialog is what sets it.
+     */
+    fun allowsRemoteSupport(userInitiated: Boolean): Boolean = userInitiated
+
     /** One line for the operator: what this licence does with the network. */
     fun summary(standalone: Boolean): String = if (standalone) {
         "Offline edition — after activation, nothing leaves this computer: no sync, " +
             "no report upload, no QR link, no licence check, no update check. The only " +
-            "network call is fetching the master test catalog, and only when you ask for it."
+            "network calls are fetching the master test catalog, only when you ask for it, " +
+            "and a remote support session only while you have started one."
     } else {
         "Connected edition — results sync to BNM, report QR links resolve, and updates are checked."
     }

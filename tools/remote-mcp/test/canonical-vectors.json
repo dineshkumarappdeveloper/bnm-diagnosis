@@ -1,0 +1,214 @@
+{
+  "_comment": [
+    "Shared canonicalisation vectors for the BNM Lab remote-support signature (contract 2.4).",
+    "Rule: object keys sorted recursively by UTF-16 code unit, arrays in order, no whitespace,",
+    "numbers exactly as sent (the bridge writes them with JSON.stringify; the app re-emits the",
+    "parsed literal unchanged), strings JSON-escaped with lowercase \\uXXXX for control characters,",
+    "non-ASCII raw. sha256 is over the UTF-8 bytes of `canonical`.",
+    "TRAP: JSON.stringify of a re-keyed JS object puts integer-like keys (\"9\", \"10\") first in numeric",
+    "order — the bridge must build the canonical string by hand (see the 'key order' vector).",
+    "Loaded by composeApp/src/desktopTest/.../CanonicalJsonTest.kt AND tools/remote-mcp/test — same",
+    "input must give the same canonical string and hash on both sides. Regenerate only by running",
+    "both suites; never hand-edit a canonical/sha256 value."
+  ],
+  "vectors": [
+    {
+      "name": "empty object",
+      "input": {},
+      "canonical": "{}",
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "flat object, keys out of order",
+      "input": {
+        "b": 1,
+        "a": 2,
+        "c": "three"
+      },
+      "canonical": "{\"a\":2,\"b\":1,\"c\":\"three\"}",
+      "sha256": "e902c99341c90b2e60acc11675be68f407b6cfc582a323403269ff77ddcb0a9d"
+    },
+    {
+      "name": "nested objects sorted at every level",
+      "input": {
+        "z": {
+          "y": {
+            "x": 1,
+            "a": [
+              3,
+              2,
+              1
+            ]
+          },
+          "b": "B"
+        },
+        "a": 0
+      },
+      "canonical": "{\"a\":0,\"z\":{\"b\":\"B\",\"y\":{\"a\":[3,2,1],\"x\":1}}}",
+      "sha256": "c84c8e7c42a1a9f22eb8979310ba985e2c08a83ec6e010c16958d119b971126a"
+    },
+    {
+      "name": "arrays keep their order, mixed types",
+      "input": [
+        3,
+        1,
+        {
+          "k": "v",
+          "a": "b"
+        },
+        [
+          2,
+          1
+        ],
+        null,
+        true,
+        false,
+        "s"
+      ],
+      "canonical": "[3,1,{\"a\":\"b\",\"k\":\"v\"},[2,1],null,true,false,\"s\"]",
+      "sha256": "aa16a38f937586344f870a309d149a54de295218621849a1b1f169125a4015bb"
+    },
+    {
+      "name": "unicode values and keys stay raw",
+      "input": {
+        "name": "தமிழ் лаборатория 🧪",
+        "é": "ü",
+        "emoji": "😀",
+        "zh": "实验室"
+      },
+      "canonical": "{\"emoji\":\"😀\",\"name\":\"தமிழ் лаборатория 🧪\",\"zh\":\"实验室\",\"é\":\"ü\"}",
+      "sha256": "37a21724b4897963582e4066d6dc161e857440d9b1a64e8a81fe5a544b17625c"
+    },
+    {
+      "name": "numbers as sent",
+      "input": {
+        "int": 100000,
+        "neg": -42,
+        "dec": 2.5,
+        "small": -0.001,
+        "exp": 1e-7,
+        "zero": 0,
+        "big": 9007199254740991
+      },
+      "canonical": "{\"big\":9007199254740991,\"dec\":2.5,\"exp\":1e-7,\"int\":100000,\"neg\":-42,\"small\":-0.001,\"zero\":0}",
+      "sha256": "fcac730faca320c38b4be54ba0b7dafa87821f212f096aa2bfe263c3dc2cf649"
+    },
+    {
+      "name": "empty containers and empty string",
+      "input": {
+        "a": {},
+        "b": [],
+        "c": [
+          {}
+        ],
+        "d": "",
+        "e": [
+          []
+        ]
+      },
+      "canonical": "{\"a\":{},\"b\":[],\"c\":[{}],\"d\":\"\",\"e\":[[]]}",
+      "sha256": "207f10ecce4065d16929aa7c803c870e05e4d9f24528fd08425b6ff985d0afc0"
+    },
+    {
+      "name": "strings needing escapes",
+      "input": {
+        "q": "say \"hi\"",
+        "bs": "a\\b",
+        "nl": "line1\nline2",
+        "tab": "\t",
+        "cr": "\r",
+        "ctrl": "\u0001",
+        "del": "",
+        "slash": "a/b"
+      },
+      "canonical": "{\"bs\":\"a\\\\b\",\"cr\":\"\\r\",\"ctrl\":\"\\u0001\",\"del\":\"\",\"nl\":\"line1\\nline2\",\"q\":\"say \\\"hi\\\"\",\"slash\":\"a/b\",\"tab\":\"\\t\"}",
+      "sha256": "4f55976862c7148058122b04be71745cff53890e15090334e27c628652405e0c"
+    },
+    {
+      "name": "key order is by UTF-16 code unit",
+      "input": {
+        "9": 7,
+        "10": 6,
+        "b": 1,
+        "B": 2,
+        "a": 3,
+        "A": 4,
+        "_": 5,
+        "é": 8,
+        "aa": 9,
+        "a b": 10
+      },
+      "canonical": "{\"10\":6,\"9\":7,\"A\":4,\"B\":2,\"_\":5,\"a\":3,\"a b\":10,\"aa\":9,\"b\":1,\"é\":8}",
+      "sha256": "913238927883576a59743913952d0eceecb126e9a48164238437406902c39731"
+    },
+    {
+      "name": "null and booleans inside arrays of objects",
+      "input": {
+        "list": [
+          {
+            "z": null,
+            "a": true
+          },
+          {
+            "b": false
+          }
+        ],
+        "n": null
+      },
+      "canonical": "{\"list\":[{\"a\":true,\"z\":null},{\"b\":false}],\"n\":null}",
+      "sha256": "100e20a88bd0a965e4fecf8f8ea228aae77c7527b78f8fbaa8f58c581ebe1ae0"
+    },
+    {
+      "name": "a realistic tools/call params object",
+      "input": {
+        "name": "instruments.restart",
+        "arguments": {
+          "instrument_id": "bench-bc5130",
+          "force": false
+        }
+      },
+      "canonical": "{\"arguments\":{\"force\":false,\"instrument_id\":\"bench-bc5130\"},\"name\":\"instruments.restart\"}",
+      "sha256": "068debb11adfde828a2ea7dbc1358a7377492b1dac4921f62eb91aa8bfccc0b2"
+    },
+    {
+      "name": "deep nesting",
+      "input": {
+        "a": {
+          "b": {
+            "c": {
+              "d": {
+                "e": {
+                  "f": [
+                    1,
+                    {
+                      "g": "h"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "canonical": "{\"a\":{\"b\":{\"c\":{\"d\":{\"e\":{\"f\":[1,{\"g\":\"h\"}]}}}}}}",
+      "sha256": "9f2c251c62ee300da9219c168993f46facbeb21410e6266fbeade721ca841c44"
+    },
+    {
+      "name": "top-level array of primitives",
+      "input": [
+        "x",
+        1,
+        null,
+        true
+      ],
+      "canonical": "[\"x\",1,null,true]",
+      "sha256": "b89faa7b5955334ca37116409489759f810dde6a035e0cb17e44e42befabc8a7"
+    },
+    {
+      "name": "top-level string",
+      "input": "just a string",
+      "canonical": "\"just a string\"",
+      "sha256": "3fe01def54b1c6cd795b2ebfcbab64150f6a507bce043040c662c682eebfed1e"
+    }
+  ]
+}
