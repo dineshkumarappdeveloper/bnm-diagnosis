@@ -36,10 +36,15 @@ class RecordingPrinter(private val verbose: Boolean = true) : Printer {
  * came back" from "the connection was refused" from "the app ACKed but with
  * an error code", and those three look identical from the app's side of the
  * cable.
+ *
+ * What happened is reported as [SendListener] events, never by printing: the
+ * CLI hands in a [PrintingSendListener] and the window hands in its own. Both
+ * front ends therefore see the same run, and neither has to read the other's
+ * sentences.
  */
 class Sender(
     private val o: Options,
-    private val out: Printer,
+    private val listener: SendListener,
     /** yyyyMMddHHmmss; injected so a test gets a frame it can predict. */
     private val clock: () -> String = { LocalDateTime.now().format(STAMP) },
     /** Swaps the real socket out. Only the tests pass this — the CLI never does,
@@ -47,27 +52,42 @@ class Sender(
     private val transportOverride: TransportFactory? = null,
 ) {
 
+    /** The CLI's way in: a printer is a listener that prints. */
+    constructor(
+        o: Options,
+        out: Printer,
+        clock: () -> String = { LocalDateTime.now().format(STAMP) },
+        transportOverride: TransportFactory? = null,
+    ) : this(o, PrintingSendListener(out), clock, transportOverride)
+
+    /** What one shape of run ended up doing. */
+    private data class Outcome(val kind: RunKind, val total: Int, val failed: Int, val exitCode: Int)
+
     /** Process exit code: 0 when every sample went out as intended. */
     fun run(): Int {
-        out.info(banner())
+        listener.runStarted(runStart())
         val factory = factory()
-        return try {
+        val outcome = try {
             when {
                 o.faults.hang -> hang(factory)
                 o.faults.burst > 0 -> burst(factory)
                 else -> sequential(factory)
             }
         } catch (e: Exception) {
-            out.warn(explain(e))
-            1
+            listener.failed(Failure(null, explain(e)))
+            Outcome(RunKind.ABORTED, o.samples, o.samples, 1)
         } finally {
             (factory as? AutoCloseable)?.let { runCatching { it.close() } }
         }
+        // Always, including after a failure — a window that never hears this
+        // would spin forever on a refused connection.
+        listener.finished(RunFinished(outcome.kind, outcome.total, outcome.failed, outcome.exitCode))
+        return outcome.exitCode
     }
 
     // ── the three shapes a run can take ──
 
-    private fun sequential(factory: TransportFactory): Int {
+    private fun sequential(factory: TransportFactory): Outcome {
         var failures = 0
         val shared = if (factory.perSample) null else factory.open()
         try {
@@ -83,9 +103,7 @@ class Sender(
         } finally {
             shared?.close()
         }
-        out.info(if (failures == 0) "Done — ${o.samples} sample(s) sent."
-        else "Done — ${o.samples - failures} of ${o.samples} sent, $failures failed.")
-        return if (failures == 0) 0 else 1
+        return Outcome(RunKind.SEQUENTIAL, o.samples, failures, if (failures == 0) 0 else 1)
     }
 
     /**
@@ -93,9 +111,9 @@ class Sender(
      * same instant. The app accepts each connection on its own coroutine, and
      * this is the only way to prove that from outside.
      */
-    private fun burst(factory: TransportFactory): Int {
+    private fun burst(factory: TransportFactory): Outcome {
         val n = o.faults.burst
-        out.info("Burst: opening $n connections at once.")
+        listener.note("Burst: opening $n connections at once.")
         val failures = AtomicInteger(0)
         val threads = (0 until n).map { index ->
             Thread {
@@ -103,14 +121,13 @@ class Sender(
                     factory.open().use { t -> if (!sendOne(index, t)) failures.incrementAndGet() }
                 }.onFailure {
                     failures.incrementAndGet()
-                    out.warn("connection $index: ${explain(it)}")
+                    listener.failed(Failure(index, explain(it)))
                 }
             }.apply { name = "sim-burst-$index"; start() }
         }
         threads.forEach { it.join() }
         val bad = failures.get()
-        out.info(if (bad == 0) "Done — all $n connections completed." else "Done — $bad of $n failed.")
-        return if (bad == 0) 0 else 1
+        return Outcome(RunKind.BURST, n, bad, if (bad == 0) 0 else 1)
     }
 
     /**
@@ -118,16 +135,16 @@ class Sender(
      * listening state with no frames — which is what a lab sees when the
      * analyzer's LIS setting points at BNM Lab but nobody has pressed Send.
      */
-    private fun hang(factory: TransportFactory): Int {
+    private fun hang(factory: TransportFactory): Outcome {
         val holdSeconds = if (o.intervalSeconds > 0) o.intervalSeconds else 30.0
         factory.open().use { t ->
-            out.info("Connected: ${t.describe}")
-            out.info("Holding the link open for ${fmt(holdSeconds, 1)}s without sending anything.")
-            out.info("BNM Lab should show this address as the peer, bytes 0, frames 0.")
+            listener.note("Connected: ${t.describe}")
+            listener.note("Holding the link open for ${fmt(holdSeconds, 1)}s without sending anything.")
+            listener.note("BNM Lab should show this address as the peer, bytes 0, frames 0.")
             Thread.sleep((holdSeconds * 1000).toLong())
         }
-        out.info("Closed. The app should log the connection closing with no frames.")
-        return 0
+        listener.note("Closed. The app should log the connection closing with no frames.")
+        return Outcome(RunKind.HANG, 0, 0, 0)
     }
 
     // ── one sample ──
@@ -137,9 +154,16 @@ class Sender(
         val frame = frameBytes(spec)
         val wire = applyWireFaults(frame)
 
-        out.info("")
-        out.info("[${index + 1}/${o.samples}] ${describe(spec)}")
-        out.detail(render(wire))
+        listener.sampleStarted(
+            SampleStarted(
+                index = index,
+                total = o.samples,
+                specimenId = spec.specimenId,
+                qc = spec.qc,
+                cbc = spec.cbc,
+                frame = render(wire),
+            )
+        )
 
         val started = System.nanoTime()
         writeWire(transport, wire)
@@ -149,19 +173,19 @@ class Sender(
             // not double-apply it.
             writeWire(transport, wire)
             sent += wire.size
-            out.info("  sent the same frame twice (--duplicate)")
         }
-        out.info("  $sent bytes out over ${transport.describe}")
+        listener.bytesSent(BytesSent(index, sent, transport.describe, o.faults.duplicate))
 
         if (o.faults.truncated) {
-            out.info("  cut at ${percentOf(wire.size, frame.size)}% and closing — the app should never see a complete frame")
+            listener.note("  cut at ${percentOf(wire.size, frame.size)}% and closing — " +
+                "the app should never see a complete frame")
             return true
         }
         if (o.faults.garbage) {
-            out.info("  that was not a frame: the app should count the bytes and frame nothing")
+            listener.note("  that was not a frame: the app should count the bytes and frame nothing")
             return true
         }
-        return awaitAck(transport, started)
+        return awaitAck(index, transport, started)
     }
 
     /**
@@ -169,32 +193,24 @@ class Sender(
      * one — saying "no ACK" about a Mispa cable would send an engineer hunting
      * a fault that does not exist.
      */
-    private fun awaitAck(transport: AnalyzerTransport, startedNanos: Long): Boolean {
-        if (o.dryRun) return true                      // nothing was sent, so nothing can answer
-        if (o.analyzer != Analyzer.MINDRAY) {
-            out.info("  one-way protocol — no ACK is expected")
-            return true
+    private fun awaitAck(index: Int, transport: AnalyzerTransport, startedNanos: Long): Boolean {
+        val outcome = when {
+            o.dryRun -> AckOutcome.DryRun(index)                 // nothing was sent, so nothing can answer
+            o.analyzer != Analyzer.MINDRAY -> AckOutcome.NotExpected(index)
+            o.ackTimeoutMs <= 0 -> AckOutcome.NotWaited(index)
+            else -> {
+                val reply = transport.readReply(o.ackTimeoutMs)
+                val elapsedMs = (System.nanoTime() - startedNanos) / 1_000_000
+                val ack = if (reply.isEmpty()) null else SimMllp.readAck(reply.decodeToString())
+                when {
+                    reply.isEmpty() -> AckOutcome.Missing(index, o.ackTimeoutMs / 1000.0)
+                    ack == null -> AckOutcome.Unreadable(index, reply.size, render(reply).take(200))
+                    else -> AckOutcome.Received(index, elapsedMs, ack)
+                }
+            }
         }
-        if (o.ackTimeoutMs <= 0) {
-            out.info("  not waiting for an ACK (--no-ack-wait) — the app still sends one; nobody reads it")
-            return true
-        }
-        val reply = transport.readReply(o.ackTimeoutMs)
-        val elapsedMs = (System.nanoTime() - startedNanos) / 1_000_000
-        if (reply.isEmpty()) {
-            out.warn("  no ACK within ${fmt(o.ackTimeoutMs / 1000.0, 1)}s — a real BC-5130 would mark this " +
-                "sample 'transmission failed' and may retransmit")
-            return false
-        }
-        val ack = SimMllp.readAck(reply.decodeToString())
-        if (ack == null) {
-            out.warn("  ${reply.size} bytes came back but no MSA segment could be read: " +
-                render(reply).take(200))
-            return false
-        }
-        out.info("  ACK after ${elapsedMs}ms: $ack${if (ack.accepted) "" else "  <- NOT an accept"}")
-        out.detail("  " + ack.raw.replace('\r', '\n').trim().replace("\n", "\n  "))
-        return ack.accepted
+        listener.ackReceived(outcome)
+        return outcome.ok
     }
 
     private fun writeWire(transport: AnalyzerTransport, wire: ByteArray) {
@@ -216,7 +232,7 @@ class Sender(
             at = end
             if (at < wire.size) Thread.sleep(chunkDelay)
         }
-        out.info("  dribbled out in $pieces pieces of $size bytes, ${chunkDelay}ms apart")
+        listener.note("  dribbled out in $pieces pieces of $size bytes, ${chunkDelay}ms apart")
     }
 
     // ── building ──
@@ -250,7 +266,7 @@ class Sender(
         else -> frame
     }
 
-    // ── transcript ──
+    // ── what the run is ──
 
     private fun factory(): TransportFactory = when {
         transportOverride != null -> transportOverride
@@ -259,19 +275,19 @@ class Sender(
         else -> TcpClientTransport.factory(o.host, o.port)
     }
 
-    private fun banner(): String = buildString {
-        appendLine("BNM Analyzer Simulator — ${o.analyzer.label}")
-        appendLine("  driver the lab must have selected: ${o.analyzer.driverKey}")
-        appendLine("  link: " + when {
+    private fun runStart() = RunStart(
+        analyzer = o.analyzer,
+        link = when {
             o.dryRun -> "dry run, nothing is sent"
             o.usesSerial -> "serial ${o.serialPort} @ ${o.baud} 8-N-1"
             else -> "TCP ${o.host}:${o.port} (the simulator dials out, as the analyzer does)"
-        })
-        appendLine("  samples: ${o.samples} · profile ${o.profile.cliName} · seed ${o.seed}")
-        val faults = faultSummary()
-        if (faults.isNotEmpty()) appendLine("  FAULTS: $faults")
-        append("  specimen id(s): " + if (o.noSpecimen) "none keyed (--no-specimen)" else summariseIds())
-    }
+        },
+        samples = o.samples,
+        profile = o.profile,
+        seed = o.seed,
+        faults = faultSummary(),
+        specimenIds = if (o.noSpecimen) "none keyed (--no-specimen)" else summariseIds(),
+    )
 
     private fun summariseIds(): String =
         if (o.ids.size <= 3) o.ids.joinToString(", ")
@@ -290,13 +306,6 @@ class Sender(
         if (o.qc) add("qc")
     }.joinToString(", ")
 
-    private fun describe(spec: SampleSpec): String {
-        val c = spec.cbc
-        val id = spec.specimenId ?: "(no specimen id)"
-        return "$id · WBC ${fmt(c.wbc, 2)} · RBC ${fmt(c.rbc, 2)} · HGB ${fmt(c.hgb, 1)} g/dL · " +
-            "PLT ${fmt(c.plt, 0)}" + if (spec.qc) " · QC" else ""
-    }
-
     private fun percentOf(part: Int, whole: Int): Int = if (whole == 0) 0 else part * 100 / whole
 
     companion object {
@@ -304,7 +313,7 @@ class Sender(
 
         /** Deliberate nonsense: no frame start for either driver, and a stray
          *  newline so it cannot accidentally look like an HL7 segment. */
-        private val GARBAGE = " ÿ<<not a frame>>\nþQQQ 2f8a1c\n".toByteArray(Charsets.ISO_8859_1)
+        private val GARBAGE = " ÿ<<not a frame>>\nþQQQ 2f8a1c\n".toByteArray(Charsets.ISO_8859_1)
 
         /**
          * A frame as a human can read it: CR becomes a line break and any long
