@@ -1,7 +1,6 @@
 package com.bnm.lab.remote
 
 import com.bnm.lab.staff.sha256Hex
-import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -23,8 +22,9 @@ import kotlinx.serialization.json.JsonPrimitive
  * - numbers exactly as they arrived on the wire — never re-formatted. The
  *   bridge writes them with `JSON.stringify`, this side parses and re-emits
  *   the literal untouched, so `1.0` never becomes `1` on one side only;
- * - strings escaped the JSON way (`"` `\` and control characters), non-ASCII
- *   emitted raw.
+ * - strings escaped exactly the way `JSON.stringify` escapes them: the
+ *   two-character escapes, lowercase `\u00xx` for other control characters,
+ *   lone surrogates escaped, everything else (non-ASCII included) raw.
  *
  * The shared fixture `tools/remote-mcp/test/canonical-vectors.json` pins the
  * output for both implementations — see CanonicalJsonTest and the bridge's
@@ -33,7 +33,8 @@ import kotlinx.serialization.json.JsonPrimitive
  * Written by hand rather than through `Json.encodeToString(JsonElement)`:
  * kotlinx re-parses numeric literals and prints them as doubles (`1e-7` →
  * `1.0E-7`, `1.50` → `1.5`), which is exactly the re-formatting the rule
- * forbids. String escaping IS kotlinx's — it matches JSON.stringify.
+ * forbids. Strings are written by hand too, so a lone surrogate comes out as
+ * `\udXXX` like JSON.stringify writes it instead of a raw, unencodable char.
  */
 object CanonicalJson {
 
@@ -49,7 +50,8 @@ object CanonicalJson {
                 for (key in e.keys.sorted()) {
                     if (!first) out.append(',')
                     first = false
-                    out.append(json.encodeToString(String.serializer(), key)).append(':')
+                    quote(key, out)
+                    out.append(':')
                     write(e.getValue(key), out)
                 }
                 out.append('}')
@@ -60,9 +62,36 @@ object CanonicalJson {
                 out.append(']')
             }
             is JsonNull -> out.append("null")
-            is JsonPrimitive -> if (e.isString) out.append(json.encodeToString(String.serializer(), e.content))
+            is JsonPrimitive -> if (e.isString) quote(e.content, out)
                 else out.append(e.content)          // number or boolean, literal as it arrived
         }
+    }
+
+    /** `JSON.stringify` string escaping: the two-character escapes, `\u00xx` for other controls, lone surrogates escaped. */
+    private fun quote(s: String, out: StringBuilder) {
+        out.append('"')
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            when {
+                c == '"' -> out.append("\\\"")
+                c == '\\' -> out.append("\\\\")
+                c == '\b' -> out.append("\\b")
+                c == '\u000C' -> out.append("\\f")
+                c == '\n' -> out.append("\\n")
+                c == '\r' -> out.append("\\r")
+                c == '\t' -> out.append("\\t")
+                c < ' ' -> out.append("\\u").append(c.code.toString(16).padStart(4, '0'))
+                c.isHighSurrogate() && i + 1 < s.length && s[i + 1].isLowSurrogate() -> {
+                    out.append(c).append(s[i + 1])
+                    i++
+                }
+                c.isSurrogate() -> out.append("\\u").append(c.code.toString(16).padStart(4, '0'))
+                else -> out.append(c)
+            }
+            i++
+        }
+        out.append('"')
     }
 
     /** Parse then canonicalise; throws on malformed JSON (the caller refuses the request). */

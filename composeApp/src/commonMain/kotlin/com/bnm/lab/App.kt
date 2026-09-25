@@ -18,6 +18,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavType
@@ -61,6 +62,11 @@ import com.bnm.lab.navigation.LicenceGatedRoute
 import com.bnm.lab.navigation.ReadOnlyBanner
 import com.bnm.lab.navigation.RouteGuardEffect
 import com.bnm.lab.navigation.Screen
+import com.bnm.lab.remote.RemoteSupportBanner
+import com.bnm.lab.remote.RemoteSupportDialog
+import com.bnm.lab.remote.RemoteSupportStatus
+import com.bnm.lab.remote.RemoteSupportUi
+import com.bnm.lab.remote.platformRemoteSupportController
 import com.bnm.lab.screens.billing.BillingSettingsScreen
 import com.bnm.lab.screens.billing.CartScreen
 import com.bnm.lab.screens.billing.CreateInvoiceScreen
@@ -85,10 +91,13 @@ import com.bnm.lab.screens.staff.StaffSignInScreen
 import com.bnm.lab.staff.LocalStaffRepository
 import com.bnm.lab.staff.LocalStaffSession
 import com.bnm.lab.staff.StaffRepository
+import com.bnm.lab.staff.StaffRole
 import com.bnm.lab.staff.StaffSession
 import com.bnm.lab.ui.theme.AppTheme
 import com.bnm.lab.ui.theme.ThemeManager
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import com.bnm.lab.license.subscriptionStatus
 import com.bnm.lab.report.ReportAssembler
@@ -100,9 +109,9 @@ import com.bnm.lab.screens.settings.PrintSettingsScreen
 import com.bnm.lab.billing.PrintKind
 import com.bnm.lab.print.BtPrinter
 import com.bnm.lab.screens.billing.BtPrinterPickerPage
+import com.bnm.lab.remote.RemoteSupportKeys
 import com.bnm.lab.remote.SqlSupportAuditStore
 import com.bnm.lab.remote.SupportAuditRow
-import com.bnm.lab.remote.platformRemoteSupportController
 import com.bnm.lab.remote.remoteToolHost
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
@@ -251,6 +260,12 @@ fun App() {
     // Purely local: no licence/connectivity gate, results sync later as usual.
     val instrumentEngine = remember { InstrumentEngine(database, labRepo, ApiClient.json) }
 
+    // ── Remote support ("Maintenance mode"): the desktop engine, or null on
+    // Android/iOS. Nothing runs until the owner starts a session from the
+    // dialog. Tool hosts (RemoteTools) and the audit store are attached here,
+    // once the database and the analyzer engine exist. ──
+    val remoteSupport = remember { platformRemoteSupportController() }
+
     // ── Support report context: the questions support asks first, answered at
     // the top of the report. Flags, counts and IDs ONLY — the report is emailed,
     // so no patient, no result, no token, no licence key ever goes in here. ──
@@ -286,14 +301,18 @@ fun App() {
     LaunchedEffect(Unit) { instrumentEngine.start() }
 
     // ── Remote support: the audit trail (support history) and the tool host
-    // attach to the session engine once the database and the analyzer engine
-    // exist. Nothing is reachable until the OWNER starts a session. ──
+    // attach to the session engine (declared above) once the database and the
+    // analyzer engine exist. Nothing is reachable until the OWNER starts a
+    // session; `lab.overview` reports whether this build still trusts the
+    // committed DEV support key. ──
     val supportAudit = remember { SqlSupportAuditStore(database) }
-    val remoteSupport = remember { platformRemoteSupportController() }
     LaunchedEffect(Unit) {
         remoteSupport?.let { rs ->
             rs.attachAuditStore(supportAudit)
-            rs.attachToolHost(remoteToolHost(database, instrumentEngine, labRepo, licenseManager, controller = rs))
+            rs.attachToolHost(remoteToolHost(
+                database, instrumentEngine, labRepo, licenseManager, controller = rs,
+                supportKeyLabel = { if (RemoteSupportKeys.isDevKey) "dev" else "prod" },
+            ))
         }
     }
     // A tenant switch stops the listeners before wiping (ActivationScreen's
@@ -461,6 +480,10 @@ fun App() {
 
             val supportRequest by SupportUi.request.collectAsState()
             supportRequest?.let { ReportProblemDialog(it, onDismiss = { SupportUi.close() }) }
+            val remoteDialogOpen by RemoteSupportUi.open.collectAsState()
+            if (remoteDialogOpen && remoteSupport != null) {
+                RemoteSupportDialog(remoteSupport, onDismiss = { RemoteSupportUi.close() })
+            }
 
             // Entry gate (P2): no genuine licence on this computer → Activation.
             // A lapsed or blocked licence is NOT that: it signs staff in and runs
@@ -489,7 +512,17 @@ fun App() {
                 // "Switch user", "Sign out" and the auto-lock are one action:
                 // drop the in-memory session (lab data untouched) and go back to
                 // the sign-in grid with nothing left on the back stack.
-                fun lockSeat() {
+                val uiScope = rememberCoroutineScope()
+                fun lockSeat(explicit: Boolean = false) {
+                    // The owner signing out ends the support session they are
+                    // answerable for. The idle auto-lock does not: the engineer
+                    // may be mid-repair while the bench is quiet, and End on the
+                    // banner is always one click away.
+                    if (explicit && remoteSupport != null && remoteSupport.status.value.isActive &&
+                        staffSession.signedIn?.role == StaffRole.OWNER
+                    ) {
+                        uiScope.launch { remoteSupport.end("owner signed out") }
+                    }
                     staffSession.signOut()
                     navController.navigate(Screen.StaffSignIn.route) {
                         popUpTo(navController.graph.id) { inclusive = true }
@@ -516,6 +549,16 @@ fun App() {
                 // across a "switch user", which GuardedRoute alone cannot catch.
                 RouteGuardEffect(navController, signedInStaff)
 
+                // The support banner sits above EVERY screen — activation and
+                // sign-in included — for as long as a session runs.
+                val remoteStatus by (remoteSupport?.status ?: NO_REMOTE_SUPPORT).collectAsState()
+                Column(Modifier.fillMaxSize()) {
+                RemoteSupportBanner(
+                    remoteStatus,
+                    onEnd = { uiScope.launch { remoteSupport?.end("owner pressed End") } },
+                    onOpen = { RemoteSupportUi.open() },
+                )
+                Box(Modifier.fillMaxWidth().weight(1f)) {
                 NavHost(navController = navController, startDestination = startDestination) {
 
                     // ── Seat sign-in gate (P4) ──
@@ -673,8 +716,8 @@ fun App() {
                                     businessId = businessId,
                                     labSync = labSync,
                                     signedInStaff = signedInStaff,
-                                    onSwitchUser = { lockSeat() },
-                                    onSignOut = { lockSeat() },
+                                    onSwitchUser = { lockSeat(explicit = true) },
+                                    onSignOut = { lockSeat(explicit = true) },
                                     revenue = revenueRepo,
                                     onRevenue = { navController.navigate(Screen.Bills.createRoute(com.bnm.lab.navigation.BillsTab.REVENUE)) },
                                 )
@@ -945,6 +988,8 @@ fun App() {
                         )
                     }
                 }
+                }
+                }
             }
         }
     }
@@ -958,3 +1003,6 @@ private fun uuid4(): String = Uuid.random().toString()
 
 /** How often the licence term is re-read while the app is open. */
 private const val LICENCE_RECHECK_MS = 60_000L
+
+/** What a platform without a remote-support engine reports: never active. */
+private val NO_REMOTE_SUPPORT = MutableStateFlow(RemoteSupportStatus())
