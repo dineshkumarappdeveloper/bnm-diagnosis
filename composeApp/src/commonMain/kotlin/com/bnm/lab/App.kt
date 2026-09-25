@@ -1067,7 +1067,13 @@ fun App() {
                         InstrumentsScreen(
                             engine = instrumentEngine,
                             labName = licState.labName ?: authRepository.getSelectedBusinessName() ?: "BNM Lab",
+                            // Only the queue's "Create order" reads these two: it is
+                            // the one door on this screen that starts new work, and
+                            // the accession it mints comes from this seat's series.
+                            licence = licState,
+                            accessionSeries = labRepo.ownAccessionSeries(),
                             onBack = { navController.popBackStack() },
+                            onOpenOrder = { id -> navController.navigate(Screen.LabOrderDetail.createRoute(id)) },
                             onVerified = { inst ->
                                 // Support history row: the bench confirmed the settings support changed.
                                 runCatching {

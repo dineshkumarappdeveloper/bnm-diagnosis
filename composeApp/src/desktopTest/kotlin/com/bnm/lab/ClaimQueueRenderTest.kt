@@ -109,7 +109,9 @@ class ClaimQueueRenderTest {
     fun `the picker with nothing to offer - the order was never registered`() {
         render("picker-empty", height = 420) {
             ClaimPickerBody(queued, "BC-5130 bench 1", ClaimCandidates(frame, emptyList(), locked = emptyList()),
-                query = "", onQuery = {}, busy = false, error = null, onAssign = {})
+                query = "", onQuery = {}, busy = false, error = null, onAssign = {},
+                // The empty state's advice is now a button — the render has to show it.
+                onCreateOrder = {})
         }
     }
 
@@ -146,11 +148,11 @@ class ClaimQueueRenderTest {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column {
                     ClaimQueueRow(queued, "BC-5130 bench 1", enabled = true,
-                        onAssign = {}, onPrint = {}, onDiscard = {})
+                        onAssign = {}, onCreateOrder = {}, onPrint = {}, onDiscard = {})
                     ClaimQueueRow(
                         queued.copy(id = "q2", specimenId = null, receivedAt = "2026-09-25T10:51:00Z"),
                         "Mispa Count X — bench 2", enabled = false,
-                        onAssign = {}, onPrint = {}, onDiscard = {},
+                        onAssign = {}, onCreateOrder = {}, onPrint = {}, onDiscard = {},
                     )
                 }
             }

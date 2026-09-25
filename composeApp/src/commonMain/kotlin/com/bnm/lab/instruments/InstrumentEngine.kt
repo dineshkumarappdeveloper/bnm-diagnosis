@@ -13,6 +13,8 @@ import com.bnm.lab.lab.LabOrder
 import com.bnm.lab.lab.LabRepository
 import com.bnm.lab.lab.LabStatus
 import com.bnm.lab.lab.LabTest
+import com.bnm.lab.lab.Patient
+import com.bnm.lab.license.LicenseState
 import com.bnm.lab.staff.Staff
 import io.ktor.network.selector.SelectorManager
 import io.ktor.network.sockets.aSocket
@@ -994,7 +996,8 @@ class InstrumentEngine(
         require(order.status in ENTRY_OPEN) { "Order ${order.accessionNo} is ${order.status} — results are locked" }
         val cfg = row.instrument_id?.let { id ->
             withContext(Dispatchers.Default) { q.instrumentById(id).executeAsOneOrNull()?.toModel() }
-        } ?: InstrumentConfig(id = "", name = "Analyzer", driver = stored.driver, transport = InstrumentTransport.TCP)
+        } ?: InstrumentConfig(id = "", name = FALLBACK_INSTRUMENT_NAME, driver = stored.driver,
+            transport = InstrumentTransport.TCP)
         val outcome = applyFrameToOrder(cfg, stored, order)
         if (!outcome.matched) error("No test on ${order.accessionNo} takes these parameters — check the ordered tests")
         withContext(Dispatchers.Default) {
@@ -1002,6 +1005,152 @@ class InstrumentEngine(
         }
         logRow(cfg, "info", "Claimed by ${actorName(by)} onto ${order.accessionNo} (manual) — ${outcome.summary}", null)
         outcome.summary
+    }
+
+    // ── the third way out: register the order this run was meant for ──
+
+    /**
+     * What the "Create order" dialog opens with: the run, the ACTIVE catalog
+     * ranked against it, and the lab's referrers.
+     *
+     * Only active tests, unlike [claimCandidates] (which reads the whole catalog
+     * because it is DESCRIBING orders that already exist, retired tests and
+     * all). This one is registering new work, and a test the lab has retired is
+     * not something to start.
+     *
+     * On [Dispatchers.Default] for the reason `claimCandidates` is: the caller
+     * is a `LaunchedEffect` on Main, and this decodes a payload (128-point
+     * histograms, base64 scattergrams) and runs one [mapParams] per catalog test
+     * — 223 of them in a stocked lab.
+     */
+    suspend fun createOrderContext(resultId: String): Result<CreateOrderContext> =
+        withContext(Dispatchers.Default) {
+            runCatching {
+                val row = q.unmatchedById(resultId).executeAsOneOrNull() ?: error("That result is gone")
+                val stored = json.decodeFromString(StoredInstrumentFrame.serializer(), row.payload_json)
+                val inst = row.instrument_id?.let { q.instrumentById(it).executeAsOneOrNull() }
+                CreateOrderContext(
+                    frame = stored,
+                    instrumentName = inst?.name ?: FALLBACK_INSTRUMENT_NAME,
+                    fits = rankTestsForFrame(
+                        stored.params.keys, labRepo.listTests(), parseOverrides(inst?.param_map_json),
+                    ),
+                    referrers = labRepo.listReferrers(),
+                )
+            }
+        }
+
+    /**
+     * Existing patients a new registration would duplicate — same phone digits
+     * AND the same name ([duplicatesOf]) — each with what they have been to this
+     * lab before.
+     *
+     * Asked BEFORE anything is written. A patient list that fills with
+     * near-duplicates is not an untidiness: it is how the wrong result reaches
+     * the wrong person a month later, when two "Ravi Kumar" rows both look
+     * plausible and neither is obviously the one holding the phone.
+     */
+    suspend fun duplicatePatients(name: String, phone: String?, recent: Int = 3): List<PatientMatch> =
+        withContext(Dispatchers.Default) {
+            if (name.isBlank() || phone.isNullOrBlank()) return@withContext emptyList()
+            labRepo.patientsByPhone(phone).duplicatesOf(name).map { p ->
+                val orders = labRepo.ordersForPatient(p.id)      // newest first
+                PatientMatch(p, orders.take(recent), orders.size)
+            }
+        }
+
+    /**
+     * Register the order this run was meant for, then put the run on it.
+     *
+     * The whole point of the feature, and deliberately NOT a new way to make an
+     * order: the patient goes through [LabRepository.upsertPatient], the order
+     * through [LabRepository.createLabOrder] — which allocates the accession
+     * from THIS computer's seat series, snapshots prices and pre-creates the
+     * empty result rows — and the numbers land through [claimUnmatched], the
+     * single result write path, so flags, frozen ranges, status walking and
+     * `entered_by = <instrument name>` behave exactly as a bench entry.
+     *
+     * 🔴 The accession is always the app's. `draft` carries no accession field
+     * and the analyzer's specimen text becomes the order's NOTE
+     * ([sampleReferenceNote]) — see the note there for why adopting it would
+     * break the barcode's one promise.
+     *
+     * The gate is checked HERE and not only on the button: this is new work on a
+     * licence that may have lapsed, and a screen is not a gate.
+     *
+     * Failure is split. Anything before the order exists throws, and nothing is
+     * written. Once the order exists the result is a SUCCESS carrying
+     * [CreatedFromResult.claimError]: the order is real either way, and an
+     * operator told only "failed" registers a second one.
+     */
+    suspend fun createOrderForResult(
+        resultId: String,
+        draft: CreateOrderDraft,
+        by: Staff? = null,
+        licence: LicenseState,
+    ): Result<CreatedFromResult> = runCatching {
+        CreateOrderGate.refusal(by, licence)?.let { error(it.detail) }
+
+        val row = withContext(Dispatchers.Default) { q.unmatchedById(resultId).executeAsOneOrNull() }
+            ?: error("That result is gone")
+        require(row.status == "unmatched") { "Already ${row.status} — nothing to register" }
+        val stored = json.decodeFromString(StoredInstrumentFrame.serializer(), row.payload_json)
+        val cfg = cfgFor(row)
+
+        // The same mapping the claim will use, one test wide: validate against
+        // THAT rather than against the ranked list the dialog happened to show,
+        // which may have been read before someone edited the catalog.
+        val test = draft.testId?.let { labRepo.testById(it) }
+            ?: error("Pick the test this run belongs to")
+        val fit = TestFit(test, mapParams(stored.params.keys, test, parseOverrides(cfg.paramMapJson)))
+        validateCreateOrder(draft, listOf(fit), stored.params.size)?.let { error(it) }
+
+        val reused = draft.reusingPatient
+        val patient = if (reused) {
+            labRepo.patientById(draft.reusePatientId!!) ?: error("That patient is no longer on file")
+        } else {
+            labRepo.upsertPatient(
+                Patient(
+                    id = Uuid.random().toString(),
+                    name = draft.name,
+                    sex = draft.sex ?: "O",
+                    dob = draft.dobClean,
+                    // Exactly as the desk's form stores it: a DOB is the better age
+                    // source, so the typed years are kept only when there is none.
+                    ageYears = if (draft.dobClean == null) draft.ageYears else null,
+                    phone = draft.phoneClean,
+                )
+            )
+        }
+
+        val order = labRepo.createLabOrder(
+            patientId = patient.id,
+            testIds = listOf(test.id),
+            referrerId = draft.referrerId?.takeIf { it.isNotBlank() },
+            priority = draft.priority,
+            notes = sampleReferenceNote(stored.specimenId ?: row.specimen_id, cfg.name),
+        ).getOrElse { error(it.message ?: "Could not register the order") }
+
+        // The one line that says where this order came from. Written before the
+        // claim so the trail reads in the order it happened, and counts only —
+        // this log travels to BNM support, so the patient's name stays out of it
+        // exactly as it does in `describe`.
+        logRow(
+            cfg, "info",
+            "Order ${order.accessionNo} created from a queued analyzer result by ${actorName(by)} — " +
+                "${if (reused) "existing patient" else "new patient"}, ${test.name}, ${describe(row)}",
+            null,
+        )
+
+        val claim = claimUnmatched(resultId, order.accessionNo, by)
+        CreatedFromResult(
+            order = order,
+            patient = patient,
+            reusedPatient = reused,
+            testName = test.name,
+            claimSummary = claim.getOrNull(),
+            claimError = claim.exceptionOrNull()?.message,
+        )
     }
 
     /**
@@ -1064,7 +1213,8 @@ class InstrumentEngine(
     private suspend fun cfgFor(row: Instrument_results): InstrumentConfig =
         row.instrument_id?.let { id ->
             withContext(Dispatchers.Default) { q.instrumentById(id).executeAsOneOrNull()?.toModel() }
-        } ?: InstrumentConfig(id = "", name = "Analyzer", driver = "", transport = InstrumentTransport.TCP)
+        } ?: InstrumentConfig(id = "", name = FALLBACK_INSTRUMENT_NAME, driver = "",
+            transport = InstrumentTransport.TCP)
 
     // ── config CRUD + observation (Instruments screen) ──
 
@@ -1200,6 +1350,10 @@ class InstrumentEngine(
         private const val MAX_HL7_BYTES = 8 * 1024 * 1024
         private val SB_STR = Mllp.SB.toString()
         private val EB_STR = Mllp.EB.toString()
+
+        /** The name results carry when the analyzer that sent them has since been
+         *  removed from the app. Never a blank: `entered_by` prints on a report. */
+        internal const val FALLBACK_INSTRUMENT_NAME = "Analyzer"
 
         /** Why a frame sits in the claim queue while `verify_pending` is set — shown on the Instruments screen. */
         const val VERIFY_PENDING_REASON =

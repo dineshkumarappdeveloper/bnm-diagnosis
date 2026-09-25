@@ -5,6 +5,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,6 +33,7 @@ import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Verified
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -66,6 +69,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.bnm.lab.instruments.ClaimCandidate
 import com.bnm.lab.instruments.ClaimCandidates
+import com.bnm.lab.instruments.CreateOrderGate
 import com.bnm.lab.instruments.INSTRUMENT_DRIVERS
 import com.bnm.lab.instruments.InstrumentConfig
 import com.bnm.lab.instruments.InstrumentEngine
@@ -86,6 +90,7 @@ import com.bnm.lab.instruments.narrowsToOneNonAccession
 import com.bnm.lab.instruments.platformLinkEnvironment
 import com.bnm.lab.instruments.scanTargetFor
 import com.bnm.lab.instruments.serialSupported
+import com.bnm.lab.license.LicenseState
 import com.bnm.lab.print.AnalyzerWorksheet
 import com.bnm.lab.print.buildAnalyzerWorksheet
 import com.bnm.lab.print.layoutAnalyzerWorksheetA4
@@ -112,9 +117,10 @@ import kotlinx.datetime.toLocalDateTime
  * checklist that names the step that blocks.
  *
  * The claim queue is where a run whose order was never registered ends up, and
- * it has three ways out: assign it to an order (picked from a list, not typed
- * from memory), print it as an [AnalyzerWorksheet] for the bench while the
- * order is still missing, or discard it.
+ * it has four ways out: assign it to an order (picked from a list, not typed
+ * from memory), CREATE the order it was meant for and assign it in one step
+ * ([CreateOrderFromResultDialog]), print it as an [AnalyzerWorksheet] for the
+ * bench while the order is still missing, or discard it.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -122,7 +128,17 @@ fun InstrumentsScreen(
     engine: InstrumentEngine,
     /** The licence's lab name — heads the worksheet, as it heads a report. */
     labName: String,
+    /**
+     * This seat's licence. Assign / Print / Discard ignore it on purpose; only
+     * "Create order" reads it, because only that one starts new work.
+     */
+    licence: LicenseState,
+    /** `ACC-S2-` — this computer's accession series, shown so the dialog's
+     *  promise about where the number comes from is concrete. */
+    accessionSeries: String,
     onBack: () -> Unit,
+    /** Open a lab order — where "Create bill now" sends the operator. */
+    onOpenOrder: (orderId: String) -> Unit = {},
     /** "Verified" pressed after remote support changed an analyzer's settings — the host writes the audit row. */
     onVerified: suspend (InstrumentConfig) -> Unit = {},
     /** PC facts for the Link check (addresses, firewall, ping, ports); the platform's own when null. Tests pass a fake. */
@@ -173,6 +189,7 @@ fun InstrumentsScreen(
 
     var editing by remember { mutableStateOf<InstrumentConfig?>(null) }
     var claiming by remember { mutableStateOf<QueuedFrame?>(null) }
+    var creatingOrder by remember { mutableStateOf<QueuedFrame?>(null) }
     var printing by remember { mutableStateOf<QueuedFrame?>(null) }
     var discarding by remember { mutableStateOf<QueuedFrame?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
@@ -284,6 +301,7 @@ fun InstrumentsScreen(
                                         instrumentName = instrumentName(row),
                                         enabled = canWorkResults,
                                         onAssign = { claiming = row },
+                                        onCreateOrder = { creatingOrder = row },
                                         onPrint = { printing = row },
                                         onDiscard = { discarding = row },
                                     )
@@ -292,8 +310,8 @@ fun InstrumentsScreen(
                         }
                         Text(
                             if (canWorkResults)
-                                "These results arrived without a matching accession. Assign one, print " +
-                                    "the worksheet for the bench while the order is still missing, or key " +
+                                "These results arrived without a matching accession. Assign one, create " +
+                                    "the order nobody registered, print the worksheet for the bench, or key " +
                                     "the accession number on the analyzer next time."
                             else LabPermission.RESULTS.explanation,
                             style = MaterialTheme.typography.bodySmall,
@@ -436,6 +454,23 @@ fun InstrumentsScreen(
             error = err,
             onAssign = ::assign,
             onDismiss = { if (!busy) claiming = null },
+            // The empty state has always said "register it first". Now it can:
+            // the picker steps aside and the create dialog opens on the same run.
+            onCreateOrder = { if (!busy) { claiming = null; creatingOrder = row } },
+        )
+    }
+
+    creatingOrder?.let { row ->
+        CreateOrderFromResultDialog(
+            engine = engine,
+            queued = row,
+            instrumentName = instrumentName(row),
+            accessionSeries = accessionSeries,
+            who = signedIn,
+            licence = licence,
+            onDismiss = { creatingOrder = null },
+            onOpenOrder = onOpenOrder,
+            onMessage = { message = it },
         )
     }
 
@@ -517,6 +552,7 @@ fun InstrumentsScreen(
  * because a bench that ran four samples in ten minutes cannot tell four
  * "Specimen —" rows apart, and the haemoglobin usually can.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun ClaimQueueRow(
     row: QueuedFrame,
@@ -524,6 +560,12 @@ internal fun ClaimQueueRow(
     /** False for a seat with no results permission: the row still reads, nothing acts. */
     enabled: Boolean,
     onAssign: () -> Unit,
+    /**
+     * Register the order this run was meant for. Carries the SAME [enabled] as
+     * its neighbours — a lapsed licence is not answered here but inside the
+     * dialog ([CreateOrderGate]), where there is room to say why.
+     */
+    onCreateOrder: () -> Unit,
     onPrint: () -> Unit,
     onDiscard: () -> Unit,
 ) {
@@ -555,10 +597,16 @@ internal fun ClaimQueueRow(
                 )
             }
         }
-        TextButton(onClick = onAssign, enabled = enabled) { Text("Assign") }
-        TextButton(onClick = onPrint, enabled = enabled) { Text("Print") }
-        TextButton(onClick = onDiscard, enabled = enabled) {
-            Text("Discard", color = if (enabled) MaterialTheme.colorScheme.error else Color.Unspecified)
+        // A FlowRow, not a Row: four actions no longer fit beside the values on
+        // a narrow window, and buttons that run off the edge of the card are
+        // worse than buttons on a second line.
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            TextButton(onClick = onAssign, enabled = enabled) { Text("Assign") }
+            TextButton(onClick = onCreateOrder, enabled = enabled) { Text("Create order") }
+            TextButton(onClick = onPrint, enabled = enabled) { Text("Print") }
+            TextButton(onClick = onDiscard, enabled = enabled) {
+                Text("Discard", color = if (enabled) MaterialTheme.colorScheme.error else Color.Unspecified)
+            }
         }
     }
 }
@@ -584,13 +632,16 @@ internal fun ClaimPickerDialog(
     error: String?,
     onAssign: (accession: String) -> Unit,
     onDismiss: () -> Unit,
+    /** Null = this seat cannot register (no caller wired it); the empty state
+     *  then keeps its old advice and offers no button. */
+    onCreateOrder: (() -> Unit)? = null,
 ) {
     val open = candidates?.open.orEmpty()
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Assign to an order") },
         text = {
-            ClaimPickerBody(queued, instrumentName, candidates, query, onQuery, busy, error, onAssign)
+            ClaimPickerBody(queued, instrumentName, candidates, query, onQuery, busy, error, onAssign, onCreateOrder)
         },
         confirmButton = {
             TextButton(
@@ -613,6 +664,7 @@ internal fun ClaimPickerBody(
     busy: Boolean,
     error: String?,
     onAssign: (accession: String) -> Unit,
+    onCreateOrder: (() -> Unit)? = null,
 ) {
     val open = candidates?.open.orEmpty()
     val shown = open.filterForClaim(query)
@@ -650,13 +702,25 @@ internal fun ClaimPickerBody(
             // the foot of the dialog carries the actual message.
             candidates == null ->
                 Unit
-            open.isEmpty() && query.isBlank() ->
+            open.isEmpty() && query.isBlank() -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "No order is waiting for results. If this sample was never registered, " +
-                        "register it first — the result keeps waiting here until you do.",
+                    if (onCreateOrder == null)
+                        "No order is waiting for results. If this sample was never registered, " +
+                            "register it first — the result keeps waiting here until you do."
+                    else "No order is waiting for results. If this sample was never registered, " +
+                        "create the order for it here — the patient and the test come with it.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                // The advice above was a dead end for as long as this screen has
+                // existed: it told the operator to go and register, with no way
+                // to. It is the primary action here now.
+                onCreateOrder?.let {
+                    Button(onClick = it, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                        Text("Create order from this result")
+                    }
+                }
+            }
             shown.isEmpty() ->
                 Text("Nothing matches “${query.trim()}”.",
                     style = MaterialTheme.typography.bodySmall,
@@ -1086,7 +1150,7 @@ private fun statusLine(s: com.bnm.lab.instruments.InstrumentStatus?): String = w
  * converted, so one screen showed one event at two times. Unparseable input
  * falls back to the old truncation rather than losing the stamp.
  */
-private fun niceTime(iso: String?): String {
+internal fun niceTime(iso: String?): String {
     if (iso == null) return "—"
     return runCatching {
         val t = kotlin.time.Instant.parse(iso).toLocalDateTime(TimeZone.currentSystemDefault())
