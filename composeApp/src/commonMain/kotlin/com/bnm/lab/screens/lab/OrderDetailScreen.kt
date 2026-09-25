@@ -253,7 +253,11 @@ fun OrderDetailScreen(
     val waCountry = remember { reportPrefs.waCountryCode }
     val waToReferrer = remember { reportPrefs.waSendToReferrer }
     val waSendPdf = remember { reportPrefs.waSendPdf }
-    val standalone = remember { LicenseManager().state.value.isStandalone }
+    val licenceNow = remember { LicenseManager().state.value }
+    val standalone = licenceNow.isStandalone
+    // The shared link is the same one the QR prints — resolver until BNM says
+    // the report page is live (ReportShare.resolveUrl).
+    val reportPageLive = licenceNow.reportPageLive
 
     var order by remember { mutableStateOf<LabOrder?>(null) }
     var patient by remember { mutableStateOf<Patient?>(null) }
@@ -1301,7 +1305,7 @@ fun OrderDetailScreen(
                             try {
                                 val token = if (standalone) null
                                 else runCatching { repo.reportShareToken(o.id, o.accessionNo) }.getOrNull()
-                                val url = token?.let { ReportShare.resolveUrl(it) }
+                                val url = token?.let { ReportShare.resolveUrl(it, pageLive = reportPageLive) }
                                 val doctor = toDoctor && typed.isBlank()
                                 when (waMode) {
                                     WaShareMode.API -> {

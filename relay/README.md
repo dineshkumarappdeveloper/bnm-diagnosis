@@ -139,6 +139,22 @@ npx wrangler secret put BNM_SUPPORT_TOKEN        # long random string; the engin
 npm run deploy                                    # wrangler deploy
 ```
 
+**The hostname is not optional.** `wrangler.toml` binds the Worker to
+`lab-relay.bnmapp.com` as a custom domain, because that host is compiled into
+every lab installer (`Constants.REMOTE_RELAY_URL`) and a shipped build cannot be
+pointed anywhere else. The first deploy creates the DNS record and provisions
+the certificate, which takes a few minutes; `bnmapp.com` must be a zone on the
+same Cloudflare account, or `wrangler deploy` fails with a route error rather
+than quietly publishing to `*.workers.dev`. Confirm before telling anyone the
+feature is live:
+
+```
+curl https://lab-relay.bnmapp.com/v1/health      # {"ok":true} — every other path is 404 on purpose
+```
+
+Changing the host means changing `Constants.REMOTE_RELAY_URL` **and shipping a
+new lab build**; labs on the old build keep dialling the old name.
+
 Rotating the engineer token = `secret put` again + update the engineer's
 `claude mcp add … -e BNM_SUPPORT_TOKEN=…`. Rotating the licence key = change
 `docs/license-public-key.jwk.json`, mirror it into `src/keys.ts` (a test

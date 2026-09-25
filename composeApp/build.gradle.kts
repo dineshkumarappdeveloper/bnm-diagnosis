@@ -256,15 +256,20 @@ compose.desktop {
 // so the bridge and the app tests can sign; a shipped build carrying it would let
 // anyone with the repo and a session code drive any lab. RemoteSupportKeysReleaseTest
 // says the same thing to a test run, but release.yml only runs the package task —
-// so the installer tasks depend on this one. Opt out with -Pbnm.allowDevSupportKey=true.
+// so the packaging tasks depend on this one. The two halves judge "is this a build
+// that could reach a lab?" identically: a VERSIONED build (-PappVersion, which is
+// what CI and release.yml pass) is gated; a developer's own build is not, nor is a
+// `-dev` version or an explicit -Pbnm.allowDevSupportKey=true.
 // The key is also checked for SHAPE, always: a mangled paste would otherwise
 // only surface as an app that will not start on the lab PC.
 val checkSupportKeyNotDev by tasks.registering {
     val keysFile = layout.projectDirectory.file("src/commonMain/kotlin/com/bnm/lab/remote/RemoteSupportKeys.kt")
     val version = appVersionName
+    val versioned = appVersionGiven
     val allowed = (project.findProperty("bnm.allowDevSupportKey") as String?) == "true"
     inputs.file(keysFile)
     inputs.property("version", version)
+    inputs.property("versioned", versioned)
     inputs.property("allowed", allowed)
     doLast {
         val text = keysFile.asFile.readText()
@@ -282,7 +287,7 @@ val checkSupportKeyNotDev by tasks.registering {
             "RemoteSupportKeys.SUPPORT_PUBLIC_KEY_SPKI_B64 is not an Ed25519 public key (X.509 SPKI, 44 bytes). " +
                 "Paste the line `node tools/remote-mcp/bnmlab-remote.mjs keygen` prints, whole and unbroken."
         }
-        if (allowed || version.endsWith("-dev")) return@doLast
+        if (allowed || !versioned || version.endsWith("-dev")) return@doLast
         check(shipped != dev) {
             "Version $version would ship the committed DEV remote-support key. Run " +
                 "`node tools/remote-mcp/bnmlab-remote.mjs keygen`, paste the SPKI it prints into " +
@@ -291,9 +296,16 @@ val checkSupportKeyNotDev by tasks.registering {
     }
 }
 
+// createDistributable is in this set on purpose: packageDmg DEPENDS on it, not
+// the other way round, so gating only the installers would let anyone hand a
+// lab the `BNM Lab.app` image straight out of build/compose/binaries with the
+// committed dev key still in it. Anything that produces a runnable artefact
+// gates; runDistributable/runReleaseDistributable inherit it through their
+// create* dependency.
 tasks.matching {
     it.name in setOf("packageMsi", "packageDmg", "packageDeb", "packageUberJarForCurrentOS",
-        "packageReleaseMsi", "packageReleaseDmg", "packageReleaseDeb", "packageReleaseUberJarForCurrentOS")
+        "packageReleaseMsi", "packageReleaseDmg", "packageReleaseDeb", "packageReleaseUberJarForCurrentOS",
+        "createDistributable", "createReleaseDistributable")
 }.configureEach { dependsOn(checkSupportKeyNotDev) }
 
 // ── Remote support end-to-end test (RemoteSupportE2ETest) — opt-in only.

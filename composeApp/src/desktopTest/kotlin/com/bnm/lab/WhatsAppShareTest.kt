@@ -40,8 +40,12 @@ class WhatsAppShareTest {
 
     @Test
     fun `the message names the patient and the link, and never a result`() {
-        val url = ReportShare.resolveUrl("abc123")
+        // The shared link is whatever the QR prints: the resolver by default,
+        // the page once BNM says it is live (ReportLinkTest holds that rule).
+        val url = ReportShare.resolveUrl("abc123", pageLive = true)
         assertEquals("https://app.bnmapp.com/r/#abc123", url, "the token rides in the fragment, never the path")
+        assertTrue(ReportShare.resolveUrl("abc123").endsWith("/admin-lab/reports/r/abc123"),
+            "and with no word from the server, the link that always resolves")
         val m = waReportMessage("Kavitha Subramanian", "SRT Diagnostics", "ACC-S1-00042", url)
         assertTrue(m.startsWith("Dear Kavitha,"), m)
         assertTrue("SRT Diagnostics" in m)

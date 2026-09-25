@@ -68,6 +68,14 @@ data class LicenseState(
     /** "connected" (ecosystem sync) or "standalone" (offline-only after the
      *  one-time online activation). Absent in legacy licences = connected. */
     val edition: String = LicenseManager.EDITION_CONNECTED,
+    /**
+     * Has BNM's report page (app.bnmapp.com/r/) shipped? Last answer from the
+     * heartbeat, persisted so a lab that prints offline for a week still knows
+     * it. Decides which link a printed QR encodes — see `ReportShare`. False
+     * until a server says otherwise: the fallback link works either way, and a
+     * QR is on paper forever.
+     */
+    val reportPageLive: Boolean = false,
 ) {
     /** Sold as offline-only: never sync, never nag about being offline. */
     val isStandalone: Boolean get() = edition == LicenseManager.EDITION_STANDALONE
@@ -140,6 +148,7 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
         private const val KEY_DEVICE_ID = "license_device_id"
         private const val KEY_SEAT_NO = "license_seat_no"
         private const val KEY_BLOCKED = "license_blocked"
+        private const val KEY_REPORT_PAGE_LIVE = "report_page_live"
         private const val KEY_LAST_SEEN_NOW = "license_last_seen_now"
 
         const val ISSUER = "bnm-lab-license"
@@ -303,8 +312,19 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
     }
 
     /** Persist a fresh heartbeat: new JWT + latest license metadata; unblocks. */
-    fun applyHeartbeat(licenseJwt: String?, mode: String?, seats: Int?, expiresAt: String?, labName: String?, seatNo: Int? = null) {
+    fun applyHeartbeat(
+        licenseJwt: String?,
+        mode: String?,
+        seats: Int?,
+        expiresAt: String?,
+        labName: String?,
+        seatNo: Int? = null,
+        reportPageLive: Boolean? = null,
+    ) {
         if (seatNo != null) settings.putInt(KEY_SEAT_NO, seatNo)
+        // null = this server does not send the field (yet). Keep the last
+        // answer rather than reading silence as "the page is gone".
+        if (reportPageLive != null) settings.putBoolean(KEY_REPORT_PAGE_LIVE, reportPageLive)
         if (!licenseJwt.isNullOrBlank()) settings.putString(KEY_JWT, licenseJwt)
         if (!mode.isNullOrBlank()) settings.putString(KEY_MODE, mode)
         if (seats != null) settings.putInt(KEY_SEATS, seats)
@@ -339,6 +359,7 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
         settings.remove(KEY_BUSINESS_ID)
         settings.remove(KEY_BLOCKED)
         settings.remove(KEY_SEAT_NO)
+        settings.remove(KEY_REPORT_PAGE_LIVE)
         refresh()
     }
 
@@ -407,6 +428,7 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
                 ?: settings.getStringOrNull(KEY_BUSINESS_ID),
             edition = claims()?.edition?.takeIf { it.isNotBlank() } ?: EDITION_CONNECTED,
             deviceRowId = settings.getStringOrNull(KEY_DEVICE_ROW_ID),
+            reportPageLive = settings.getBoolean(KEY_REPORT_PAGE_LIVE, false),
         )
     }
 

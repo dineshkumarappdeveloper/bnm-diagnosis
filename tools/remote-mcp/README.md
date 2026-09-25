@@ -27,7 +27,7 @@ claude mcp add bnmlab-remote \
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
-| `BNM_RELAY_URL` | Relay base URL; the bridge appends `/v1/support` | `wss://lab-relay.bnmapp.com` (a placeholder until the relay is deployed) |
+| `BNM_RELAY_URL` | Relay base URL; the bridge appends `/v1/support` | `wss://lab-relay.bnmapp.com` (the host `relay/wrangler.toml` binds, and the one every lab build dials) |
 | `BNM_SUPPORT_TOKEN` | The relay's engineer token (`BNM_SUPPORT_TOKEN` secret on the Worker) | — (required) |
 | `BNM_SUPPORT_KEY_FILE` | Ed25519 private key, PEM PKCS#8 | `~/.config/bnmlab-remote/support.key` |
 
