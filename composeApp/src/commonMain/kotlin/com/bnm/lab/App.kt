@@ -37,6 +37,8 @@ import com.bnm.lab.billing.BillingScope
 import com.bnm.lab.billing.ensureLabBillingSeries
 import com.bnm.lab.auth.AuthRepository
 import com.bnm.lab.auth.FirebaseAuthManager
+import com.bnm.lab.backup.BackupGeneration
+import com.bnm.lab.backup.platformBackupController
 import com.bnm.lab.auth.SessionManager
 import com.bnm.lab.chat.BillingOutboxSender
 import com.bnm.lab.chat.BillingRepository
@@ -67,6 +69,10 @@ import com.bnm.lab.remote.RemoteSupportDialog
 import com.bnm.lab.remote.RemoteSupportStatus
 import com.bnm.lab.remote.RemoteSupportUi
 import com.bnm.lab.remote.platformRemoteSupportController
+import com.bnm.lab.screens.backup.BackupNotBackedUpBanner
+import com.bnm.lab.screens.backup.BackupRestoreOfferDialog
+import com.bnm.lab.screens.backup.BackupSettingsScreen
+import com.bnm.lab.screens.backup.RestoreDialog
 import com.bnm.lab.screens.billing.BillingSettingsScreen
 import com.bnm.lab.screens.billing.CartScreen
 import com.bnm.lab.screens.billing.CreateInvoiceScreen
@@ -265,6 +271,19 @@ fun App() {
     // dialog. Tool hosts (RemoteTools) and the audit store are attached here,
     // once the database and the analyzer engine exist. ──
     val remoteSupport = remember { platformRemoteSupportController() }
+    // ── Backup pendrive (offline edition, desktop): the engine, or null where
+    // there is none. The chip, the Settings row and the banner show only for a
+    // standalone licence; the Activation screen offers Restore whenever an
+    // engine exists, because the edition is unknown before activation. ──
+    val backupController = remember { platformBackupController() }
+    // Asked ONCE per session: a bound pendrive holding a backup, on a PC with
+    // no records (fresh install / reinstall) — LabHome or Activation offers it.
+    var restoreOffer by remember { mutableStateOf<BackupGeneration?>(null) }
+    LaunchedEffect(backupController) {
+        restoreOffer = backupController?.let { c ->
+            runCatching { c.restoreOfferAtLaunch() }.logFailure("Backup", "restore offer at launch").getOrNull()
+        }
+    }
 
     // ── Support report context: the questions support asks first, answered at
     // the top of the report. Flags, counts and IDs ONLY — the report is emailed,
@@ -561,22 +580,32 @@ fun App() {
 
                     // ── Seat sign-in gate (P4) ──
                     composable(Screen.StaffSignIn.route) {
-                        StaffSignInScreen(
-                            labName = licState.labName
-                                ?: authRepository.getSelectedBusinessName()
-                                ?: "BNM Lab",
-                            onSignedIn = { person ->
-                                staffSession.signIn(person)
-                                navController.navigate(Screen.LabHome.route) {
-                                    popUpTo(Screen.StaffSignIn.route) { inclusive = true }
-                                }
-                            },
-                            // Deliberately reachable with nobody signed in: it is
-                            // where a lab checks its licence, migrates edition, or
-                            // hands this PC's seat back — and the sign-in grid is
-                            // the only screen a locked-out lab can see.
-                            onLicense = { navController.navigate(Screen.LicenseDevices.route) },
-                        )
+                        Column(Modifier.fillMaxSize()) {
+                            // The sign-in grid is one of the two places the
+                            // "not backed up" banner may show (the other is home).
+                            BackupNotBackedUpBanner(
+                                backupController?.takeIf { licState.isStandalone },
+                                onOpenBackup = { navController.navigate(Screen.BackupSettings.route) },
+                            )
+                            Box(Modifier.fillMaxWidth().weight(1f)) {
+                                StaffSignInScreen(
+                                    labName = licState.labName
+                                        ?: authRepository.getSelectedBusinessName()
+                                        ?: "BNM Lab",
+                                    onSignedIn = { person ->
+                                        staffSession.signIn(person)
+                                        navController.navigate(Screen.LabHome.route) {
+                                            popUpTo(Screen.StaffSignIn.route) { inclusive = true }
+                                        }
+                                    },
+                                    // Deliberately reachable with nobody signed in: it is
+                                    // where a lab checks its licence, migrates edition, or
+                                    // hands this PC's seat back — and the sign-in grid is
+                                    // the only screen a locked-out lab can see.
+                                    onLicense = { navController.navigate(Screen.LicenseDevices.route) },
+                                )
+                            }
+                        }
                     }
 
                     // ── Staff & roles (owner only; guarded again inside) ──
@@ -595,13 +624,27 @@ fun App() {
                         ActivationScreen(
                             labApi = labApi,
                             licenseManager = licenseManager,
-                            onBeforeTenantWipe = { instrumentEngine.stopAll() },
+                            // Listeners first, then the last snapshot of the old
+                            // lab — so no analyzer frame lands after the copy.
+                            onBeforeTenantWipe = {
+                                instrumentEngine.stopAll()
+                                backupController?.beforeTenantWipe()
+                            },
+                            // The vault was the old lab's: forget it, the new
+                            // lab sets up its own pendrive.
+                            onAfterTenantWipe = { backupController?.afterTenantWipe() },
+                            backupController = backupController,
+                            restoreOffer = restoreOffer,
+                            onRestoreOfferHandled = { restoreOffer = null },
                             onActivated = { a ->
                                 // A license bound to a BNM business pre-selects it
                                 // so the billing sync spine keeps working.
                                 a.businessId?.takeIf { it.isNotBlank() }?.let {
                                     authRepository.saveSelectedBusiness(it, a.labName)
                                 }
+                                // BNM now knows this computer: a PC restored from
+                                // a backup pendrive drops its "register" notice.
+                                backupController?.markRegisteredOnline()
                             },
                             onEnterApp = {
                                 // Licensed now → the staff sign-in gate, not straight in.
@@ -617,6 +660,10 @@ fun App() {
                             labApi = labApi,
                             licenseManager = licenseManager,
                             onBack = { navController.popBackStack() },
+                            backupController = backupController,
+                            // Same key, same lab: the tenant guard sees the same
+                            // fingerprint and re-activates without a wipe.
+                            onRegisterRestoredPc = { navController.navigate(Screen.Activation.route) },
                             onDeactivatedSelf = {
                                 // Local license cleared (lab data untouched) →
                                 // back to the activation entry, with NOTHING
@@ -687,10 +734,17 @@ fun App() {
 
                         val subscription = licenseManager.subscriptionStatus()
                         val readOnly = licState.readOnlyReason
+                        // Offline edition only: a connected lab has a server copy.
+                        val standaloneBackup = backupController?.takeIf { licState.isStandalone }
+                        var restoreFrom by remember { mutableStateOf<BackupGeneration?>(null) }
                         Column(Modifier.fillMaxSize()) {
                             readOnly?.let {
                                 ReadOnlyBanner(it, onOpenLicence = { navController.navigate(Screen.LicenseDevices.route) })
                             }
+                            BackupNotBackedUpBanner(
+                                standaloneBackup,
+                                onOpenBackup = { navController.navigate(Screen.BackupSettings.route) },
+                            )
                             Box(Modifier.fillMaxWidth().weight(1f)) {
                                 LabHomeScreen(
                                     subscriptionNotice = subscription.notice,
@@ -718,6 +772,27 @@ fun App() {
                                     onSignOut = { lockSeat(signOut = true) },
                                     revenue = revenueRepo,
                                     onRevenue = { navController.navigate(Screen.Bills.createRoute(com.bnm.lab.navigation.BillsTab.REVENUE)) },
+                                    backupController = standaloneBackup,
+                                    onBackup = { navController.navigate(Screen.BackupSettings.route) },
+                                )
+                            }
+                        }
+                        // A reinstalled PC that is still activated: its pendrive
+                        // holds the records — offer them once.
+                        if (standaloneBackup != null) {
+                            restoreOffer?.let { gen ->
+                                BackupRestoreOfferDialog(
+                                    gen = gen,
+                                    onRestore = { restoreOffer = null; restoreFrom = gen },
+                                    onNotNow = { restoreOffer = null },
+                                )
+                            }
+                            restoreFrom?.let { gen ->
+                                RestoreDialog(
+                                    controller = standaloneBackup,
+                                    activated = true,
+                                    initialGeneration = gen,
+                                    onDismiss = { restoreFrom = null },
                                 )
                             }
                         }
@@ -791,6 +866,24 @@ fun App() {
                             ReferrersScreen(
                                 onBack = { navController.popBackStack() },
                                 businessId = billingBusinessId(),
+                            )
+                        }
+                    }
+
+                    composable(Screen.BackupSettings.route) {
+                        val controller = backupController
+                        if (controller == null) {
+                            // No engine on this platform: a hand-typed route just goes back.
+                            LaunchedEffect(Unit) { navController.popBackStack() }
+                        } else {
+                            BackupSettingsScreen(
+                                controller = controller,
+                                licenseManager = licenseManager,
+                                labName = licState.labName ?: "BNM Lab",
+                                signedInStaff = signedInStaff,
+                                verifyPin = { who, pin -> staffRepo.verifyPin(who.id, pin) },
+                                rowCounts = { runCatching { labRepo.tenantRowCounts() }.getOrNull() },
+                                onBack = { navController.popBackStack() },
                             )
                         }
                     }
@@ -965,6 +1058,8 @@ fun App() {
                                     "${instStatuses.values.count { it.state == "listening" }} listening"
                                 else -> "All analyzers disabled"
                             },
+                            backupController = backupController?.takeIf { licState.isStandalone },
+                            onOpenBackup = { navController.navigate(Screen.BackupSettings.route) },
                         )
                     }
 

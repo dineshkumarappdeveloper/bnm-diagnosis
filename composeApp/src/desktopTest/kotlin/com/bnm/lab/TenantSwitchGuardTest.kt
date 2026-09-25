@@ -44,6 +44,19 @@ class TenantSwitchGuardTest {
     }
 
     @Test
+    fun `after a restore, the licence id in the tokens decides - never an unknown`() {
+        // A PC restored from a backup pendrive carries the OLD key's fingerprint;
+        // the key in hand may be a re-issued one of the same licence. Only the
+        // licence id BNM signs into both tokens can say so.
+        assertTrue(LicenseManager.sameLicenceId("lic-1", "lic-1"))
+        assertFalse(LicenseManager.sameLicenceId("lic-1", "lic-2"))
+        assertFalse(LicenseManager.sameLicenceId(null, null), "two unknowns are not the same licence")
+        assertFalse(LicenseManager.sameLicenceId("", ""))
+        assertFalse(LicenseManager.sameLicenceId("lic-1", null))
+        assertFalse(LicenseManager.sameLicenceId(null, "lic-1"))
+    }
+
+    @Test
     fun `no fingerprint but records present IS treated as a tenant switch`() {
         // THE REGRESSION. An install predating the fingerprint, or one carrying a
         // migrated BNMDiagnosis database, has data but nothing to compare against.

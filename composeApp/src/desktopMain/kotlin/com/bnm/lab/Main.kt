@@ -17,9 +17,17 @@
  */
 package com.bnm.lab
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.LocalWindowExceptionHandlerFactory
@@ -30,6 +38,10 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.bnm.lab.api.ApiClient
+import com.bnm.lab.backup.BackupCli
+import com.bnm.lab.backup.BackupService
+import com.bnm.lab.backup.SingleInstance
+import com.bnm.lab.db.appDataDir
 import com.bnm.lab.diagnostics.AppLog
 import com.bnm.lab.diagnostics.DesktopDiagnostics
 import com.bnm.lab.diagnostics.FatalWindowError
@@ -37,15 +49,34 @@ import com.bnm.lab.diagnostics.SupportReporter
 import com.bnm.lab.diagnostics.SupportUi
 import com.bnm.lab.remote.RemoteSupportService
 import com.bnm.lab.remote.RemoteSupportUi
+import com.bnm.lab.screens.backup.BackupExitFlowUi
+import com.bnm.lab.ui.theme.AppTheme
+import com.bnm.lab.ui.theme.ThemeManager
 
 @OptIn(ExperimentalComposeUiApi::class)
-fun main() {
+fun main(args: Array<String>) {
+    // Headless: `--export-backup <file.bnmlab> <out.db> [--key …|--code …]`
+    // decrypts a Backup pendrive generation to a plain SQLite file for support,
+    // with no window, no diagnostics and no engine. Exits with its own code.
+    BackupCli.run(args)?.let { kotlin.system.exitProcess(it) }
     // FIRST, before any other code runs: a failure in startup or in the first
     // frame of the UI is exactly the kind a lab cannot describe over the phone.
     DesktopDiagnostics.install()
+    // One BNM Lab per data directory: a second copy would run a second backup
+    // engine against the same pendrive, and a staged restore could not swap the
+    // database while the first copy still holds it open. This gate runs BEFORE
+    // either engine starts — a refused copy exits without having announced
+    // itself to the relay or touched the pendrive.
+    if (!SingleInstance.acquire(appDataDir())) SingleInstance.refuseAndExit()
     // The remote-support engine sits idle until an owner starts a session; it is
     // installed this early so Help ▸ Remote support… works on the activation screen.
     RemoteSupportService.instance.install()
+    // The Backup pendrive engine ticks from here on — before the window exists —
+    // but does nothing until DriverFactory has opened the database. Its
+    // shutdown hook only persists what is unsaved and removes a half-written
+    // file; the long close-window flush is the window's job, not the JVM's.
+    BackupService.shared.start()
+    BackupService.shared.installShutdownHook()
     // Full HTTP bodies only for a developer who asks for them — and only ever
     // to the console, never into a log file that gets emailed.
     ApiClient.consoleHttpBodies = System.getenv("BNM_HTTP_DEBUG") != null
@@ -59,12 +90,19 @@ fun main() {
                 WindowExceptionHandler { error -> FatalWindowError.handle(window, error) { exitApplication() } }
             },
         ) {
+        // Closing the window is the ONE place a last backup generation is
+        // written (the JVM shutdown hook never snapshots): unsaved changes with
+        // the pendrive present are flushed behind a small overlay; unsaved
+        // changes with no pendrive get a "Close anyway / Cancel" question. The
+        // decision itself is BackupExitFlow's, from the engine's status alone.
+        var closing by remember { mutableStateOf(false) }
         Window(
             onCloseRequest = {
-                AppLog.i("Lifecycle", "window closed by user")
-                // A support session must not outlive the window that shows its banner.
-                RemoteSupportService.instance.endBlocking("app closing")
-                exitApplication()
+                AppLog.i("Lifecycle", "window close requested")
+                // A letterhead or prefix edit in the last minute is a preference,
+                // not a database write — hash it now so it counts as unsaved.
+                BackupService.shared.checkPrefsBeforeClose()
+                closing = true
             },
             state = state,
             title = "BNM Lab",
@@ -86,7 +124,30 @@ fun main() {
                 // The screenshot tool (consent-gated) captures THIS window and nothing else.
                 RemoteSupportService.instance.registerWindow(window)
             }
-            App()
+            Box(Modifier.fillMaxSize()) {
+                App()
+                if (closing) {
+                    // Same theme preference App() reads, so the overlay and the
+                    // question match the window they sit on.
+                    val themeManager = remember { ThemeManager() }
+                    val themeChoice by themeManager.choice.collectAsState()
+                    AppTheme(themeChoice = themeChoice) {
+                        BackupExitFlowUi(
+                            controller = BackupService.shared,
+                            onExit = {
+                                AppLog.i("Lifecycle", "window closed by user")
+                                // A support session must not outlive the window that
+                                // shows its banner — but the exit flow can still be
+                                // cancelled, so this runs at the real exit, not at
+                                // the close request.
+                                RemoteSupportService.instance.endBlocking("app closing")
+                                exitApplication()
+                            },
+                            onCancel = { closing = false },
+                        )
+                    }
+                }
+            }
         }
         }
     }

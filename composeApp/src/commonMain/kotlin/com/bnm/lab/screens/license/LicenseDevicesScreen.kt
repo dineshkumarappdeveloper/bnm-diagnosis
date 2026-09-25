@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -46,6 +47,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.bnm.lab.api.LabApi
+import com.bnm.lab.backup.BackupController
 import com.bnm.lab.ui.theme.AppTheme
 import com.bnm.lab.api.LabSeatDevice
 import com.bnm.lab.license.LicenseManager
@@ -64,9 +66,16 @@ fun LicenseDevicesScreen(
     licenseManager: LicenseManager,
     onBack: () -> Unit,
     onDeactivatedSelf: () -> Unit,
+    /** Backup pendrive engine (desktop only): shows the "restored from a
+     *  backup — register this computer" row while that is true. */
+    backupController: BackupController? = null,
+    /** "Register this computer" → the Activation screen, licence key in hand. */
+    onRegisterRestoredPc: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val license by licenseManager.state.collectAsState()
+    val restoredFromBackup =
+        if (backupController != null) backupController.status.collectAsState().value.restoredFromBackup else false
     var checkingLicence by remember { mutableStateOf(false) }
     var licenceMessage by remember { mutableStateOf<String?>(null) }
 
@@ -217,6 +226,34 @@ fun LicenseDevicesScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                    }
+                }
+            }
+
+            // ── Restored from a backup pendrive: BNM does not know this PC yet ──
+            // The restored licence token works offline as before; registering
+            // once online records the move (and frees the old PC's seat).
+            if (restoredFromBackup) item {
+                Card(colors = CardDefaults.cardColors(containerColor = AppTheme.colors.warningSoft)) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(Icons.Outlined.WarningAmber, contentDescription = null, tint = AppTheme.colors.warning)
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                "This computer was restored from a backup",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                "Register it with your licence key so BNM knows the lab moved here. Until then it works as normal, offline.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        TextButton(onClick = onRegisterRestoredPc) { Text("Register this computer") }
                     }
                 }
             }
