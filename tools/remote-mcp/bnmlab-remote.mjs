@@ -214,6 +214,9 @@ const RELAY_ERRORS = {
     busy: 'Another engineer is already connected to this lab session. Only one connection is allowed at a time.',
 };
 
+/** The lab's seat is empty for the moment — the session itself is untouched. */
+const LAB_AWAY = 'The lab\'s connection to the relay dropped (it may be reconnecting). Try again shortly, or lab_disconnect and lab_connect again.';
+
 /**
  * Owns the WebSocket to `<relay>/v1/support`, the join handshake, request/
  * response pairing and signing. The socket comes from an injectable factory so
@@ -265,7 +268,11 @@ export class LabLink {
         try {
             await this.#awaitOpen(ws);
         } catch (e) {
-            this.#dropSocket();
+            // A socket that timed out on us may still finish its handshake a
+            // moment later, and the relay gives a session ONE support seat:
+            // forgetting it without hanging it up locks the next lab_connect
+            // out with "busy" until the session expires.
+            this.#closeSocket('never opened');
             throw e;
         }
         ws.addEventListener('message', (ev) => this.#onMessage(ws, ev));
@@ -276,11 +283,20 @@ export class LabLink {
         // The relay pairs us on `join`; if the code is wrong we get an error frame
         // (or a close) before anything answers `initialize`, and #onMessage /
         // #onClose reject the pending request with the reason.
-        const init = await this.#request('initialize', {
-            protocolVersion: PROTOCOL_VERSION,
-            capabilities: {},
-            clientInfo: { name: SERVER_NAME, version: VERSION },
-        });
+        let init;
+        try {
+            init = await this.#request('initialize', {
+                protocolVersion: PROTOCOL_VERSION,
+                capabilities: {},
+                clientInfo: { name: SERVER_NAME, version: VERSION },
+            });
+        } catch (e) {
+            // A handshake that never finished (a timeout, or `no_lab` because the
+            // lab dropped between join and initialize) must not leave the socket
+            // open on the relay's one support seat.
+            this.disconnect('handshake failed');
+            throw e;
+        }
         this.#notify('notifications/initialized');
         this.state = 'connected';
         this.peer = 'lab';
@@ -331,14 +347,8 @@ export class LabLink {
 
     disconnect(reason = 'disconnect') {
         if (this.state === 'disconnected' && !this.#ws) return false;
-        const ws = this.#ws;
-        this.#dropSocket();
         this.#rejectAll(new BridgeError('Disconnected from the lab.'));
-        try {
-            ws?.close(1000, reason);
-        } catch {
-            /* already closed */
-        }
+        this.#closeSocket(reason);
         this.log(`disconnected (${reason})`);
         return true;
     }
@@ -384,7 +394,7 @@ export class LabLink {
             throw new BridgeError('Not connected to a lab. Call lab_connect with the session code the lab owner read to you.');
         }
         if (this.peer === 'lab_disconnected') {
-            throw new BridgeError('The lab\'s connection to the relay dropped (it may be reconnecting). Try again shortly, or lab_disconnect and lab_connect again.');
+            throw new BridgeError(LAB_AWAY);
         }
     }
 
@@ -478,24 +488,41 @@ export class LabLink {
                 if (typeof msg.session_id === 'string') this.sessionId = msg.session_id;
                 return;
             case 'peer':
-                if (msg.state === 'lab_disconnected') {
+                // The relay tells the engineer `lab_connected`/`lab_disconnected`
+                // (`connected`/`disconnected` is the wording it uses towards the
+                // lab); both spellings are accepted so a reconnecting lab always
+                // frees the calls again.
+                if (msg.state === 'lab_disconnected' || msg.state === 'disconnected') {
                     this.peer = 'lab_disconnected';
                     this.log('the lab dropped off the relay');
-                } else if (msg.state === 'connected') {
+                } else if (msg.state === 'lab_connected' || msg.state === 'connected') {
+                    if (this.peer === 'lab_disconnected') this.log('the lab is back on the relay');
                     this.peer = 'lab';
                 }
                 return;
             case 'error': {
+                if (msg.code === 'no_lab') {
+                    // The lab's seat is empty for a moment — the relay answers
+                    // this instead of forwarding, and leaves both the session and
+                    // our seat alone. Fail what is in flight, keep the socket (a
+                    // dropped-but-open one keeps the relay's single support seat
+                    // and locks the engineer out), and wait for the lab back.
+                    this.peer = 'lab_disconnected';
+                    this.lastError = LAB_AWAY;
+                    this.#rejectAll(new BridgeError(LAB_AWAY));
+                    this.log('the relay says the lab is not on the line');
+                    return;
+                }
                 const reason = RELAY_ERRORS[msg.code] ?? `The relay refused the connection (${msg.code ?? 'unknown reason'}).`;
                 this.lastError = reason;
                 this.#rejectAll(new BridgeError(reason));
-                this.#dropSocket();
+                this.#closeSocket(msg.code ?? 'error');
                 return;
             }
             case 'end':
                 this.lastError = 'The lab ended the support session.';
                 this.#rejectAll(new BridgeError(this.lastError));
-                this.#dropSocket();
+                this.#closeSocket('end');
                 this.log('the lab ended the session');
                 return;
             default:
@@ -529,6 +556,17 @@ export class LabLink {
         this.#ws = null;
         this.state = 'disconnected';
         this.peer = 'none';
+    }
+
+    /** Forget the socket AND hang it up: an open one still holds the relay's one support seat. */
+    #closeSocket(reason) {
+        const ws = this.#ws;
+        this.#dropSocket();
+        try {
+            ws?.close(1000, String(reason).slice(0, 100));
+        } catch {
+            /* already closed */
+        }
     }
 
     /** Session facts the lab tucks into its `initialize` result (`_meta.bnm` or `bnm`). */

@@ -1,5 +1,6 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.Base64
 import java.util.Properties
 import java.io.FileInputStream
 
@@ -22,12 +23,18 @@ plugins {
 // never disagree with the version CI actually packaged (-PappVersion).
 // ─────────────────────────────────────────────────────────────────────────────
 val appVersionName: String = (project.findProperty("appVersion") as String?) ?: "1.0.0"
+// CI and release builds pass -PappVersion; a developer's local build does not.
+// The binary needs to know which it is: a release must refuse to ship the
+// committed DEV remote-support key (RemoteSupportKeysReleaseTest).
+val appVersionGiven: Boolean = project.findProperty("appVersion") != null
 
 val generateBuildInfo by tasks.registering {
     val outDir = layout.buildDirectory.dir("generated/buildinfo")
     val version = appVersionName
+    val versioned = appVersionGiven
     outputs.dir(outDir)
     inputs.property("version", version)
+    inputs.property("versioned", versioned)
     doLast {
         // Only plain values are captured here — capturing anything script-scoped
         // breaks the configuration cache ("cannot serialize Gradle script object
@@ -42,6 +49,8 @@ val generateBuildInfo by tasks.registering {
             object BuildInfo {
                 /** The version this binary was packaged as, e.g. "1.0.0". */
                 const val VERSION: String = "$version"
+                /** True when the build was given -PappVersion (CI, releases); false for a developer's local build. */
+                const val VERSIONED_BUILD: Boolean = $versioned
             }
             """.trimIndent() + "\n"
         )
@@ -242,6 +251,51 @@ compose.desktop {
     }
 }
 
+// ── Remote support: never PACKAGE a build that still trusts the dev key ──
+// The private half of the dev key is committed (tools/remote-mcp/test/dev-support.key)
+// so the bridge and the app tests can sign; a shipped build carrying it would let
+// anyone with the repo and a session code drive any lab. RemoteSupportKeysReleaseTest
+// says the same thing to a test run, but release.yml only runs the package task —
+// so the installer tasks depend on this one. Opt out with -Pbnm.allowDevSupportKey=true.
+// The key is also checked for SHAPE, always: a mangled paste would otherwise
+// only surface as an app that will not start on the lab PC.
+val checkSupportKeyNotDev by tasks.registering {
+    val keysFile = layout.projectDirectory.file("src/commonMain/kotlin/com/bnm/lab/remote/RemoteSupportKeys.kt")
+    val version = appVersionName
+    val allowed = (project.findProperty("bnm.allowDevSupportKey") as String?) == "true"
+    inputs.file(keysFile)
+    inputs.property("version", version)
+    inputs.property("allowed", allowed)
+    doLast {
+        val text = keysFile.asFile.readText()
+        fun constant(name: String) = Regex("""$name\s*=\s*"([^"]+)"""").find(text)?.groupValues?.get(1)
+        val shipped = constant("SUPPORT_PUBLIC_KEY_SPKI_B64")
+        val dev = constant("DEV_PUBLIC_KEY_SPKI_B64")
+        check(shipped != null && dev != null) { "RemoteSupportKeys.kt: could not read the support key constants" }
+        // A mangled paste (a truncation, a dropped character) passes every
+        // string comparison and then throws when the app builds its verifier at
+        // startup — i.e. the lab that takes the update cannot open BNM Lab.
+        // 44 bytes: the X.509 SubjectPublicKeyInfo header for Ed25519, then the 32-byte key.
+        val spkiHeader = "302a300506032b6570032100"
+        val der = runCatching { Base64.getDecoder().decode(shipped) }.getOrNull()
+        check(der != null && der.size == 44 && der.take(12).joinToString("") { "%02x".format(it) } == spkiHeader) {
+            "RemoteSupportKeys.SUPPORT_PUBLIC_KEY_SPKI_B64 is not an Ed25519 public key (X.509 SPKI, 44 bytes). " +
+                "Paste the line `node tools/remote-mcp/bnmlab-remote.mjs keygen` prints, whole and unbroken."
+        }
+        if (allowed || version.endsWith("-dev")) return@doLast
+        check(shipped != dev) {
+            "Version $version would ship the committed DEV remote-support key. Run " +
+                "`node tools/remote-mcp/bnmlab-remote.mjs keygen`, paste the SPKI it prints into " +
+                "RemoteSupportKeys.SUPPORT_PUBLIC_KEY_SPKI_B64, and package again."
+        }
+    }
+}
+
+tasks.matching {
+    it.name in setOf("packageMsi", "packageDmg", "packageDeb", "packageUberJarForCurrentOS",
+        "packageReleaseMsi", "packageReleaseDmg", "packageReleaseDeb", "packageReleaseUberJarForCurrentOS")
+}.configureEach { dependsOn(checkSupportKeyNotDev) }
+
 // ── Remote support end-to-end test (RemoteSupportE2ETest) — opt-in only.
 // `./gradlew :composeApp:desktopTest -Dbnm.e2e=true` (or -Pbnm.e2e=true) reaches
 // the test JVM through this block; without it the test skips itself. The relay
@@ -249,6 +303,10 @@ compose.desktop {
 tasks.withType<Test>().configureEach {
     val e2e = providers.gradleProperty("bnm.e2e").orElse(providers.systemProperty("bnm.e2e")).orNull
     if (e2e != null) systemProperty("bnm.e2e", e2e)
+    // -Dbnm.allowDevSupportKey=true lets a VERSIONED test run (CI on a branch, the
+    // E2E) keep the committed dev support key; a release run never passes it.
+    val devKey = providers.gradleProperty("bnm.allowDevSupportKey").orElse(providers.systemProperty("bnm.allowDevSupportKey")).orNull
+    if (devKey != null) systemProperty("bnm.allowDevSupportKey", devKey)
     for (name in listOf("BNM_RELAY_URL", "BNM_SUPPORT_TOKEN", "BNM_E2E_LICENSE_JWT", "BNM_E2E_TRANSCRIPT")) {
         System.getenv(name)?.let { environment(name, it) }
     }

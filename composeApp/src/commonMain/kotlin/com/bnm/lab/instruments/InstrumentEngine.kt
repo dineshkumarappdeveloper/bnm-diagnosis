@@ -21,6 +21,7 @@ import io.ktor.utils.io.readAvailable
 import io.ktor.utils.io.writeFully
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -33,6 +34,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -79,6 +81,15 @@ import kotlin.uuid.Uuid
  * per ACK/NAK sent, the `verify_pending` gate (settings changed by support →
  * claim queue until the bench confirms one sample) and [dryRun], which parses
  * and maps a pasted frame without routing or writing anything.
+ *
+ * The [status] map is written from many threads at once — every connection's
+ * assembler bumps counters, the accept loop stamps the peer, jSerialComm's
+ * thread reports a disconnect, the restart and heal paths relaunch — so every
+ * write is a compare-and-set ([MutableStateFlow.update]), never a
+ * read-modify-write of `.value`; and a launcher publishes its status BEFORE it
+ * starts the job, so the job's real verdict (bound, or bind failed) is never
+ * erased by a stale optimistic one. Result ingest only stamps `lastFrameAt`;
+ * state changes belong to the transports.
  */
 @OptIn(ExperimentalUuidApi::class)
 class InstrumentEngine(
@@ -87,9 +98,17 @@ class InstrumentEngine(
     private val json: Json,
     /** How often an enabled instrument in `error` is retried. Tests shorten it. */
     private val healIntervalMs: Long = 10_000L,
+    /** Where the engine's own coroutines run. A test passes an immediate
+     *  dispatcher so a listener job reaches its bind verdict INSIDE
+     *  `scope.launch` — that is what makes the launch ordering below
+     *  reproducible instead of a race nobody can schedule. */
+    dispatcher: CoroutineDispatcher = Dispatchers.Default,
+    /** How a serial port is opened. A test substitutes one that can fail, or
+     *  report the device gone, on cue — [openSerialPort] wants real hardware. */
+    private val openSerial: (String, Int, (ByteArray) -> Unit, (String?) -> Unit) -> SerialHandle? = ::openSerialPort,
 ) {
     private val scope = CoroutineScope(
-        SupervisorJob() + Dispatchers.Default +
+        SupervisorJob() + dispatcher +
             // Last line of defence for a failure no call site caught: log it, keep
             // the other listeners running, and never let it reach the JVM's
             // uncaught handler (which would treat it as a crash).
@@ -139,6 +158,13 @@ class InstrumentEngine(
         val unitMismatches: List<String> = emptyList(),
     )
 
+    /**
+     * What [prepareListener] hands back: the status to publish and, for a
+     * transport whose real work happens in a coroutine (TCP), the step that
+     * starts it — run only AFTER the status is in the map.
+     */
+    private class Launch(val status: InstrumentStatus, val start: (() -> Unit)? = null)
+
     private class ListenerHandle(
         val job: Job?,
         val serial: SerialHandle?,
@@ -174,9 +200,11 @@ class InstrumentEngine(
             listeners.clear()
             val configs = runCatching { q.listInstruments().executeAsList().map { it.toModel() } }
                 .getOrDefault(emptyList())
-            val next = mutableMapOf<String, InstrumentStatus>()
-            for (cfg in configs) next[cfg.id] = relaunch(cfg, _status.value[cfg.id])
-            _status.value = next
+            // Rows that no longer exist leave the map; the rest are relaunched
+            // one at a time, each published before its job starts.
+            val ids = configs.map { it.id }.toSet()
+            _status.update { m -> m.filterKeys { it in ids } }
+            for (cfg in configs) relaunch(cfg)
         }
     }
 
@@ -190,11 +218,7 @@ class InstrumentEngine(
         withContext(Dispatchers.Default) {
             listeners.remove(id)?.close()
             val cfg = runCatching { q.instrumentById(id).executeAsOneOrNull()?.toModel() }.getOrNull()
-            if (cfg == null) {
-                _status.value = _status.value - id
-            } else {
-                _status.value = _status.value + (id to relaunch(cfg, _status.value[id]))
-            }
+            if (cfg == null) _status.update { m -> m - id } else relaunch(cfg)
         }
     }
 
@@ -218,32 +242,65 @@ class InstrumentEngine(
                         ?: continue
                     if (!cfg.enabled) continue
                     listeners.remove(id)?.close()
-                    val fresh = launchListener(cfg)
-                    // A TCP launch reports "listening" before the bind has happened.
-                    // Keep showing the error until the accept loop proves otherwise
-                    // — otherwise every retry would flip error → listening → error
-                    // and log two transitions a pass.
-                    val merged = if (cfg.transport == InstrumentTransport.TCP && fresh.state == "listening") current
-                        else carry(current, fresh)
-                    if (merged.state != current.state || merged.detail != current.detail) {
-                        if (merged.state == "error") AppLog.w("Analyzer", "${cfg.id} -> ${merged.state}: ${merged.detail.orEmpty()}")
-                        else AppLog.i("Analyzer", "${cfg.id} -> ${merged.state}: ${merged.detail.orEmpty()}")
+                    val snapshot = _status.value[id]
+                    val launch = prepareListener(cfg)
+                    if (cfg.transport == InstrumentTransport.TCP && launch.status.state == "listening") {
+                        // The accept loop reports the real verdict (bound, or the
+                        // same bind failure). Keep showing the error until then —
+                        // otherwise every retry would flip error → listening →
+                        // error and log two transitions a pass.
+                        launch.start?.invoke()
+                        continue
                     }
-                    _status.value = _status.value + (id to merged)
+                    publishLaunch(id, snapshot, launch.status)
+                    launch.start?.invoke()
                 }
             }
         }
     }
 
-    /** Launch (or park) one instrument and carry its counters over. Must run under [restartMutex]. */
-    private fun relaunch(cfg: InstrumentConfig, prev: InstrumentStatus?): InstrumentStatus {
-        val fresh = if (!cfg.enabled) InstrumentStatus("off", "Disabled") else launchListener(cfg)
-        val merged = carry(prev?.copy(boundAt = null), fresh)
-        if (prev?.state != merged.state || prev.detail != merged.detail) {
-            if (merged.state == "error") AppLog.w("Analyzer", "${cfg.id} -> ${merged.state}: ${merged.detail.orEmpty()}")
-            else AppLog.i("Analyzer", "${cfg.id} -> ${merged.state}: ${merged.detail.orEmpty()}")
+    /**
+     * Launch (or park) one instrument. Its status goes into the map FIRST —
+     * counters carried over, the old bind time dropped — and only then does
+     * the job start, and the launcher never writes that entry again: a TCP
+     * accept loop reaches its bind verdict within microseconds, and an
+     * optimistic "listening" landing on top of it would leave an instrument
+     * that reads `listening` with no listener behind it and no `error` for
+     * [healOnce] to retry. Must run under [restartMutex].
+     */
+    private fun relaunch(cfg: InstrumentConfig) {
+        val snapshot = _status.value[cfg.id]
+        val launch = if (!cfg.enabled) Launch(InstrumentStatus("off", "Disabled")) else prepareListener(cfg)
+        publishLaunch(cfg.id, snapshot, launch.status)
+        launch.start?.invoke()
+    }
+
+    /**
+     * Publish a launcher's verdict — unless the transport has already given a
+     * better one. TCP defers its work to [Launch.start], but SERIAL opens its
+     * port inside [prepareListener], and a device that vanishes while the port
+     * is opening reports itself through `onClosed` BEFORE this line: an
+     * optimistic "listening" written over that would leave a dead port reading
+     * `listening`, which [healOnce] never retries because it only looks at
+     * `error`. The comparison rides inside the same compare-and-set as the
+     * write, so nothing can slip between the two. [snapshot] is what the entry
+     * was before the transport was touched.
+     */
+    private fun publishLaunch(id: String, snapshot: InstrumentStatus?, fresh: InstrumentStatus) {
+        var before: InstrumentStatus? = null
+        var after: InstrumentStatus? = null
+        _status.update { m ->
+            before = m[id]
+            if (before !== snapshot) {
+                after = null
+                return@update m
+            }
+            // This listener is new until its own accept loop says otherwise.
+            val next = carry(before?.copy(boundAt = null), fresh)
+            after = next
+            m + (id to next)
         }
-        return merged
+        after?.let { logTransition(id, before, it) }
     }
 
     /** Stop every listener without touching config. Used by the tenant-switch
@@ -252,52 +309,59 @@ class InstrumentEngine(
     suspend fun stopAll() = restartMutex.withLock {
         listeners.values.toList().forEach { it.close() }
         listeners.clear()
-        _status.value = _status.value.mapValues { (_, st) -> carry(st, InstrumentStatus("off", "Stopped")) }
+        _status.update { m -> m.mapValues { (_, st) -> carry(st, InstrumentStatus("off", "Stopped")) } }
     }
 
-    private fun launchListener(cfg: InstrumentConfig): InstrumentStatus = when (cfg.transport) {
+    /**
+     * Open the transport for one enabled instrument. TCP hands back the
+     * optimistic status and a [Launch.start] that starts the accept loop —
+     * the caller publishes first, then starts. Serial opens the port right
+     * here (jSerialComm is synchronous) and needs no second step.
+     */
+    private fun prepareListener(cfg: InstrumentConfig): Launch = when (cfg.transport) {
         InstrumentTransport.TCP -> {
             val port = cfg.tcpPort
             if (port == null || port !in 1..65535) {
-                InstrumentStatus("error", "No TCP port set")
+                Launch(InstrumentStatus("error", "No TCP port set"))
             } else {
-                val job = scope.launch { tcpListenLoop(cfg, port) }
-                listeners[cfg.id] = ListenerHandle(job, serial = null, assembler = null)
-                InstrumentStatus("listening", "TCP port $port")
+                Launch(InstrumentStatus("listening", "TCP port $port")) {
+                    val job = scope.launch { tcpListenLoop(cfg, port) }
+                    listeners[cfg.id] = ListenerHandle(job, serial = null, assembler = null)
+                }
             }
         }
         InstrumentTransport.SERIAL -> {
             val portName = cfg.serialPort
             when {
                 !serialSupported() ->
-                    InstrumentStatus("error", "Serial isn't available on this device — use the lab PC")
+                    Launch(InstrumentStatus("error", "Serial isn't available on this device — use the lab PC"))
                 portName.isNullOrBlank() ->
-                    InstrumentStatus("error", "No serial port chosen")
+                    Launch(InstrumentStatus("error", "No serial port chosen"))
                 else -> {
                     val assembler = FrameAssembler(cfg)
                     // submit() (not launch-per-chunk): jSerialComm delivers
                     // chunks sequentially on its listener thread, and the
                     // assembler's single consumer preserves that order —
                     // separate coroutine launches would not.
-                    val handle = openSerialPort(
+                    val handle = openSerial(
                         portName, cfg.baud,
-                        onData = { bytes -> assembler.submit(bytes) },
-                        onClosed = { reason ->
+                        { bytes -> assembler.submit(bytes) },                     // onData
+                        { reason ->                                               // onClosed
                             setStatus(cfg.id, InstrumentStatus("error", reason ?: "Serial port closed"))
                             scope.launch { logRow(cfg, "error", reason ?: "Serial port closed", null) }
                         },
                     )
                     if (handle == null) {
                         assembler.abandon()
-                        InstrumentStatus("error", "Couldn't open $portName — in use, or unplugged?")
+                        Launch(InstrumentStatus("error", "Couldn't open $portName — in use, or unplugged?"))
                     } else {
                         listeners[cfg.id] = ListenerHandle(job = null, serial = handle, assembler = assembler)
-                        InstrumentStatus("listening", "$portName @ ${cfg.baud}", boundAt = nowIso())
+                        Launch(InstrumentStatus("listening", "$portName @ ${cfg.baud}", boundAt = nowIso()))
                     }
                 }
             }
         }
-        else -> InstrumentStatus("error", "Unknown transport '${cfg.transport}'")
+        else -> Launch(InstrumentStatus("error", "Unknown transport '${cfg.transport}'"))
     }
 
     private suspend fun tcpListenLoop(cfg: InstrumentConfig, port: Int) {
@@ -365,22 +429,37 @@ class InstrumentEngine(
         }
     }
 
-    /** A state transition. Counters, last-frame and last-error stamps carry over from the previous status. */
+    /**
+     * A state transition, atomic against the counter bumps landing from other
+     * threads. Counters, last-frame and last-error stamps carry over from the
+     * previous status.
+     */
     private fun setStatus(id: String, s: InstrumentStatus) {
-        val before = _status.value[id]
-        val merged = carry(before, s)
-        _status.value = _status.value + (id to merged)
-        // Transitions only — lastFrameAt moves on every frame and would drown the log.
-        if (before?.state != merged.state || before.detail != merged.detail) {
-            if (merged.state == "error") AppLog.w("Analyzer", "$id -> ${merged.state}: ${merged.detail.orEmpty()}")
-            else AppLog.i("Analyzer", "$id -> ${merged.state}: ${merged.detail.orEmpty()}")
+        var before: InstrumentStatus? = null
+        var merged: InstrumentStatus = s
+        _status.update { m ->
+            before = m[id]
+            merged = carry(before, s)
+            m + (id to merged)
+        }
+        logTransition(id, before, merged)
+    }
+
+    /** Transitions only — lastFrameAt moves on every frame and would drown the log. */
+    private fun logTransition(id: String, before: InstrumentStatus?, after: InstrumentStatus) {
+        if (before?.state != after.state || before.detail != after.detail) {
+            if (after.state == "error") AppLog.w("Analyzer", "$id -> ${after.state}: ${after.detail.orEmpty()}")
+            else AppLog.i("Analyzer", "$id -> ${after.state}: ${after.detail.orEmpty()}")
         }
     }
 
-    /** A counter bump or stamp on an instrument whose state does not change. No-op for an unknown id. */
+    /**
+     * A counter bump or stamp on an instrument whose state does not change —
+     * a compare-and-set, so two connections counting at once never lose an
+     * increment. No-op for an unknown id.
+     */
     private fun update(id: String, f: (InstrumentStatus) -> InstrumentStatus) {
-        val cur = _status.value[id] ?: return
-        _status.value = _status.value + (id to f(cur))
+        _status.update { m -> m[id]?.let { m + (id to f(it)) } ?: m }
     }
 
     /**
@@ -525,9 +604,10 @@ class InstrumentEngine(
     // ── ingestion (Mispa Count X) ──
 
     private suspend fun ingestMispa(cfg: InstrumentConfig, frame: MispaCountX.Frame) {
-        update(cfg.id) { it.copy(framesParsed = it.framesParsed + 1) }
-        setStatus(cfg.id, InstrumentStatus("listening",
-            _status.value[cfg.id]?.detail, lastFrameAt = nowIso()))
+        // A stamp, never a transition: the last chunk of a frame can drain
+        // AFTER jSerialComm reported the cable gone, and flipping `error` back
+        // to `listening` here would hide that from the self-heal loop.
+        update(cfg.id) { it.copy(framesParsed = it.framesParsed + 1, lastFrameAt = nowIso()) }
         val stored = StoredInstrumentFrame(
             driver = cfg.driver,
             specimenId = frame.specimenId,
@@ -578,9 +658,7 @@ class InstrumentEngine(
             logRow(cfg, "rx", "QC result acknowledged and ignored (${frame.specimenId ?: "no id"})", excerpt)
             return
         }
-        update(cfg.id) { it.copy(framesParsed = it.framesParsed + 1) }
-        setStatus(cfg.id, InstrumentStatus("listening",
-            _status.value[cfg.id]?.detail, lastFrameAt = nowIso()))
+        update(cfg.id) { it.copy(framesParsed = it.framesParsed + 1, lastFrameAt = nowIso()) }   // a stamp, never a transition (see ingestMispa)
         val stored = StoredInstrumentFrame(
             driver = cfg.driver,
             specimenId = frame.specimenId,
@@ -658,11 +736,19 @@ class InstrumentEngine(
         logRow(cfg, "info", summary, null)
     }
 
-    /** A complete frame the driver returned null for. Masked excerpt: sample ids stay shapes. */
+    /**
+     * A complete frame the driver returned null for. The excerpt is scrubbed
+     * the way a shared raw frame is (names and demographics out — a Mispa
+     * PatientID is a typed name on some analyzers, and [FrameScrubber.maskIds]
+     * only masks tokens with a digit in them), then masked; this summary goes
+     * to the activity log, which is emailed and served by `logs.tail`. A driver
+     * without a scrubber gets no excerpt at all.
+     */
     private suspend fun frameNotUnderstood(cfg: InstrumentConfig, text: String) {
         update(cfg.id) { it.copy(framesIgnored = it.framesIgnored + 1) }
-        val excerpt = FrameScrubber.maskIds(text.take(120)).replace('\r', ' ').replace('\n', ' ')
-        logRow(cfg, "error", "Frame not understood by ${cfg.driver}: $excerpt", null)
+        val cleaned = FrameScrubber.scrubRaw(cfg.driver, text)
+        val excerpt = cleaned?.let { FrameScrubber.maskIds(it.take(120)).replace('\r', ' ').replace('\n', ' ') }
+        logRow(cfg, "error", "Frame not understood by ${cfg.driver}" + (excerpt?.let { ": $it" } ?: ""), null)
     }
 
     private var ackSeq = 0

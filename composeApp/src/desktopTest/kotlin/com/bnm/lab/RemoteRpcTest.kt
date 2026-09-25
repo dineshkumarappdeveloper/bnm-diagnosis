@@ -37,7 +37,7 @@ class RemoteRpcTest {
     private val core = RemoteRpcCore(
         hosts = { listOf(host) },
         audit = { audit },
-        verifier = Ed25519Verifier(RemoteSupportKeys.SUPPORT_PUBLIC_KEY_SPKI_B64),
+        verifier = Ed25519Verifier(RemoteSupportKeys.DEV_PUBLIC_KEY_SPKI_B64),   // requests are signed with the committed dev key
         clock = clock,
         appVersion = "9.9.9-test",
         onAction = { actions += it },
@@ -282,7 +282,20 @@ class RemoteRpcTest {
         val result = assertNotNull(reply.result)
         assertEquals("true", result["isError"]!!.jsonPrimitive.content)
         assertEquals("Port COM3 could not be opened", ((result["content"] as JsonArray)[0] as JsonObject)["text"]!!.jsonPrimitive.content)
-        assertEquals(SupportAuditRow.Outcome.FAILED, audit.rows.single().outcome)
+        val row = audit.rows.single()
+        assertEquals(SupportAuditRow.Outcome.FAILED, row.outcome)
+        assertEquals("failed: Port COM3 could not be opened", row.summary, "a plain failure audits what it says")
+    }
+
+    @Test
+    fun `a failure may keep its detail for the engineer and give the audit a fixed line`() {
+        // db.query does this: SQLite echoes the engineer's SQL back in its
+        // error, and the audit row outlives the session.
+        val reply = call(live(), "fail.quietly")
+        val result = assertNotNull(reply.result)
+        assertEquals("no such column: Kavitha", ((result["content"] as JsonArray)[0] as JsonObject)["text"]!!.jsonPrimitive.content)
+        assertEquals("failed: SQL error", audit.rows.single().summary)
+        assertFalse("Kavitha" in audit.rows.single().summary)
     }
 
     @Test

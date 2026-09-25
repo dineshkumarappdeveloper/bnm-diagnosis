@@ -155,7 +155,8 @@ no whitespace, numbers as sent. Two traps the fixtures pin down:
   kotlinx keeps parsed literals verbatim, so re-encoding the parsed body gives
   the same text.
 
-`test/canonical-vectors.json` (`[{name, input, canonical, sha256}]`) is shared
+`test/canonical-vectors.json` (`{_comment: […], vectors: [{name, input,
+canonical, sha256}]}` — both loaders read `.vectors`) is shared
 with the Kotlin `CanonicalJsonTest`; `test/signing-vectors.json` holds
 deterministic Ed25519 signatures made with the dev key for `RemoteRpcTest`.
 
@@ -168,10 +169,15 @@ the lab's `initialize` result at `result._meta.bnm.session_id` (also accepted:
 field names plus `actions`) refreshes them. Without a session id the
 connection stands but `lab_call` says it cannot sign.
 
-Relay frames the bridge understands: `{"t":"error","code":"no_session"|"busy"}`,
-`{"t":"peer","state":"lab_disconnected"|"connected"}`, `{"t":"end"}`. It
+Relay frames the bridge understands:
+`{"t":"error","code":"no_session"|"busy"|"no_lab"}`,
+`{"t":"peer","state":"lab_connected"|"lab_disconnected"}`, `{"t":"end"}`. It
 answers a `ping` request from the lab with `{}` and ignores other
-notifications and non-JSON frames.
+notifications and non-JSON frames. `no_session` and `busy` are fatal (the
+socket is hung up); `no_lab` — the relay's answer while the lab's seat is
+momentarily empty — only fails the calls in flight, and the session comes
+back when the lab does. The lab-facing spellings `connected`/`disconnected`
+are accepted for the same peer states.
 
 ## Troubleshooting
 
@@ -183,8 +189,8 @@ notifications and non-JSON frames.
 | `Could not connect to the relay at …. Check BNM_RELAY_URL and BNM_SUPPORT_TOKEN` | DNS/network, or the token was refused at the upgrade (a 401 looks identical from the client). |
 | `Support key not found at …` | Run `keygen`, or point `BNM_SUPPORT_KEY_FILE` at the dev key. |
 | `Refused by the lab: Bad signature` | The app does not embed this key's public half (dev vs prod key). |
-| `Refused by the lab: Request too old…` | Your clock is more than 5 minutes off. |
-| `Refused by the lab: … consent` | The owner did not tick that box. |
+| `Refused by the lab: Request timestamp is outside the 5-minute window` | Your clock is more than 5 minutes off. |
+| `Refused by the lab: Not allowed: the lab owner did not give … consent` | The owner did not tick that box (analyzer data / records / screen view). |
 | `The lab's connection to the relay dropped` | The lab PC lost network; the app reconnects with backoff. Wait, then retry. |
 | `The lab did not answer within 60 s` | Long query or screenshot on a slow PC, or a stall. `lab_status`, then retry. |
 
@@ -192,7 +198,7 @@ notifications and non-JSON frames.
 
 ```sh
 cd tools/remote-mcp
-npm test                       # = node --test (78 tests, no network)
+npm test                       # = node --test (no network)
 node bnmlab-remote.mjs --help
 
 # stdio smoke by hand

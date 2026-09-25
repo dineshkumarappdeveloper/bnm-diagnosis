@@ -119,8 +119,14 @@ sealed class ToolResult {
     data class Ok(val contentJson: String, val summaryForAudit: String) : ToolResult()
     /** Refused by policy (consent, busy analyzer, PHI table…): the reason is shown to the engineer. */
     data class Refused(val reason: String) : ToolResult()
-    /** The tool ran and failed; message is non-PHI. */
-    data class Failed(val message: String) : ToolResult()
+    /**
+     * The tool ran and failed; [message] is non-PHI and goes to the engineer.
+     * A message that quotes a driver's own words can still carry what the
+     * engineer typed (`db.query` and a patient name in a WHERE clause), so a
+     * tool may give the audit row — which outlives the session — a fixed
+     * [summaryForAudit] instead.
+     */
+    data class Failed(val message: String, val summaryForAudit: String = message) : ToolResult()
 }
 
 /** A source of tools. Implementations are pure with respect to the transport. */

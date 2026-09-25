@@ -102,7 +102,9 @@ with `claude mcp add`). Engineer's runbook: `docs/remote-support/RUNBOOK.md`.
   and the bench presses Verified.
 - **Key rotation.** `bnmlab-remote.mjs keygen` → paste the SPKI into
   `RemoteSupportKeys.kt` and ship a build BEFORE revoking the old key on the
-  engineers' machines. 🔴 This branch embeds the DEV key whose private half is
+  engineers' machines. The paste is checked for SHAPE (a 44-byte Ed25519
+  SPKI) by `checkSupportKeyNotDev` and `RemoteSupportKeysReleaseTest`: a
+  truncated one verifies nothing and stops the app starting on every lab. 🔴 This branch embeds the DEV key whose private half is
   committed (`tools/remote-mcp/test/dev-support.key`) — `lab.overview` reports
   `support_key: dev`; REPLACE before release. Relay token: `wrangler secret
   put BNM_SUPPORT_TOKEN`; relay licence key mirrors `docs/license-public-key.jwk.json`.

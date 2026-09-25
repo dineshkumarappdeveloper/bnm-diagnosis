@@ -196,7 +196,7 @@ class RemoteRpcCore(
                 error(id, ERR_REFUSED, outcome.reason)
             }
             is ToolResult.Failed -> {
-                record(live, toolName, SupportAuditRow.Outcome.FAILED, "failed: ${outcome.message}", startedMono)
+                record(live, toolName, SupportAuditRow.Outcome.FAILED, "failed: ${outcome.summaryForAudit}", startedMono)
                 result(id, errorContent(outcome.message))
             }
         }

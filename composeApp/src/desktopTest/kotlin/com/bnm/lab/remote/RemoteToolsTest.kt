@@ -28,6 +28,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -64,7 +65,8 @@ class RemoteToolsTest {
         override fun timezoneId() = "Asia/Kolkata"
         override fun localTimeIso() = "2026-09-25T15:30:00+05:30"
         override fun logTail(lines: Int, day: String?) = if (day == "1999-01-01") null else logLines.takeLast(lines).joinToString("\n")
-        override fun serialPorts() = listOf(SerialPortInfo("COM3", "USB Serial Port"), SerialPortInfo("COM9", "Spare"))
+        var ports = listOf(SerialPortInfo("COM3", "USB Serial Port"), SerialPortInfo("COM9", "Spare"))
+        override fun serialPorts() = ports
         override fun probeSerial(portName: String): String? = if (portName == "COM9") null else "Could not open $portName — in use"
     }
 
@@ -340,6 +342,52 @@ class RemoteToolsTest {
     }
 
     @Test
+    fun `a port name is reduced to what the OS means by it`() {
+        assertEquals("com3", SerialPortNames.normalize(" \\\\.\\COM3 "))
+        assertEquals("ttyusb0", SerialPortNames.normalize("/dev/ttyUSB0"))
+        assertNull(SerialPortNames.normalize("  "))
+        assertNull(SerialPortNames.normalize(null))
+        assertTrue(SerialPortNames.same("/dev/ttyUSB0", "ttyUSB0"))
+        assertTrue(SerialPortNames.same("com3", "COM3"))
+        assertFalse(SerialPortNames.same("ttyUSB0", "ttyUSB1"))
+        assertFalse(SerialPortNames.same(null, null), "a missing port owns nothing")
+    }
+
+    @Test
+    fun `the port guard reads a spelling the way the OS does, not character by character`() = runBlocking<Unit> {
+        val b = Bench()
+        try {
+            val mispa = b.engine.saveInstrument(InstrumentConfig(id = "", name = "Mispa", driver = "mispa_count_x",
+                transport = InstrumentTransport.SERIAL, serialPort = "ttyUSB0", baud = 115200))
+            val erba = b.engine.saveInstrument(InstrumentConfig(id = "", name = "Erba", driver = "mispa_count_x",
+                transport = InstrumentTransport.SERIAL, serialPort = "COM3", baud = 115200))
+
+            // The listing spells them the other way round from the rows.
+            b.platform.ports = listOf(SerialPortInfo("/dev/ttyUSB0", "USB-Serial"), SerialPortInfo("com3", "USB Serial Port"),
+                SerialPortInfo("ttyUSB7", "Spare"))
+            val serial = payload(b.call("instruments.ports")).jsonObject.getValue("serial").jsonArray.associateBy { it.str("name")!! }
+            assertEquals(mispa, serial.getValue("/dev/ttyUSB0").str("held_by"))
+            assertEquals(erba, serial.getValue("com3").str("held_by"))
+            assertNull(serial.getValue("ttyUSB7").str("held_by"))
+
+            // jSerialComm opens all of these; so the guard has to refuse all of them.
+            for (spelling in listOf("ttyUSB0", "/dev/ttyUSB0", "/dev/ttyusb0", "COM3", "com3")) {
+                val r = b.call("instruments.probe", """{"serial_port":"$spelling"}""")
+                assertIs<ToolResult.Refused>(r, "probing $spelling took a port from a running analyzer")
+                assertTrue("Mispa" in r.reason || "Erba" in r.reason, r.reason)
+            }
+            assertFalse(b.call("instruments.probe", """{"serial_port":"ttyUSB7"}""") is ToolResult.Refused,
+                "a port no analyzer owns is still probed")
+
+            // And a second analyzer cannot be pointed at a taken port under another name.
+            val clash = b.call("instruments.set_config",
+                """{"name":"Clone","driver_key":"mispa_count_x","transport":"serial","serial_port":"/dev/ttyUSB0","baud":115200,"enabled":true}""")
+            assertIs<ToolResult.Failed>(clash)
+            assertTrue("Mispa" in clash.message, clash.message)
+        } finally { b.close() }
+    }
+
+    @Test
     fun `instruments dry_run - lookup only, masked accession, nothing written`() = runBlocking<Unit> {
         val b = Bench()
         try {
@@ -391,6 +439,63 @@ class RemoteToolsTest {
             val meta = payload(b.call("db.query", """{"sql":"SELECT count(*) AS n FROM instruments"}""", NONE))
             assertEquals("0", meta.jsonObject.getValue("rows").jsonArray[0].jsonArray[0].jsonPrimitive.content)
             assertIs<ToolResult.Failed>(b.call("db.query", """{"sql":"SELECT * FROM no_such_table"}""", ALL))
+        } finally { b.close() }
+    }
+
+    @Test
+    fun `db query - frames need the analyzer tick and staff the records one, PIN hashes never leave, errors carry no literal`() = runBlocking<Unit> {
+        val b = Bench()
+        try {
+            val order = b.newOrder()
+            val cfg = b.hl7()
+            b.ingest(cfg, oru(order.accessionNo))
+            b.driver.execute(null, "INSERT INTO staff(id, name, role, pin_hash, active, created_at, updated_at, signature_png, registration_no) " +
+                "VALUES ('owner-1', 'Dr. Meena Rao', 'owner', 's1\$salt\$deadbeef', 1, 'a', 'b', 'iVBORw0KGgo=', 'TN-12345')", 0)
+
+            // The raw frame — the bytes instruments.log only shares scrubbed and
+            // under analyzer-data consent — is not one SELECT away, and records
+            // consent is not the tick that opens it.
+            val sql = """{"sql":"SELECT raw FROM instrument_log WHERE direction = 'rx'"}"""
+            val raw = b.call("db.query", sql, NONE)
+            assertIs<ToolResult.Refused>(raw)
+            assertTrue("instrument_log" in raw.reason, raw.reason)
+            assertIs<ToolResult.Refused>(b.call("db.query", sql, SupportConsent(records = true)))
+            val shared = payload(b.call("db.query", sql, SupportConsent(analyzerData = true)))
+            assertTrue("PID" in shared.toString(), "with the analyzer tick the frame comes through: $shared")
+
+            // Staff go the other way: the records tick, and the analyzer one does nothing for them.
+            val staff = b.call("db.query", """{"sql":"SELECT id, name, role FROM staff"}""", NONE)
+            assertIs<ToolResult.Refused>(staff)
+            assertTrue("staff" in staff.reason, staff.reason)
+            assertIs<ToolResult.Refused>(b.call("db.query", """{"sql":"SELECT id, name FROM staff"}""", SupportConsent(analyzerData = true)))
+
+            // Even with every box ticked, the PIN hash and the signature are refused by name…
+            val pin = b.call("db.query", """{"sql":"SELECT id, pin_hash FROM staff"}""", ALL)
+            assertIs<ToolResult.Refused>(pin)
+            assertTrue("pin_hash" in pin.reason, pin.reason)
+            assertIs<ToolResult.Refused>(b.call("db.query", """{"sql":"SELECT signature_png FROM staff"}""", ALL))
+            // …and blanked when a SELECT * would carry them.
+            val star = payload(b.call("db.query", """{"sql":"SELECT * FROM staff"}""", ALL))
+            val columns = star.jsonObject.getValue("columns").jsonArray.map { it.jsonPrimitive.content }
+            val row = star.jsonObject.getValue("rows").jsonArray[0].jsonArray.map { (it as? JsonPrimitive)?.contentOrNull }
+            assertEquals(DbQueryGuard.HIDDEN_CELL, row[columns.indexOf("pin_hash")])
+            assertEquals(DbQueryGuard.HIDDEN_CELL, row[columns.indexOf("signature_png")])
+            assertEquals("Dr. Meena Rao", row[columns.indexOf("name")], "everything else in the row is what was asked for")
+            assertEquals(listOf("pin_hash", "signature_png"), star.jsonObject.getValue("hidden_columns").jsonArray.map { it.jsonPrimitive.content })
+            assertFalse("deadbeef" in star.toString() || "iVBOR" in star.toString())
+
+            // An unterminated literal: SQLite echoes it back, the tool does not…
+            val broken = b.call("db.query", """{"sql":"SELECT * FROM patients WHERE name = 'Kavitha Raman"}""", ALL)
+            assertIs<ToolResult.Failed>(broken)
+            assertTrue(broken.message.startsWith("SQL error — check the statement"), broken.message)
+            assertFalse("Kavitha" in broken.message, broken.message)
+            assertEquals(RemoteTools.AUDIT_SQL_ERROR, broken.summaryForAudit, "the audit row keeps a fixed line")
+            // …and a bare-word name, which has no quotes to strip, reaches the
+            // engineer but still not the audit row that outlives the session.
+            val bareWord = b.call("db.query", """{"sql":"SELECT * FROM patients WHERE name = Kavitha"}""", ALL)
+            assertIs<ToolResult.Failed>(bareWord)
+            assertEquals(RemoteTools.AUDIT_SQL_ERROR, bareWord.summaryForAudit)
+            assertFalse("Kavitha" in bareWord.summaryForAudit)
         } finally { b.close() }
     }
 

@@ -15,24 +15,26 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * The bytes the app and the bridge must agree on: the embedded key verifies
- * what the dev key signs, canonical JSON comes out identical to Node's, and
- * the session code hashes the way the relay expects.
+ * The bytes the app and the bridge must agree on: the app's verifier, given
+ * the dev public key, accepts what the dev private key signs, canonical JSON
+ * comes out identical to Node's, and the session code hashes the way the
+ * relay expects. Whether the SHIPPED key may still be the dev key is
+ * [RemoteSupportKeysReleaseTest]'s question, not this one's — the tests here
+ * pin the dev CONSTANT to the committed file, so pasting the real key into
+ * `SUPPORT_PUBLIC_KEY_SPKI_B64` changes nothing below.
  */
 class RemoteSigningTest {
 
-    private val verifier = Ed25519Verifier(RemoteSupportKeys.SUPPORT_PUBLIC_KEY_SPKI_B64)
+    private val verifier = Ed25519Verifier(RemoteSupportKeys.DEV_PUBLIC_KEY_SPKI_B64)
 
     @Test
-    fun `the embedded key is the committed dev key on this branch, and says so`() {
-        assertEquals(DevSupportKey.publicSpkiB64, RemoteSupportKeys.SUPPORT_PUBLIC_KEY_SPKI_B64,
-            "RemoteSupportKeys.SUPPORT_PUBLIC_KEY_SPKI_B64 must match tools/remote-mcp/test/dev-support.pub")
-        assertEquals(DevSupportKey.publicSpkiB64, RemoteSupportKeys.DEV_PUBLIC_KEY_SPKI_B64)
-        assertTrue(RemoteSupportKeys.isDevKey, "a build that trusts the committed dev key must report it")
+    fun `the dev constant is the committed dev key, so the bridge's tests and the app's agree`() {
+        assertEquals(DevSupportKey.publicSpkiB64, RemoteSupportKeys.DEV_PUBLIC_KEY_SPKI_B64,
+            "RemoteSupportKeys.DEV_PUBLIC_KEY_SPKI_B64 must match tools/remote-mcp/test/dev-support.pub")
     }
 
     @Test
-    fun `what the dev key signs, the embedded key verifies — and nothing else`() {
+    fun `what the dev key signs, the dev public key verifies — and nothing else`() {
         val message = RemoteSigning.input("sess", "1", "tools/call", "1760000000000", "n-1", """{"name":"x"}""")
         val sig = DevSupportKey.sign(message)
         assertTrue(verifier.verify(message, sig))

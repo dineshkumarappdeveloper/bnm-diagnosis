@@ -205,7 +205,8 @@ purpose: a wrong mapping must not write into patient results unseen.
 
 Close the loop: ask staff to run **one known sample** (a control, or a sample
 they already have a result for), open Instruments, compare the queued values,
-then press Verified. The queued frames can then be claimed in the app as
+then press Verified. The owner can hand the bench over with **Switch user**
+while you watch — that does not end the session. The queued frames can then be claimed in the app as
 usual. Tell them before you end the session, and write it in the ticket —
 "waiting for lab to verify" is the most common reason a fixed link still
 looks broken the next morning.
@@ -226,7 +227,9 @@ looks broken the next morning.
 
 - Tell the lab you are done and ask them to press **End** (or `session.end`).
   The app sends `end`, the relay drops both sides, the banner disappears.
-  Expiry does the same on its own.
+  Expiry does the same on its own, and so does the owner pressing **Sign out**.
+  **Switch user** does not — staff can take the bench mid-session (3.7 needs
+  exactly that), and the idle auto-lock leaves the session running too.
 - What stays on the lab PC: Support history (`support_sessions`,
   `support_audit`): when, who started it, what was consented, every tool call
   with a PHI-free summary, ok/refused/failed, duration. It survives a tenant
@@ -237,12 +240,12 @@ looks broken the next morning.
 
 | You see | Do |
 | --- | --- |
-| `Could not connect to the relay … Check BNM_RELAY_URL and BNM_SUPPORT_TOKEN` | Relay down, DNS, or wrong token (a 401 is indistinguishable client-side). `curl -I https://<relay-host>/` for a pulse; check the token with whoever holds the Worker secrets. |
+| `Could not connect to the relay … Check BNM_RELAY_URL and BNM_SUPPORT_TOKEN` | Relay down, DNS, or wrong token (a 401 is indistinguishable client-side). `curl https://<relay-host>/v1/health` for a pulse (`{"ok":true}`; every other path is 404 on purpose); check the token with whoever holds the Worker secrets. |
 | `No support session with that code` | Misread code (0/O, 1/I/L are mapped, but 8/B, 5/S are not) or the session ended. Ask them to read it again or start a new one. |
 | `Another engineer is already connected` | One connection per session. |
 | `Refused by the lab: Bad signature` | The build does not embed your public key — dev build vs your prod key or the reverse. `lab.overview` → `support_key`. |
-| `Refused by the lab: Request too old` | Your clock; `lab.overview` shows the lab's skew vs relay for comparison. |
-| `The lab's connection to the relay dropped` | Their network. The app reconnects with backoff (2 s → 30 s) until expiry; wait and retry. |
+| `Refused by the lab: Request timestamp is outside the 5-minute window` | Your clock; `lab.overview` shows the lab's skew vs relay for comparison. |
+| `The lab's connection to the relay dropped` | Their network. The app reconnects with backoff (2 s → 30 s) until expiry; wait and retry — the calls flow again on their own, no reconnect needed on your side. |
 | `The lab did not answer within 60 s` | Slow PC or a stuck tool. `lab_status`; if the peer is still there, retry once, then `lab_disconnect` + `lab_connect`. |
 
 ## 6. Rules that do not bend

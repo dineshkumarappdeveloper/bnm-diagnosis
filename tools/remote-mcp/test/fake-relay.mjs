@@ -123,6 +123,8 @@ export class FakeRelay {
         this.metaShape = opts.metaShape ?? '_meta';
         /** Relay ack after a good join: 'none' | 'joined' | 'ready'. */
         this.joinAck = opts.joinAck ?? 'none';
+        /** Lab seat empty: every forwarded frame is answered `no_lab`, socket left open. */
+        this.labAway = opts.labAway ?? false;
         this.tools = opts.tools ?? DEFAULT_TOOLS;
         this.now = opts.now ?? Date.now;
 
@@ -142,8 +144,14 @@ export class FakeRelay {
         this.support?.serverSend({ t: 'peer', state: 'lab_disconnected' });
     }
 
-    labReconnected() {
-        this.support?.serverSend({ t: 'peer', state: 'connected' });
+    /** What the DO sends the engineer when a lab takes the seat again (session.ts). */
+    labReconnected(state = 'lab_connected') {
+        this.support?.serverSend({ t: 'peer', state });
+    }
+
+    /** The DO's answer when a frame arrives while the lab seat is empty: no close. */
+    noLab() {
+        this.support?.serverSend({ t: 'error', code: 'no_lab' });
     }
 
     labEnd() {
@@ -194,6 +202,7 @@ export class FakeRelay {
         }
         if (!sock.paired) return; // the relay drops frames from unpaired sockets
         this.received.push(msg);
+        if (this.labAway) return this.noLab();
         this.#lab(sock, msg);
     }
 
