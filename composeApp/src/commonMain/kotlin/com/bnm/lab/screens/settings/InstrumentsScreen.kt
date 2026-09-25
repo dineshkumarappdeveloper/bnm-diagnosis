@@ -25,6 +25,7 @@ import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Downloading
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Verified
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -61,6 +62,7 @@ import com.bnm.lab.instruments.InstrumentTransport
 import com.bnm.lab.instruments.driverFor
 import com.bnm.lab.instruments.listSerialPorts
 import com.bnm.lab.instruments.serialSupported
+import com.bnm.lab.staff.LocalStaffSession
 import kotlinx.coroutines.launch
 
 /**
@@ -76,8 +78,11 @@ import kotlinx.coroutines.launch
 fun InstrumentsScreen(
     engine: InstrumentEngine,
     onBack: () -> Unit,
+    /** "Verified" pressed after remote support changed an analyzer's settings — the host writes the audit row. */
+    onVerified: suspend (InstrumentConfig) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
+    val signedIn = LocalStaffSession.current.signedIn
     val instruments by engine.instrumentsFlow().collectAsState(emptyList())
     val statuses by engine.status.collectAsState()
     val unmatched by engine.unmatchedFlow().collectAsState(emptyList())
@@ -134,6 +139,20 @@ fun InstrumentsScreen(
                                         scope.launch { engine.saveInstrument(inst.copy(enabled = on)) }
                                     },
                                 )
+                                if (inst.verifyPending) {
+                                    VerifyPendingRow(
+                                        // Any signed-in staff may confirm — the check is at the bench,
+                                        // not a rights question.
+                                        enabled = signedIn != null,
+                                        onVerified = {
+                                            scope.launch {
+                                                engine.setVerifyPending(inst.id, false)
+                                                onVerified(inst)
+                                                message = "${inst.name} verified — results apply to orders again"
+                                            }
+                                        },
+                                    )
+                                }
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             Row(
@@ -338,6 +357,48 @@ fun InstrumentsScreen(
 }
 
 // ── rows & bits ──
+
+/**
+ * Shown under an analyzer whose driver or param map BNM support changed
+ * remotely. Until "Verified" is pressed every result from it waits in the
+ * claim queue (see InstrumentEngine.VERIFY_PENDING_REASON), so a mapping
+ * typed from the office cannot land on a patient unchecked.
+ */
+@Composable
+private fun VerifyPendingRow(enabled: Boolean, onVerified: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth()
+            .background(VERIFY_AMBER_BG)
+            .padding(start = 60.dp, end = 14.dp, top = 8.dp, bottom = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Outlined.Verified, contentDescription = null, tint = VERIFY_AMBER_FG, modifier = Modifier.size(18.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                "Settings changed by BNM support — Verified?",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = VERIFY_AMBER_FG,
+            )
+            Text(
+                "Run one known sample and check its values against the order. Until then, " +
+                    "results from this analyzer wait in \"Waiting for an order\" instead of " +
+                    "filling in automatically." +
+                    if (!enabled) " Sign in to press Verified." else "",
+                style = MaterialTheme.typography.bodySmall,
+                color = VERIFY_AMBER_FG,
+            )
+        }
+        TextButton(onClick = onVerified, enabled = enabled) {
+            Text("Verified", color = VERIFY_AMBER_FG)
+        }
+    }
+}
+
+/** Amber, fixed rather than a theme role: it must read as "attention" in both themes. */
+private val VERIFY_AMBER_BG = Color(0xFFFFF3CD)
+private val VERIFY_AMBER_FG = Color(0xFF7A4F00)
 
 @Composable
 private fun InstrumentRow(

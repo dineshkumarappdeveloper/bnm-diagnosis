@@ -1,0 +1,36 @@
+# BNM Lab remote-support relay.
+#
+# One Worker, two Durable Object classes:
+#   LabSession       — one per support session (id = idFromName(session_id));
+#                      holds ≤ 1 lab socket + ≤ 1 support socket and pipes
+#                      text frames verbatim between them.
+#   SessionDirectory — one global instance (idFromName("v1")); maps the hash of
+#                      the spoken code to a session id and rate-limits joins.
+#
+# Secrets (wrangler secret put …, or .dev.vars locally — see .dev.vars.example):
+#   BNM_SUPPORT_TOKEN       required — bearer token the engineer's bridge sends
+#   LAB_LICENSE_PUBLIC_JWK  optional — overrides the licence public key in
+#                           src/keys.ts (the E2E starts dev with the TEST key)
+#   HELLO_TIMEOUT_MS        optional — how long a fresh socket may stay silent
+#                           before it is closed (default 10000)
+#
+# Deploy: `npm run deploy` (wrangler deploy). Never from a feature branch.
+
+name = "bnm-lab-relay"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[observability]
+enabled = true
+
+[[durable_objects.bindings]]
+name = "SESSIONS"
+class_name = "LabSession"
+
+[[durable_objects.bindings]]
+name = "DIRECTORY"
+class_name = "SessionDirectory"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LabSession", "SessionDirectory"]

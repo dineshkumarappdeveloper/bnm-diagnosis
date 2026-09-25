@@ -211,6 +211,21 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
         "image_base64 TEXT, PRIMARY KEY (order_id, test_id, kind))", 0)
     // Analyzer bitmap on a graph row (2026-09-08) — appended last, like Instruments.sq.
     driver.addColumn("lab_result_graphs", "image_base64", "TEXT")
+    // Remote support's "check one known sample first" flag (2026-09-25) —
+    // appended last, like Instruments.sq.
+    driver.addColumn("instruments", "verify_pending", "INTEGER NOT NULL DEFAULT 0")
+
+    // ── Remote support audit trail (SupportAudit.sq). Belongs to the computer,
+    // not the tenant — deliberately absent from TenantReset. ──
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS support_sessions (id TEXT NOT NULL PRIMARY KEY, " +
+        "started_at TEXT NOT NULL, ended_at TEXT, duration_s INTEGER NOT NULL, consent_json TEXT NOT NULL, " +
+        "started_by TEXT NOT NULL, started_by_name TEXT NOT NULL, end_reason TEXT)", 0)
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS support_audit (id TEXT NOT NULL PRIMARY KEY, session_id TEXT NOT NULL, " +
+        "at TEXT NOT NULL, tool TEXT NOT NULL, summary TEXT NOT NULL, outcome TEXT NOT NULL, " +
+        "ms INTEGER NOT NULL, started_by TEXT NOT NULL)", 0)
+    driver.execute(null, "CREATE INDEX IF NOT EXISTS support_audit_time ON support_audit(at)", 0)
 
     return AppDatabase(driver)
 }
