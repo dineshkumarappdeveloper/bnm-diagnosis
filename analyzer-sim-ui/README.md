@@ -4,8 +4,39 @@ The same simulator as [`../analyzer-sim`](../analyzer-sim/README.md), with a
 window instead of a command line. One installer, no terminal, no flags.
 
 This is a **front end, not a fork**: every frame, every fault and every byte on
-the wire comes from `:analyzer-sim`. The window and `java -jar analyzer-sim.jar`
-cannot drift into sending different things.
+the wire comes from `:analyzer-sim`, and the form is checked by the core's own
+`Cli.validate` before Send will do anything. The window and
+`java -jar analyzer-sim.jar` cannot drift into sending different things, or into
+refusing different ones.
+
+---
+
+## Safety — read this before you type an address
+
+**Everything this tool sends is invented, and BNM Lab cannot tell.** A frame
+names an accession; the app files the values onto the order with that accession,
+attributed to the instrument, and the result can then be approved, printed and
+handed to a patient. Nothing in the frame, the traffic log, the audit trail or
+the report says the numbers were generated.
+
+So the window:
+
+- refuses to send anywhere but this computer until you tick **"Yes, send
+  invented results to &lt;address&gt;"**, a red block that appears under the
+  address box the moment it stops being loopback. The tick is cleared whenever
+  the address changes — consent is per-target — and **no preset carries it**, so
+  a preset can never re-consent for you months later;
+- defaults the specimen id to `BNMTEST-0001`, which no accession series
+  produces. Keep test ids obviously fake: the app matches a bare number against
+  the tail of an accession, so an id of `42` will find `ACC-S1-00042` on the
+  lab's own series;
+- says in the transcript, before the first sample, anything the run will *not*
+  do — ticking QC on a Mispa, for instance, whose format has no field to carry
+  it.
+
+Rehearse on a **bench install or the Demo Store data**, never on a lab seeing
+patients. If you must prove something on a production machine, register a
+throwaway order and send to that accession only.
 
 ---
 
@@ -20,7 +51,8 @@ say *listening*. The simulator names the driver key you need, top left.
    follows (5500 / 5501) unless you typed your own, and the line underneath
    tells you exactly which instrument row the lab must have created.
 3. **Type the lab PC's address.** `127.0.0.1` if BNM Lab is on this machine,
-   otherwise its IP. Press **Test link** — it opens the connection and closes
+   otherwise its IP — and read the red consent block if one appears (see
+   Safety). Press **Test link** — it opens the connection and closes
    it again, sending nothing:
    - *Reached BNM Lab at 192.168.1.50:5500.* — the link is fine; anything that
      goes wrong from here is the frame, not the network.
@@ -43,7 +75,13 @@ say *listening*. The simulator names the driver key you need, top left.
 
 **Faults** is collapsed until you need it, and it is the reason the tool exists.
 Each checkbox says what it proves. They are the calls: half a frame, a dribbled
-cable, a barcode nobody keyed, a firmware code no driver has met.
+cable, a barcode nobody keyed, a firmware code no driver has met. On a serial
+link, *Truncated frame*, *Burst* and *Hang* grey out: all three are about a
+connection, and a cable has none — worse, a half frame on serial is never logged
+and merges with your next sample, losing both.
+
+**CBC only** (Mindray) is a run *mode*, not a display option: no differential
+rows at all, which is a different frame from "no histograms".
 
 **Stop** interrupts a run. It lands at the next gap between samples, so a sample
 already waiting out its ACK timeout finishes first — the button says

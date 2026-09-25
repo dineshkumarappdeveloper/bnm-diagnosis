@@ -93,7 +93,7 @@ class PresetStoreTest {
         assertEquals("10.0.0.4", loaded.host)
         assertEquals(Analyzer.MISPA, loaded.analyzer)
         // Missing keys fall back to the form's own defaults, not to nulls.
-        assertEquals("SIM-0001", loaded.sampleId)
+        assertEquals("BNMTEST-0001", loaded.sampleId)
     }
 
     @Test

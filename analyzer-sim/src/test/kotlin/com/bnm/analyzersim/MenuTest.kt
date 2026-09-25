@@ -4,6 +4,7 @@ import java.io.BufferedReader
 import java.io.StringReader
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -18,10 +19,12 @@ class MenuTest {
     /** Scenario 16, "print the frame, send nothing" — the only one safe to run with no listener. */
     private val dryRun = Menu.SCENARIOS.indexOfFirst { it.title.startsWith("Print the frame") } + 1
 
-    private fun drive(vararg answers: String): RecordingPrinter {
+    private fun drive(vararg answers: String): RecordingPrinter = driveExpecting(0, *answers)
+
+    private fun driveExpecting(code: Int, vararg answers: String): RecordingPrinter {
         val out = RecordingPrinter()
         val script = BufferedReader(StringReader(answers.joinToString("\n") + "\n"))
-        assertEquals(0, runCli(emptyList(), stdin = script, printerFor = { out }))
+        assertEquals(code, runCli(emptyList(), stdin = script, printerFor = { out }), out.text)
         return out
     }
 
@@ -45,7 +48,64 @@ class MenuTest {
     fun `mashing Enter takes every default`() {
         val out = drive("", dryRun.toString(), "", "", "")
         assertTrue(out.text.contains("TCP 127.0.0.1:5500") || out.text.contains("dry run"), out.text)
-        assertTrue(out.text.contains("SIM-0001"), "the default specimen id was not used:\n${out.text}")
+        assertTrue(out.text.contains("BNMTEST-0001"), "the default specimen id was not used:\n${out.text}")
+    }
+
+    /**
+     * The prompt lists the analyzers by name, so a name is the answer an
+     * engineer is most likely to type. It used to fall through to choice 1:
+     * "mispa" ran the Mindray, on the Mindray port, in HL7 — and the link that
+     * then refused to frame anything looked like a fault in the app.
+     */
+    @Test
+    fun `typing the analyzer's name picks that analyzer, not the first one`() {
+        val out = drive("mispa", dryRun.toString(), "0", "", "", "ACC-S1-00043")
+        assertTrue(out.text.contains("mispa_count_x"), "'mispa' did not select the Mispa:\n${out.text}")
+        assertTrue(out.text.contains("$$$"), "no Mispa frame in:\n${out.text}")
+    }
+
+    @Test
+    fun `an answer that is not on the list stops, rather than quietly picking the first choice`() {
+        val analyzer = driveExpecting(1, "sysmex")
+        assertTrue(analyzer.text.contains("not one of the choices"), analyzer.text)
+
+        // Scenario 1 SENDS a frame. Defaulting a typo to it would put a result
+        // on somebody's lab machine when the person meant something else.
+        val scenario = driveExpecting(1, "1", "the third one")
+        assertTrue(scenario.text.contains("not one of the numbers"), scenario.text)
+        assertTrue(!scenario.text.contains("Scenario:"), "it ran something anyway:\n${scenario.text}")
+    }
+
+    @Test
+    fun `the QC rehearsal is relabelled on the analyzer whose format has no QC field`() {
+        val qc = Menu.scenariosFor(Analyzer.MISPA).first { it.title.startsWith("QC run") }
+        assertTrue(qc.title.contains("Mindray only"), "offered as if it worked: ${qc.title}")
+        assertTrue(qc.note.contains("filed as a patient"), qc.note)
+        assertEquals("QC run", Menu.scenariosFor(Analyzer.MINDRAY).first { it.title.startsWith("QC run") }.title)
+        assertEquals(Menu.SCENARIOS.size, Menu.scenariosFor(Analyzer.MISPA).size,
+            "the numbering must mean the same thing on both analyzers")
+    }
+
+    /** Sending invented results to somebody else's machine takes a typed YES. */
+    @Test
+    fun `a host that is not this machine has to be confirmed in words`() {
+        val refused = driveExpecting(1, "1", dryRun.toString(), "192.168.1.50")
+        assertTrue(refused.text.contains("not this machine"), refused.text)
+        assertTrue(refused.text.contains("Nothing was sent"), refused.text)
+
+        val allowed = drive("1", dryRun.toString(), "192.168.1.50", "yes", "", "ACC-S1-00042")
+        assertTrue(allowed.text.contains("MSH|^~"), "a confirmed run should still go ahead:\n${allowed.text}")
+    }
+
+    /** A fault that needs a connection cannot be rehearsed down a cable, and the
+     *  menu must refuse it in the same words the command line does. */
+    @Test
+    fun `the menu refuses a scenario the chosen link cannot carry`() {
+        val truncated = Menu.SCENARIOS.indexOfFirst { it.title == "Truncated frame" } + 1
+        val options = Menu.SCENARIOS[truncated - 1]
+            .apply(Options(analyzer = Analyzer.MISPA, serialPort = "COM3"))
+        val error = assertFailsWith<CliError> { Cli.validate(options) }
+        assertTrue(error.message!!.contains("merge with your next sample"), error.message!!)
     }
 
     @Test

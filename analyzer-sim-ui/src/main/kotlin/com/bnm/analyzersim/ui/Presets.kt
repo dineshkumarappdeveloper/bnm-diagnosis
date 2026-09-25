@@ -29,7 +29,7 @@ data class PresetJson(
     val port: String = "5500",
     @SerialName("serial_port") val serialPort: String = "",
     val baud: String = "115200",
-    @SerialName("sample_id") val sampleId: String = "SIM-0001",
+    @SerialName("sample_id") val sampleId: String = "BNMTEST-0001",
     @SerialName("auto_increment_id") val autoIncrementId: Boolean = true,
     val count: String = "1",
     @SerialName("interval_seconds") val intervalSeconds: String = "0",
@@ -38,6 +38,7 @@ data class PresetJson(
     @SerialName("patient_id") val patientId: String = "",
     val qc: Boolean = false,
     val histograms: Boolean = true,
+    @SerialName("cbc_only") val cbcOnly: Boolean = false,
     val image: Boolean = false,
     val seed: String = "1",
     val truncated: Boolean = false,
@@ -73,7 +74,11 @@ data class PresetJson(
             patientId = patientId,
             qc = qc,
             histograms = histograms,
+            cbcOnly = cbcOnly,
             image = image,
+            // liveLab is deliberately NOT restored: consent to write invented
+            // results to another machine is given for one run, by hand. A
+            // preset that carried it would re-consent silently, months later.
             seed = seed,
             faults = FaultForm(
                 truncated = truncated,
@@ -109,6 +114,7 @@ data class PresetJson(
             patientId = f.patientId,
             qc = f.qc,
             histograms = f.histograms,
+            cbcOnly = f.cbcOnly,
             image = f.image,
             seed = f.seed,
             truncated = f.faults.truncated,

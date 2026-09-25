@@ -99,6 +99,42 @@ class TranscriptTest {
         assertEquals(BlockTone.OK, blocks.single().tone)
     }
 
+    @Test
+    fun `a live-lab run opens with the warning, above everything`() {
+        val blocks = applyEvent(emptyList(), SimEvent.Started(runStart().copy(
+            liveLabWarning = "  " + "!".repeat(66) + "\n" +
+                "  ! SENDING TO ANOTHER MACHINE: 192.168.1.50\n" +
+                "  ! These results are invented.\n" +
+                "  " + "!".repeat(66),
+        )))
+        assertEquals(2, blocks.size)
+        assertEquals(BlockTone.FAILED, blocks[1].tone)
+        assertTrue(blocks[1].title.contains("another machine"))
+        assertTrue(blocks[1].lines.any { it.contains("192.168.1.50") }, "${blocks[1].lines}")
+        // The terminal's rows of "!" are framing for a monospace console; a
+        // window has colour, and empty bars would push the sentences down.
+        assertTrue(blocks[1].lines.none { it.isBlank() || it.all { c -> c == '!' } }, "${blocks[1].lines}")
+    }
+
+    @Test
+    fun `a switch that does nothing says so before the first sample`() {
+        val caveat = "--qc changes nothing on this link. The Mispa Count X format carries no processing-id field."
+        val blocks = applyEvent(emptyList(), SimEvent.Started(runStart().copy(caveats = listOf(caveat))))
+        assertEquals(BlockTone.FAILED, blocks[1].tone)
+        assertEquals(listOf(caveat), blocks[1].lines)
+    }
+
+    @Test
+    fun `a Mispa sample never claims to be a QC run`() {
+        // The core sets qc=false on a link whose format cannot carry it; the
+        // transcript must then not print a QC line the engineer would tick off.
+        val blocks = applyEvent(
+            applyEvent(emptyList(), SimEvent.Started(runStart())),
+            SimEvent.Sample(sample(0, 1, "ACC-S1-00042")),
+        )
+        assertTrue(blocks.last().lines.none { it.contains("QC") }, "${blocks.last().lines}")
+    }
+
     // ── fixtures ──
 
     private fun runStart() = RunStart(

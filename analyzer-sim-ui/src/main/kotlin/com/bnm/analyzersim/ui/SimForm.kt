@@ -2,6 +2,7 @@ package com.bnm.analyzersim.ui
 
 import com.bnm.analyzersim.Analyzer
 import com.bnm.analyzersim.Cli
+import com.bnm.analyzersim.CliError
 import com.bnm.analyzersim.Faults
 import com.bnm.analyzersim.Options
 import com.bnm.analyzersim.Profile
@@ -29,7 +30,9 @@ data class SimForm(
     val port: String = Analyzer.MINDRAY.defaultPort.toString(),
     val serialPort: String = "",
     val baud: String = "115200",
-    val sampleId: String = "SIM-0001",
+    /** Self-identifying on purpose: an id that could pass for a real accession
+     *  is one tail-match away from a patient's order. */
+    val sampleId: String = "BNMTEST-0001",
     /** Bump the trailing number after every run, so a five-sample rehearsal
      *  does not file five results onto one accession. */
     val autoIncrementId: Boolean = true,
@@ -40,10 +43,23 @@ data class SimForm(
     val patientId: String = "PAT-9001",
     val qc: Boolean = false,
     val histograms: Boolean = true,
+    /** Mindray run mode CBC — no differential rows at all, not merely no curves. */
+    val cbcOnly: Boolean = false,
     val image: Boolean = false,
     val seed: String = "1",
     val faults: FaultForm = FaultForm(),
+    /**
+     * Ticked by hand, for this form, to send invented results to ANOTHER
+     * machine. Deliberately not saved by a preset and cleared whenever the
+     * address changes: consent is per-target, and a preset that carried it
+     * would be a preset that silently re-consents.
+     */
+    val liveLab: Boolean = false,
 ) {
+
+    /** Whether this run would leave this computer. */
+    val sendsToAnotherMachine: Boolean
+        get() = transport == TransportKind.TCP && host.isNotBlank() && !Cli.isLoopback(host)
 
     /** RS-232 is a Mispa-only link — see [serialRefusal]. */
     val serialAllowed: Boolean get() = analyzer == Analyzer.MISPA
@@ -78,6 +94,10 @@ data class SimForm(
     fun withTransport(next: TransportKind): SimForm =
         if (next == TransportKind.SERIAL && !serialAllowed) this else copy(transport = next)
 
+    /** Typing in the address box withdraws consent given for the old one. */
+    fun withHost(next: String): SimForm =
+        copy(host = next, liveLab = if (next.trim() == host.trim()) liveLab else false)
+
     /** What the run will use, once [problems] is empty. */
     fun toOptions(): Options = Options(
         analyzer = analyzer,
@@ -93,6 +113,7 @@ data class SimForm(
         patientId = patientId.trim().ifBlank { null },
         qc = qc,
         histograms = histograms,
+        cbcOnly = cbcOnly && analyzer == Analyzer.MINDRAY,
         image = image,
         seed = seed.trim().toLongOrNull() ?: 1L,
         unknownCode = faults.unknownCode,
@@ -106,6 +127,7 @@ data class SimForm(
             burst = if (faults.burst) faults.burstCount.trim().toIntOrNull() ?: 5 else 0,
             hang = faults.hang,
         ),
+        liveLab = liveLab,
     )
 
     /** The form after a run, with the id advanced if the engineer asked for that. */
@@ -152,10 +174,30 @@ data class SimForm(
             if (n == null || n !in 1..100) add(FormProblem(FormField.BURST,
                 "How many connections at once, 1 to 100."))
         }
+        // Then the core's own refusals, rather than a second copy of them here.
+        // Cli.validate is the ONE gate — the live-lab consent, the three faults
+        // that need a connection a cable has not got, CBC-only on a 3-part
+        // analyzer. A rule added there reaches this window with no edit.
+        if (isEmpty()) {
+            try {
+                Cli.validate(toOptions())
+            } catch (e: CliError) {
+                add(FormProblem(fieldFor(e.message.orEmpty()), e.message.orEmpty()))
+            }
+        }
     }
 
     /** The first complaint about [field], for the box's own error line. */
     fun problem(field: FormField): String? = problems().firstOrNull { it.field == field }?.message
+
+    /** Put a core refusal under the control it is about, so it is read. */
+    private fun fieldFor(message: String): FormField = when {
+        "--live-lab" in message -> FormField.LIVE_LAB
+        "--truncated" in message || "--burst" in message || "--hang" in message -> FormField.FAULTS
+        "--cbc-only" in message -> FormField.CBC_ONLY
+        "--serial" in message || "serial" in message -> FormField.SERIAL_PORT
+        else -> FormField.HOST
+    }
 }
 
 /** The deliberate misbehaviours, as checkboxes. */
@@ -182,7 +224,14 @@ data class FaultForm(
 }
 
 /** Which box a complaint belongs under. */
-enum class FormField { HOST, PORT, SERIAL_PORT, BAUD, SAMPLE_ID, COUNT, INTERVAL, SEED, SLOW_CHUNKS, BURST }
+enum class FormField {
+    HOST, PORT, SERIAL_PORT, BAUD, SAMPLE_ID, COUNT, INTERVAL, SEED, SLOW_CHUNKS, BURST,
+    /** The consent tick that has to be given before a run leaves this computer. */
+    LIVE_LAB,
+    /** A fault the chosen link cannot carry. */
+    FAULTS,
+    CBC_ONLY,
+}
 
 data class FormProblem(val field: FormField, val message: String)
 
@@ -197,7 +246,7 @@ data class FormProblem(val field: FormField, val message: String)
 fun nextSampleId(id: String): String {
     val trimmed = id.trim()
     val digits = trimmed.takeLastWhile { it.isDigit() }
-    if (digits.isEmpty()) return if (trimmed.isEmpty()) "SIM-0002" else "$trimmed-2"
+    if (digits.isEmpty()) return if (trimmed.isEmpty()) "BNMTEST-0002" else "$trimmed-2"
     val stem = trimmed.dropLast(digits.length)
     val next = (digits.toLongOrNull() ?: 0L) + 1
     return stem + next.toString().padStart(digits.length, '0')

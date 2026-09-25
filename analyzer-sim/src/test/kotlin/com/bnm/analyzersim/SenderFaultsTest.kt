@@ -29,6 +29,9 @@ class SenderFaultsTest {
         }
     }
 
+    /** Whatever `--id` defaults to, so a change there does not silently rewrite these fixtures. */
+    private val defaultId = Options(analyzer = Analyzer.MINDRAY).ids.single()
+
     private val goodAck = SimMllp.wrap("MSH|^~\\&|BNM Lab||BC-5130|Mindray|20260101090001||ACK^R01|A1|P|2.3.1\rMSA|AA|SIM20260101090000001\r")
 
     private fun run(args: List<String>, capture: Capture, out: RecordingPrinter = RecordingPrinter()): Pair<Int, RecordingPrinter> {
@@ -69,7 +72,7 @@ class SenderFaultsTest {
         val capture = Capture(goodAck)
         val (_, out) = run(listOf("mindray", "--truncated"), capture)
         val sent = capture.allBytes.decodeToString()
-        val whole = MindrayFrames.frame(SampleSpec(specimenId = "SIM-0001", timestamp = "20260101090000")).size
+        val whole = MindrayFrames.frame(SampleSpec(specimenId = defaultId, timestamp = "20260101090000")).size
         assertTrue(sent.length < whole, "nothing was cut")
         assertTrue(sent.length > whole / 4, "cut so early the app would not even buffer a partial frame")
         assertTrue(SimMllp.EB !in sent, "a truncated frame must not carry the end-of-block byte")
@@ -110,7 +113,7 @@ class SenderFaultsTest {
         assertTrue(capture.writes.size > 100, "only ${capture.writes.size} writes — that is not a dribble")
         assertTrue(capture.writes.dropLast(1).all { it.size == 64 }, "pieces should be a fixed small size")
         val whole = MindrayFrames.frame(
-            SampleSpec(specimenId = "SIM-0001", image = true, timestamp = "20260101090000")).size
+            SampleSpec(specimenId = defaultId, image = true, timestamp = "20260101090000")).size
         assertEquals(whole, capture.allBytes.size, "reassembling the pieces must give the whole frame back")
         assertTrue(out.text.contains("pieces"), out.text)
     }
@@ -145,6 +148,54 @@ class SenderFaultsTest {
         val (_, out) = run(listOf("mindray"), capture)
         assertTrue(out.text.contains("mindray_hl7"),
             "an engineer who picked the wrong driver has to be able to see it:\n${out.text}")
+    }
+
+    /**
+     * `--qc` has nothing to set in the Mispa format. The transcript used to
+     * print "FAULTS: qc" and "· QC" over an ordinary patient frame, so an
+     * engineer ticked QC off the commissioning list having tested nothing —
+     * or filed a bug against the app for filing a patient result.
+     */
+    @Test
+    fun `qc on the Mispa says it changes nothing, and the transcript stops claiming otherwise`() {
+        val capture = Capture()
+        val (code, out) = run(listOf("mispa", "--qc", "--id", "ACC-S1-00042"), capture)
+        assertEquals(0, code)
+        assertTrue(out.text.contains("carries no processing-id field"), out.text)
+        assertTrue(out.text.contains("WILL file it as a patient result"), out.text)
+        assertTrue(!out.text.contains("· QC"), "the sample line still claims a QC run:\n${out.text}")
+        assertTrue(!out.text.contains("FAULTS: qc"), "the banner still claims a QC run:\n${out.text}")
+        // …and it really is byte-identical to the patient frame, which is why.
+        val plain = Capture()
+        run(listOf("mispa", "--id", "ACC-S1-00042"), plain)
+        assertTrue(capture.allBytes.contentEquals(plain.allBytes))
+    }
+
+    @Test
+    fun `qc on the Mindray is a real QC run and is still announced as one`() {
+        val capture = Capture(goodAck)
+        val (_, out) = run(listOf("mindray", "--qc", "--id", "ACC-S1-00042"), capture)
+        assertTrue(out.text.contains("· QC"), out.text)
+        assertTrue(out.text.contains("FAULTS: qc"), out.text)
+        assertTrue(capture.allBytes.decodeToString().contains("|Q|2.3.1"), "MSH-11 was not Q")
+    }
+
+    /** Pointing the tool at somebody else's machine has to be impossible to miss. */
+    @Test
+    fun `a live-lab run opens with a banner naming the machine and the accessions`() {
+        val capture = Capture(goodAck)
+        val (_, out) = run(
+            listOf("mindray", "--host", "192.168.1.50", "--live-lab", "--id", "ACC-S1-00042"), capture)
+        assertTrue(out.text.contains("SENDING TO ANOTHER MACHINE: 192.168.1.50"), out.text)
+        assertTrue(out.text.contains("These results are invented"), out.text)
+        assertTrue(out.text.contains("ACC-S1-00042"), "the banner must name what it will overwrite")
+    }
+
+    @Test
+    fun `a run against this machine keeps its banner short`() {
+        val capture = Capture(goodAck)
+        val (_, out) = run(listOf("mindray"), capture)
+        assertTrue(!out.text.contains("SENDING TO ANOTHER MACHINE"), out.text)
     }
 
     @Test

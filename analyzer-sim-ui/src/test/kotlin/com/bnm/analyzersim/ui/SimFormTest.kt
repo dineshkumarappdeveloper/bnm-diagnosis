@@ -172,4 +172,79 @@ class SimFormTest {
         val forced = mispa.copy(analyzer = Analyzer.MINDRAY)
         assertNull(forced.toOptions().serialPort)
     }
+
+    // ── the safety rules the core added, which a UI is exactly where they
+    // ── quietly stop applying. These run through Cli.validate, so they hold
+    // ── here because there is ONE gate, not a second copy of the rules.
+
+    @Test
+    fun `the default id is one no accession series can produce`() {
+        // "42" would tail-match ACC-S1-00042 on a real lab's own series.
+        assertEquals("BNMTEST-0001", SimForm().sampleId)
+        assertEquals("BNMTEST-0002", nextSampleId("BNMTEST-0001"))
+    }
+
+    @Test
+    fun `sending to another machine is refused until it is consented to, by hand`() {
+        val remote = SimForm().withHost("192.168.1.50")
+        assertTrue(remote.sendsToAnotherMachine)
+        val refusal = remote.problem(FormField.LIVE_LAB)
+        assertTrue(refusal != null, "a run at another machine must not be sendable: ${remote.problems()}")
+        assertTrue(refusal!!.contains("INVENTED"), refusal)
+        assertTrue(remote.copy(liveLab = true).problems().isEmpty())
+    }
+
+    @Test
+    fun `loopback is this machine and needs no consent`() {
+        for (host in listOf("127.0.0.1", "localhost", "127.1.2.3", "::1")) {
+            val f = SimForm().withHost(host)
+            assertTrue(!f.sendsToAnotherMachine, "$host should be this machine")
+            assertTrue(f.problems().isEmpty(), "$host: ${f.problems()}")
+        }
+    }
+
+    @Test
+    fun `changing the address withdraws the consent given for the old one`() {
+        val consented = SimForm().withHost("192.168.1.50").copy(liveLab = true)
+        assertTrue(consented.problems().isEmpty())
+        val moved = consented.withHost("192.168.1.51")
+        assertTrue(!moved.liveLab, "consent is per-target; a new address is a new decision")
+        assertTrue(moved.problem(FormField.LIVE_LAB) != null)
+        // Re-typing the same address is not a change.
+        assertTrue(consented.withHost("192.168.1.50").liveLab)
+    }
+
+    @Test
+    fun `a serial link refuses the three faults that need a connection`() {
+        val cable = SimForm().withAnalyzer(Analyzer.MISPA).withTransport(TransportKind.SERIAL)
+            .copy(serialPort = "COM3")
+        assertTrue(cable.problems().isEmpty())
+        for (f in listOf(FaultForm(truncated = true), FaultForm(burst = true), FaultForm(hang = true))) {
+            val refusal = cable.copy(faults = f).problem(FormField.FAULTS)
+            assertTrue(refusal != null, "a cable has no connection to $f: ${cable.copy(faults = f).problems()}")
+        }
+        // Over TCP the same three are fine.
+        val tcp = SimForm().copy(faults = FaultForm(truncated = true, hang = true))
+        assertNull(tcp.problem(FormField.FAULTS))
+    }
+
+    @Test
+    fun `CBC-only is a Mindray run mode and never reaches a 3-part analyzer`() {
+        assertTrue(SimForm().copy(cbcOnly = true).toOptions().cbcOnly)
+        // Even if the flag is forced on, the Mispa never receives it — it has no
+        // CBC-only mode, and Cli.validate would refuse the run outright.
+        val mispa = SimForm().withAnalyzer(Analyzer.MISPA).copy(cbcOnly = true)
+        assertTrue(!mispa.toOptions().cbcOnly)
+        assertTrue(mispa.problems().isEmpty())
+    }
+
+    @Test
+    fun `QC on a Mispa is allowed but is not a QC run — the core says so, not the form`() {
+        // The form does not block it: the value is telling an engineer WHY it
+        // does nothing, which the run's caveats do. What must not happen is the
+        // transcript claiming a QC run happened.
+        val mispa = SimForm().withAnalyzer(Analyzer.MISPA).copy(qc = true)
+        assertTrue(mispa.problems().isEmpty())
+        assertTrue(mispa.toOptions().qc)
+    }
 }

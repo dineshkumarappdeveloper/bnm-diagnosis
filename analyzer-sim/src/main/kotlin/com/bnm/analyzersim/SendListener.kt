@@ -51,10 +51,24 @@ data class RunStart(
     val samples: Int,
     val profile: Profile,
     val seed: Long,
+    /** Mindray run mode CBC — no differential at all, not merely no curves. */
+    val cbcOnly: Boolean = false,
     /** "" when the run is clean; otherwise "truncated, burst 5". */
     val faults: String,
-    /** "ACC-S1-0001 … ACC-S1-0005 (5)", or "none keyed (--no-specimen)". */
+    /** "BNMTEST-0001 … BNMTEST-0005 (5)", or "none keyed (--no-specimen)". */
     val specimenIds: String,
+    /**
+     * Set only when this run is aimed at another machine: the last thing
+     * between a re-run out of shell history and invented results filed onto a
+     * real patient's order. Show it where it cannot be missed.
+     */
+    val liveLabWarning: String? = null,
+    /**
+     * What this run will NOT do, however it was asked. A switch that is quietly
+     * a no-op is worse than a missing one — the engineer ticks it off the
+     * commissioning list having tested nothing.
+     */
+    val caveats: List<String> = emptyList(),
 )
 
 /** One sample, with the numbers it claims to have measured. */
@@ -64,6 +78,8 @@ data class SampleStarted(
     val total: Int,
     /** Null = nothing was keyed on the analyzer. */
     val specimenId: String?,
+    /** The frame really does mark this as control material. False on a Mispa
+     *  even when QC was asked for: that format has no field to carry it. */
     val qc: Boolean,
     val cbc: Cbc,
     /** The frame as a human can read it — see [Sender.render]. */
@@ -179,10 +195,15 @@ class PrintingSendListener(private val out: Printer) : SendListener {
             appendLine("BNM Analyzer Simulator — ${run.analyzer.label}")
             appendLine("  driver the lab must have selected: ${run.analyzer.driverKey}")
             appendLine("  link: ${run.link}")
-            appendLine("  samples: ${run.samples} · profile ${run.profile.cliName} · seed ${run.seed}")
+            appendLine("  samples: ${run.samples} · profile ${run.profile.cliName} · seed ${run.seed}" +
+                if (run.cbcOnly) " · CBC-only run (no differential)" else "")
             if (run.faults.isNotEmpty()) appendLine("  FAULTS: ${run.faults}")
+            // No trailing newline unless the warning follows: a banner that
+            // always ended in one put a second blank line before every sample.
             append("  specimen id(s): ${run.specimenIds}")
+            run.liveLabWarning?.let { appendLine(); append(it) }
         })
+        for (caveat in run.caveats) out.warn(caveat)
     }
 
     override fun sampleStarted(sample: SampleStarted) {

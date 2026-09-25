@@ -159,7 +159,11 @@ class Sender(
                 index = index,
                 total = o.samples,
                 specimenId = spec.specimenId,
-                qc = spec.qc,
+                // Not spec.qc: --qc on a Mispa changes no byte of the frame, and
+                // a transcript that says "QC" over a plain patient frame is read
+                // as "the app's QC handling was exercised". runStarted's caveats
+                // are where the engineer is told the flag did nothing.
+                qc = spec.qc && o.analyzer == Analyzer.MINDRAY,
                 cbc = spec.cbc,
                 frame = render(wire),
             )
@@ -247,6 +251,7 @@ class Sender(
         sequence = index + 1,
         qc = o.qc,
         histograms = o.histograms,
+        cbcOnly = o.cbcOnly,
         image = o.image,
         unknownCode = o.unknownCode,
         badUnits = o.badUnits,
@@ -285,9 +290,36 @@ class Sender(
         samples = o.samples,
         profile = o.profile,
         seed = o.seed,
+        cbcOnly = o.cbcOnly,
         faults = faultSummary(),
         specimenIds = if (o.noSpecimen) "none keyed (--no-specimen)" else summariseIds(),
+        liveLabWarning = if (!o.dryRun && !o.usesSerial && !Cli.isLoopback(o.host)) liveLabWarning() else null,
+        caveats = caveats(),
     )
+
+    /**
+     * What this run will NOT do, said before it does anything.
+     *
+     * A switch that is quietly a no-op is worse than a missing one: the
+     * engineer ticks it off the commissioning list having tested nothing.
+     */
+    private fun caveats(): List<String> = buildList {
+        if (o.qc && o.analyzer == Analyzer.MISPA) add(
+            "--qc changes nothing on this link. The Mispa Count X format carries no processing-id field, " +
+                "so this goes out as an ordinary patient frame and BNM Lab WILL file it as a patient " +
+                "result. QC handling can only be rehearsed on the Mindray link.")
+    }
+
+    /** The banner shown before a live-lab run, which is the only warning between
+     *  a shell-history re-run and synthetic results on a real patient's order. */
+    private fun liveLabWarning(): String =
+        "  " + "!".repeat(66) + "\n" +
+            "  ! SENDING TO ANOTHER MACHINE: ${o.host}\n" +
+            "  ! These results are invented. Once BNM Lab has filed them they are\n" +
+            "  ! indistinguishable from the analyzer's own: on the order with that\n" +
+            "  ! accession, attributed to the instrument, approvable, printable.\n" +
+            "  ! Specimen id(s): " + summariseIds() + "\n" +
+            "  " + "!".repeat(66)
 
     private fun summariseIds(): String =
         if (o.ids.size <= 3) o.ids.joinToString(", ")
@@ -303,7 +335,10 @@ class Sender(
         if (o.unknownCode) add("unknown-code")
         if (o.badUnits) add("bad-units")
         if (o.noSpecimen) add("no-specimen")
-        if (o.qc) add("qc")
+        // Only where it changes the frame: the Mispa has no QC field, and a
+        // summary line saying "qc" over a plain patient frame is a lie the
+        // engineer would take to mean the app's QC handling had been exercised.
+        if (o.qc && o.analyzer == Analyzer.MINDRAY) add("qc")
     }.joinToString(", ")
 
     private fun percentOf(part: Int, whole: Int): Int = if (whole == 0) 0 else part * 100 / whole

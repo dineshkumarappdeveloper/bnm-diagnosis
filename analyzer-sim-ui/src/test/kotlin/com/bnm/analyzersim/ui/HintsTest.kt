@@ -17,10 +17,22 @@ class HintsTest {
 
     @Test
     fun `the default form expects the claim queue, naming the id it will not match`() {
+        // BNMTEST-0001 is this tool's own placeholder — no accession series
+        // produces it, and the app tail-matches a bare number against a real one.
         assertEquals(
-            "Expect: Queued for manual claim — no order matches 'SIM-0001'.",
+            "Expect: Queued for manual claim — no order matches 'BNMTEST-0001'.",
             hint(SimForm()),
         )
+    }
+
+    @Test
+    fun `a CBC-only run says the report must show no differential, not zeros`() {
+        val h = hint(SimForm().copy(sampleId = "ACC-S1-00042", cbcOnly = true))
+        assertTrue(h.contains("no differential at all"), h)
+        // A 3-part analyzer has no such run mode to imitate, so claiming one
+        // would send an engineer looking for a report that cannot exist.
+        val mispa = hint(SimForm().withAnalyzer(Analyzer.MISPA).copy(sampleId = "ACC-S1-00042", cbcOnly = true))
+        assertTrue(!mispa.contains("differential"), mispa)
     }
 
     @Test

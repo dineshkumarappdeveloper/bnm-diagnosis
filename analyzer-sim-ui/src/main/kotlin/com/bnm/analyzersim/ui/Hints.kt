@@ -36,6 +36,8 @@ fun labExpectation(form: SimForm): String {
 
     val extras = buildList {
         if (f.slowChunks) add("The pieces must arrive as ONE result, not several.")
+        if (form.cbcOnly && form.analyzer == Analyzer.MINDRAY)
+            add("A CBC-only run: no differential at all, so the report must show none rather than zeros.")
         if (f.badUnits && form.analyzer == Analyzer.MINDRAY)
             add("Plus a red log row: \"Unit not converted — stored as the analyzer sent it\".")
         if (f.unknownCode) add(
@@ -67,10 +69,10 @@ private fun deliveryExpectation(form: SimForm): String {
             "so nothing tells BNM Lab this was control material."
     }
 
-    // SIM-xxxx is this tool's own placeholder, not an accession anyone
-    // registered, so the honest expectation is the claim queue.
+    // BNMTEST-xxxx is this tool's own placeholder — no accession series
+    // produces it — so the honest expectation is the claim queue.
     if (id.isEmpty()) return "Expect: Queued for manual claim — there is no accession on this frame."
-    if (id.startsWith("SIM-", ignoreCase = true))
+    if (id.startsWith("BNMTEST", ignoreCase = true))
         return "Expect: Queued for manual claim — no order matches '$id'."
 
     return "Expect: the result on the order with accession '$id' — " +

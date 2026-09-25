@@ -16,6 +16,8 @@ class CliTest {
         assertEquals("127.0.0.1", mindray.host)
         assertEquals(5500, mindray.port)
         assertEquals("mindray_hl7", mindray.analyzer.driverKey)
+        assertEquals(listOf("BNMTEST-0001"), mindray.ids,
+            "the default id must be unmistakably a test, never something an accession search could match")
         assertEquals(5501, parse("mispa").port)
         assertEquals("mispa_count_x", parse("mispa").analyzer.driverKey)
         assertEquals(115200, parse("mispa").baud, "8-N-1 at 115200 is what the vendor doc specifies")
@@ -74,6 +76,83 @@ class CliTest {
         assertTrue(e.message!!.contains("TCP-only"), "unhelpful message: ${e.message}")
     }
 
+    /**
+     * The one that can hurt somebody. The simulator writes invented results
+     * onto whatever accession it names, and BNM Lab files them exactly as it
+     * would the analyzer's own — so pointing it at a lab in production, from
+     * shell history or a mistyped octet, is the failure worth a gate.
+     */
+    @Test
+    fun `another machine's address is refused until it is asked for in as many words`() {
+        val refused = assertFailsWith<CliError> { parse("mindray", "--host", "192.168.1.50") }
+        assertTrue(refused.message!!.contains("--live-lab"), "unhelpful refusal: ${refused.message}")
+        assertTrue(refused.message!!.contains("INVENTED"), "it must say what is at stake: ${refused.message}")
+
+        assertEquals("192.168.1.50", parse("mindray", "--host", "192.168.1.50", "--live-lab").host)
+        // Nothing leaves the machine on a dry run, so nothing to gate.
+        assertEquals("192.168.1.50", parse("mindray", "--host", "192.168.1.50", "--dry-run").host)
+    }
+
+    @Test
+    fun `this machine is recognised however it is spelled, and nothing else is`() {
+        for (here in listOf("127.0.0.1", "localhost", "LOCALHOST", "127.1.2.3", "::1", "[::1]")) {
+            assertTrue(Cli.isLoopback(here), "$here is this machine")
+        }
+        for (elsewhere in listOf("192.168.1.50", "10.0.0.2", "lab-pc", "127.0.0", "0.0.0.0", "128.0.0.1")) {
+            assertTrue(!Cli.isLoopback(elsewhere), "$elsewhere was treated as this machine")
+        }
+    }
+
+    /**
+     * A serial cable has no connections, so the three faults that are ABOUT a
+     * connection cannot be rehearsed down one. `--truncated` is the dangerous
+     * one: the app keeps a single frame assembler for the whole serial listener,
+     * so the half frame never gets reported and merges with the next sample.
+     */
+    @Test
+    fun `the faults that need a connection are refused on a cable`() {
+        val truncated = assertFailsWith<CliError> { parse("mispa", "--serial", "COM3", "--truncated") }
+        assertTrue(truncated.message!!.contains("merge with your next sample"), truncated.message!!)
+        assertTrue(assertFailsWith<CliError> { parse("mispa", "--serial", "COM3", "--burst", "3") }
+            .message!!.contains("interleave"))
+        assertTrue(assertFailsWith<CliError> { parse("mispa", "--serial", "COM3", "--hang") }
+            .message!!.contains("nothing to rehearse"))
+        // Over TCP all three are exactly what the tool is for.
+        parse("mispa", "--truncated")
+        parse("mispa", "--burst", "3")
+        parse("mispa", "--hang")
+    }
+
+    @Test
+    fun `cbc-only is a Mindray run mode and is refused on the three-part analyzer`() {
+        assertTrue(parse("mindray", "--cbc-only").cbcOnly)
+        assertTrue(assertFailsWith<CliError> { parse("mispa", "--cbc-only") }
+            .message!!.contains("3-part"))
+    }
+
+    /**
+     * bash, zsh and Git Bash expand `{1..5}` before the JVM sees it, so the
+     * pattern the help text prints arrives as five loose words. Saying
+     * "Unknown option 'ACC-S1-0002'" to somebody who typed what we told them
+     * to type is the worst answer available.
+     */
+    @Test
+    fun `an argument the shell already expanded says so instead of 'unknown option'`() {
+        val e = assertFailsWith<CliError> {
+            parse("mispa", "--id", "ACC-S1-0001", "ACC-S1-0002", "ACC-S1-0003")
+        }
+        assertTrue(e.message!!.contains("expanded the braces"), e.message!!)
+        assertTrue(e.message!!.contains("quote it"), e.message!!)
+    }
+
+    @Test
+    fun `every id pattern the help text prints is quoted against the shell`() {
+        for (line in Cli.HELP.lines().filter { it.contains("{1..5}") }) {
+            assertTrue(line.contains("'ACC-S1-000{1..5}'"),
+                "an unquoted brace pattern a reader would copy verbatim: $line")
+        }
+    }
+
     @Test
     fun `bad input is refused in words`() {
         assertTrue(assertFailsWith<CliError> { parse("sysmex") }.message!!.contains("Unknown analyzer"))
@@ -107,6 +186,8 @@ class CliTest {
         val documented = Regex("--[a-z-]+").findAll(Cli.HELP).map { it.value }.toSet()
         for (flag in documented - setOf("--help", "--list-profiles")) {
             val args = when (flag) {
+                // Mindray-only switches, checked against the analyzer that has them.
+                "--cbc-only" -> listOf("mindray", flag)
                 "--host", "--serial", "--patient", "--patient-id", "--id", "--profile" ->
                     listOf("mispa", flag, defaultFor(flag))
                 "--port", "--baud", "--count", "--interval", "--seed", "--ack-timeout", "--slow-chunks", "--burst" ->
@@ -120,6 +201,7 @@ class CliTest {
     private fun defaultFor(flag: String) = when (flag) {
         "--profile" -> "normal"
         "--serial" -> "COM3"
+        "--host" -> "127.0.0.1"     // anything else needs --live-lab, which is its own test
         else -> "X"
     }
 }

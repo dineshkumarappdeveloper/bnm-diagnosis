@@ -109,7 +109,7 @@ class SimScreenRenderTest {
         state.replay(
             SimEvent.Started(RunStart(Analyzer.MINDRAY,
                 "TCP 192.168.1.50:5500 (the simulator dials out, as the analyzer does)",
-                2, Profile.NORMAL, 7L, "", "ACC-S1-00042, ACC-S1-00043")),
+                2, Profile.NORMAL, 7L, faults = "", specimenIds = "ACC-S1-00042, ACC-S1-00043")),
             SimEvent.Sample(sample(0, "ACC-S1-00042")),
             SimEvent.Bytes(BytesSent(0, 3519, "TCP 192.168.1.50:5500", false)),
             SimEvent.Ack(AckOutcome.Received(0, 12,
@@ -151,6 +151,24 @@ class SimScreenRenderTest {
         assertTrue(card.count(DANGER) > 60, "no error line under the port picker: ${card.count(DANGER)}")
     }
 
+    @Test
+    fun `pointed at another machine, with the consent not yet given`() {
+        val state = state()
+        state.edit { it.withHost("192.168.1.50") }
+        // The one state where a screenshot is worth more than an assertion: this
+        // block is all that stands between a re-run and invented results on a
+        // real patient's order, so it has to be impossible to miss.
+        assertTrue(state.form.sendsToAnotherMachine)
+        assertTrue(state.form.problem(FormField.LIVE_LAB) != null, "Send must be refused")
+
+        val image = render("05-live-lab-consent", state)
+        val card = image.getSubimage(0, 90, WIDTH - TRANSCRIPT_WIDTH, 420)
+        // Drawn on the error container, which is a broad wash of red — not a
+        // thin line of it the way an error message under a box would be.
+        assertTrue(card.count(DANGER_SOFT) > 6_000,
+            "the consent block is not drawn as a warning: ${card.count(DANGER_SOFT)} tinted pixels")
+    }
+
     private fun sample(index: Int, id: String) = SampleStarted(
         index = index, total = 2, specimenId = id, qc = false,
         cbc = cbcFor(Profile.NORMAL, 7L + index), frame = "MSH|…",
@@ -188,6 +206,7 @@ class SimScreenRenderTest {
         private const val HEIGHT = 700
         private const val PRIMARY = 0x16A34A        // emerald, the Send button and an OK bar
         private const val DANGER = 0xEF4444         // a failed bar
+        private const val DANGER_SOFT = 0xFEE2E2    // the live-lab consent block
         private const val EXPECTATION_TINT = 0xDCFCE7
         private const val TRANSCRIPT_WIDTH = 350
     }

@@ -62,7 +62,7 @@ data class TranscriptBlock(
  */
 fun applyEvent(blocks: List<TranscriptBlock>, event: SimEvent): List<TranscriptBlock> = when (event) {
 
-    is SimEvent.Started -> listOf(headerBlock(event.run))
+    is SimEvent.Started -> listOf(headerBlock(event.run)) + warningBlocks(event.run)
 
     is SimEvent.Sample -> blocks + TranscriptBlock(
         title = "[${event.sample.index + 1}/${event.sample.total}] " +
@@ -112,12 +112,36 @@ private fun headerBlock(run: RunStart): TranscriptBlock = TranscriptBlock(
     lines = buildList {
         add(run.link)
         add("driver the lab must have selected: ${run.analyzer.driverKey}")
-        add("${run.samples} sample(s) · profile ${run.profile.cliName} · seed ${run.seed}")
+        add("${run.samples} sample(s) · profile ${run.profile.cliName} · seed ${run.seed}" +
+            if (run.cbcOnly) " · CBC only" else "")
         add("specimen id(s): ${run.specimenIds}")
         if (run.faults.isNotEmpty()) add("FAULTS: ${run.faults}")
     },
     tone = BlockTone.NEUTRAL,
 )
+
+/**
+ * The warnings that come with a run, as their own blocks ahead of the first
+ * sample.
+ *
+ * Red, and above everything: a live-lab banner buried under four grey lines is
+ * a banner nobody reads, and a caveat ("--qc changes nothing on this link") is
+ * the difference between an engineer ticking QC off a commissioning list and
+ * knowing they have not tested it.
+ */
+private fun warningBlocks(run: RunStart): List<TranscriptBlock> = buildList {
+    run.liveLabWarning?.let {
+        add(TranscriptBlock(
+            title = "Sending invented results to another machine",
+            // The CLI's banner is drawn with rows of "!" for a terminal; a
+            // window has colour, and the sentences are what matter.
+            lines = it.lines().map { line -> line.trim().trim('!').trim() }.filter { line -> line.isNotEmpty() },
+            tone = BlockTone.FAILED,
+        ))
+    }
+    for (caveat in run.caveats) add(TranscriptBlock("This run will not do what you asked", listOf(caveat),
+        BlockTone.FAILED))
+}
 
 private fun summaryBlock(s: RunFinished): TranscriptBlock = when (s.kind) {
     RunKind.SEQUENTIAL -> TranscriptBlock(

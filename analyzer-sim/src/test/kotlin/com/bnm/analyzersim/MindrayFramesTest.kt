@@ -18,6 +18,7 @@ class MindrayFramesTest {
         id: String? = "ACC-S1-00042",
         qc: Boolean = false,
         histograms: Boolean = true,
+        cbcOnly: Boolean = false,
         image: Boolean = false,
         unknownCode: Boolean = false,
         badUnits: Boolean = false,
@@ -25,7 +26,7 @@ class MindrayFramesTest {
         profile: Profile = Profile.NORMAL,
     ) = SampleSpec(
         specimenId = id, patientId = "P-7", patientName = "Asha Menon", sex = "F", ageYears = 34,
-        profile = profile, seed = seed, qc = qc, histograms = histograms, image = image,
+        profile = profile, seed = seed, qc = qc, histograms = histograms, cbcOnly = cbcOnly, image = image,
         unknownCode = unknownCode, badUnits = badUnits, timestamp = "20260101090000",
     )
 
@@ -145,14 +146,45 @@ class MindrayFramesTest {
         }
     }
 
+    /**
+     * `--no-histograms` drops the CURVES. It is not a run mode: the analyzer
+     * still ran the differential, so Test Mode stays CBC+5DIFF and every
+     * five-part row is still in the message. Saying "CBC" over a message that
+     * carries NEU/LYM/MON/EOS/BAS would be a frame no BC-5130 emits, and a lab
+     * rehearsing "what does a CBC-only run look like" would learn nothing.
+     */
     @Test
-    fun `no-histograms drops every 15xxx row and says CBC instead of CBC+5DIFF`() {
+    fun `no-histograms drops every 15xxx row and leaves the run mode alone`() {
         val spec = spec(histograms = false)
-        assertEquals("CBC", obx(spec, "08003")!![5])
+        assertEquals("CBC+5DIFF", obx(spec, "08003")!![5])
+        assertNotNull(obx(spec, "770-8"), "the differential must still be there")
         val sideData = segments(spec).filter { seg ->
             seg.split('|').getOrNull(3)?.substringBefore('^')?.toIntOrNull()?.let { it in 15000..15299 } == true
         }
         assertTrue(sideData.isEmpty(), "still sent $sideData")
+    }
+
+    /** The real CBC-only run: no differential rows at all, and Test Mode says so. */
+    @Test
+    fun `cbc-only omits the whole differential and reports the run mode as CBC`() {
+        val spec = spec(cbcOnly = true)
+        assertEquals("CBC", obx(spec, "08003")!![5])
+        for (code in listOf("770-8", "751-8", "736-9", "731-0", "5905-5", "742-7",
+                "713-8", "711-2", "706-2", "704-7", "13046-8", "26477-0", "10000", "10001")) {
+            assertNull(obx(spec, code), "a CBC-only run still reported $code")
+        }
+        // The cell counts themselves are the point of the run and must remain.
+        for (code in listOf("6690-2", "789-8", "718-7", "4544-3", "777-3", "32623-1")) {
+            assertNotNull(obx(spec, code), "a CBC-only run lost $code")
+        }
+        assertEquals(MindrayFrames.parameters(spec).map { it.name },
+            MindrayFrames.parameters(spec).map { it.name }.distinct())
+        // The two alerts read off the differential cannot be raised without one.
+        val alerts = MindrayFrames.alerts(spec(cbcOnly = true, profile = Profile.LEUKOCYTOSIS)).map { it.second }
+        assertTrue("Left Shift?" !in alerts, "raised a differential alert with no differential: $alerts")
+        assertTrue("Leucocytosis" in alerts, "the WBC count still raises its own alert: $alerts")
+        // Curves are a separate question, and they still ride along.
+        assertNotNull(obx(spec, "15000"), "--cbc-only must not drop the histograms too")
     }
 
     // ── the bitmap ──

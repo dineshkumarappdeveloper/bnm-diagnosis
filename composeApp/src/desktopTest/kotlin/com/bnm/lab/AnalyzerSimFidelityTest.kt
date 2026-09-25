@@ -44,12 +44,14 @@ class AnalyzerSimFidelityTest {
         seed: Long = 17L,
         qc: Boolean = false,
         histograms: Boolean = true,
+        cbcOnly: Boolean = false,
         image: Boolean = false,
         unknownCode: Boolean = false,
         badUnits: Boolean = false,
     ) = SampleSpec(
         specimenId = id, patientId = "PAT-9001", patientName = "Asha Menon", sex = "F", ageYears = 34,
-        profile = profile, seed = seed, sequence = 7, qc = qc, histograms = histograms, image = image,
+        profile = profile, seed = seed, sequence = 7, qc = qc, histograms = histograms,
+        cbcOnly = cbcOnly, image = image,
         unknownCode = unknownCode, badUnits = badUnits, timestamp = stamp,
     )
 
@@ -95,12 +97,49 @@ class AnalyzerSimFidelityTest {
         assertEquals("", tail)
     }
 
+    /**
+     * Through the STREAMING extractor, not `parse` on a whole string.
+     *
+     * The engine never has the frame as a string: `InstrumentEngine` runs
+     * `extractFrameText` over an accumulating buffer and stops at the FIRST
+     * `###`. A no-histogram frame used to write four empty sections in a row —
+     * six hashes — so the extractor cut it at the first three: the disease
+     * flags never reached the driver and the tail stayed in the buffer to
+     * merge with the next sample. Calling `parse` on the whole string, as this
+     * test used to, is exactly the check that could not see it.
+     */
     @Test
-    fun `a Mispa frame with no histograms still parses, just without curves`() {
-        val spec = spec(Profile.NORMAL, histograms = false)
-        val frame = assertNotNull(MispaCountX.parse(MispaFrames.build(spec)))
-        assertEquals(MispaFrames.parameters(spec), frame.params)
-        assertTrue(frame.histograms.isEmpty(), "curves appeared from nowhere: ${frame.histograms.keys}")
+    fun `a Mispa frame with no histograms survives the streaming extractor, just without curves`() {
+        for (profile in profiles) {
+            val spec = spec(profile, histograms = false)
+            val text = MispaFrames.build(spec)
+            val (extracted, rest) = MispaCountX.extractFrameText(text)
+            assertEquals(text, extracted, "$profile: the app would read a shorter frame than was sent")
+            assertEquals("", rest, "$profile left bytes behind to poison the next sample")
+
+            val frame = assertNotNull(MispaCountX.parse(assertNotNull(extracted)), "$profile did not parse")
+            assertEquals(MispaFrames.parameters(spec), frame.params, "$profile parameters")
+            assertEquals(MispaFrames.diseaseFlags(spec), frame.diseaseFlags, "$profile disease flags")
+            assertTrue(frame.histograms.isEmpty(), "$profile: curves appeared from nowhere")
+            assertNull(frame.discriminators, "$profile: discriminators with no curves to read them off")
+        }
+    }
+
+    /**
+     * Two no-histogram frames back to back on one link. A frame that ends early
+     * does not merely lose itself — its tail is still in the buffer when the
+     * next sample arrives, and the two are read as one.
+     */
+    @Test
+    fun `two no-histogram frames on one stream stay two samples`() {
+        val one = MispaFrames.build(spec(Profile.NORMAL, histograms = false))
+        val two = MispaFrames.build(spec(Profile.ANAEMIA, id = "ACC-S1-00043", histograms = false))
+        val (first, rest) = MispaCountX.extractFrameText(one + two)
+        assertEquals(one, first)
+        val (second, tail) = MispaCountX.extractFrameText(rest)
+        assertEquals(two, second, "the second sample was swallowed by the first")
+        assertEquals("", tail)
+        assertEquals("ACC-S1-00043", assertNotNull(MispaCountX.parse(assertNotNull(second))).specimenId)
     }
 
     // ── Mindray BC-5x ──
@@ -164,6 +203,35 @@ class AnalyzerSimFidelityTest {
             Histograms.wbc(spec.cbc, spec.seed).lines.joinToString(",")
         }
         assertEquals(lines, frame.meta["wbc_lines"], "the WBC discriminators did not come back")
+    }
+
+    /**
+     * `--no-histograms` drops the curves; `--cbc-only` is the RUN mode. The two
+     * used to be the same switch, which put "Test Mode: CBC" on a message still
+     * carrying the full five-part differential — a frame no BC-5130 emits, and
+     * a lab rehearsing a CBC-only run never saw what the app does when the
+     * differential parameters are genuinely absent.
+     */
+    @Test
+    fun `a CBC-only run reaches the driver with no differential at all`() {
+        val full = spec(Profile.NORMAL)
+        val cbc = spec(Profile.NORMAL, cbcOnly = true)
+
+        val fullFrame = assertNotNull(MindrayBc5x.parse(MindrayFrames.build(full)))
+        assertEquals("CBC+5DIFF", fullFrame.meta["test_mode"], "dropping the curves is not a run mode")
+        assertNotNull(fullFrame.params["NEU%"], "a 5-part run must carry its differential")
+
+        val cbcFrame = assertNotNull(MindrayBc5x.parse(MindrayFrames.build(cbc)))
+        assertEquals("CBC", cbcFrame.meta["test_mode"])
+        for (name in listOf("NEU%", "NEU#", "LYM%", "LYM#", "MON%", "MON#", "EOS%", "EOS#", "BAS%", "BAS#")) {
+            assertNull(cbcFrame.params[name], "a CBC-only run still reported $name")
+        }
+        for (name in listOf("WBC", "RBC", "HGB", "HCT", "PLT")) {
+            assertNotNull(cbcFrame.params[name], "a CBC-only run lost $name")
+        }
+        // Still every value the simulator says it sent, for the rows it sent.
+        for (p in MindrayFrames.parameters(cbc)) assertEquals(p.value, cbcFrame.params[p.name], p.name)
+        assertEquals(setOf("wbc", "rbc", "plt"), cbcFrame.histograms.keys, "the curves are a separate question")
     }
 
     @Test

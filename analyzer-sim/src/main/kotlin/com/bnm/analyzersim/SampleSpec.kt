@@ -26,6 +26,13 @@ data class SampleSpec(
     /** A quality-control material run, not a patient (Mindray MSH-11 = "Q"). */
     val qc: Boolean = false,
     val histograms: Boolean = true,
+    /**
+     * A CBC-only run (Mindray "Test Mode" = CBC): the analyzer counted cells
+     * but ran no differential, so NEU/LYM/MON/EOS/BAS and the research flags
+     * are simply absent from the message. Orthogonal to [histograms], which
+     * only drops the curves.
+     */
+    val cbcOnly: Boolean = false,
     /** Attach the DIFF scattergram bitmap (Mindray only) — tens of KB, which
      *  is exactly why it is worth sending at least once during commissioning. */
     val image: Boolean = false,

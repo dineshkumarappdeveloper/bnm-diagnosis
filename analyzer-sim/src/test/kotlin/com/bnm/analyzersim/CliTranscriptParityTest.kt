@@ -47,8 +47,8 @@ class CliTranscriptParityTest {
                   specimen id(s): ACC-S1-00042
 
                 [1/1] ACC-S1-00042 · WBC 6.68 · RBC 4.82 · HGB 14.0 g/dL · PLT 256
-                ¤¤¤20260101090000¤1¤ACC-S1-00042¤0¤6.68¤4.82¤256¤14.0¤43.9¤91.1¤29.0¤31.9¤42.7¤13.6¤9.7¤32.1¤9.2¤58.7¤2.14¤0.61¤3.92¤0.25¤13.1¤25.9######N¤N¤N¤N¤N¤N¤N¤L¤N¤N¤N¤N¤N¤N¤N¤N¤N¤N¤N¤N###
-                  179 bytes out over dry run — nothing is sent
+                ¤¤¤20260101090000¤1¤ACC-S1-00042¤0¤6.68¤4.82¤256¤14.0¤43.9¤91.1¤29.0¤31.9¤42.7¤13.6¤9.7¤32.1¤9.2¤58.7¤2.14¤0.61¤3.92¤0.25¤13.1¤25.9# # # # # #N¤N¤N¤N¤N¤N¤N¤L¤N¤N¤N¤N¤N¤N¤N¤N¤N¤N¤N¤N###
+                  184 bytes out over dry run — nothing is sent
                 Done — 1 sample(s) sent.
                 """
             ),

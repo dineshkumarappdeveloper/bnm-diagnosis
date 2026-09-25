@@ -223,13 +223,15 @@ private fun LinkCard(state: SimState, form: SimForm) = SectionCard("The link") {
         }
     } else {
         Row(verticalAlignment = Alignment.Top) {
-            Field("PC running BNM Lab", form.host, { v -> state.edit { it.copy(host = v) } },
+            Field("PC running BNM Lab", form.host, { v -> state.edit { it.withHost(v) } },
                 Modifier.weight(1f), error = form.problem(FormField.HOST))
             Spacer(Modifier.width(8.dp))
             Field("Port", form.port, { v -> state.edit { it.copy(port = v) } },
                 Modifier.width(110.dp), error = form.problem(FormField.PORT))
         }
     }
+
+    if (form.sendsToAnotherMachine) LiveLabConsent(state, form)
 
     Spacer(Modifier.height(8.dp))
 
@@ -253,6 +255,42 @@ private fun LinkCard(state: SimState, form: SimForm) = SectionCard("The link") {
             "Opens the link and closes it again. Sends nothing, files nothing.",
             style = MaterialTheme.typography.bodySmall, color = SimMuted, modifier = Modifier.weight(1f),
         )
+    }
+}
+
+/**
+ * The one thing standing between a re-run and invented results on a real
+ * patient's order.
+ *
+ * Drawn in the error colour and never remembered: the tick is cleared the
+ * moment the address changes, and no preset carries it. A dialog would be worse
+ * — dialogs are dismissed by muscle memory, and this has to be READ.
+ */
+@Composable
+private fun LiveLabConsent(state: SimState, form: SimForm) {
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    ) {
+        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.Top) {
+            Checkbox(form.liveLab, { v -> state.edit { it.copy(liveLab = v) } })
+            Column(Modifier.padding(start = 2.dp, top = 10.dp)) {
+                Text(
+                    "Yes, send invented results to ${form.host.trim()}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+                Text(
+                    "That is not this computer. Once BNM Lab has filed these numbers they are " +
+                        "indistinguishable from the analyzer's own — on the order with that accession, " +
+                        "approvable, printable, with nothing anywhere to say they were generated. " +
+                        "A bench install, never a lab seeing patients.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
+        }
     }
 }
 
@@ -337,6 +375,12 @@ private fun SampleCard(state: SimState, form: SimForm) = SectionCard("The sample
             "Scattergram", form.image && form.analyzer == Analyzer.MINDRAY,
             enabled = form.analyzer == Analyzer.MINDRAY,
         ) { v -> state.edit { it.copy(image = v) } }
+        // A run MODE, not a display option: no differential rows at all. The
+        // Mispa is a 3-part analyzer and has no such mode to imitate.
+        Toggle(
+            "CBC only", form.cbcOnly && form.analyzer == Analyzer.MINDRAY,
+            enabled = form.analyzer == Analyzer.MINDRAY,
+        ) { v -> state.edit { it.copy(cbcOnly = v) } }
     }
 }
 
@@ -345,6 +389,11 @@ private fun SampleCard(state: SimState, form: SimForm) = SectionCard("The sample
 @Composable
 private fun FaultsCard(state: SimState, form: SimForm) {
     val f = form.faults
+    // Truncation, a burst and a hang are all about a CONNECTION, and a cable
+    // has none — the core refuses them on serial, so the boxes say why here
+    // rather than letting Send fail with a sentence about a tick three cards up.
+    val onCable = form.transport == TransportKind.SERIAL && form.serialAllowed
+    val cableNote = "needs a connection to act on; a serial cable has none"
     SectionCard(
         title = "Faults" + if (f.chosenCount > 0) "  ·  ${f.chosenCount} chosen" else "",
         trailing = {
@@ -360,8 +409,9 @@ private fun FaultsCard(state: SimState, form: SimForm) {
             )
             return@SectionCard
         }
-        Fault("Truncated frame", "Half a frame, then the connection closes. Nothing should be filed.",
-            f.truncated) { v -> state.edit { it.copy(faults = it.faults.copy(truncated = v)) } }
+        Fault("Truncated frame",
+            if (onCable) cableNote else "Half a frame, then the connection closes. Nothing should be filed.",
+            f.truncated, enabled = !onCable) { v -> state.edit { it.copy(faults = it.faults.copy(truncated = v)) } }
         Fault("Garbage bytes", "Not a frame at all. The bytes should count; the frame counter should not.",
             f.garbage) { v -> state.edit { it.copy(faults = it.faults.copy(garbage = v)) } }
         Fault("Slow chunks", "64-byte pieces with a gap — a slow USB-serial adapter. Tests reassembly.",
@@ -377,13 +427,14 @@ private fun FaultsCard(state: SimState, form: SimForm) {
             f.noSpecimen) { v -> state.edit { it.copy(faults = it.faults.copy(noSpecimen = v)) } }
         Fault("Duplicate frame", "A retransmit the analyzer did not believe was ACKed. Must not double-apply.",
             f.duplicate) { v -> state.edit { it.copy(faults = it.faults.copy(duplicate = v)) } }
-        Fault("Burst", "Several analyzers at once. Proves no connection is dropped.",
-            f.burst, trailing = {
+        Fault("Burst", if (onCable) cableNote else "Several analyzers at once. Proves no connection is dropped.",
+            f.burst, enabled = !onCable, trailing = {
                 Field("n", f.burstCount, { v -> state.edit { it.copy(faults = it.faults.copy(burstCount = v)) } },
                     Modifier.width(70.dp), enabled = f.burst, error = form.problem(FormField.BURST))
             }) { v -> state.edit { it.copy(faults = it.faults.copy(burst = v)) } }
-        Fault("Hang", "Connect, send nothing, hold the socket — wired up, but nobody pressed Send.",
-            f.hang) { v -> state.edit { it.copy(faults = it.faults.copy(hang = v)) } }
+        Fault("Hang",
+            if (onCable) cableNote else "Connect, send nothing, hold the socket — wired up, but nobody pressed Send.",
+            f.hang, enabled = !onCable) { v -> state.edit { it.copy(faults = it.faults.copy(hang = v)) } }
     }
 }
 
@@ -392,13 +443,15 @@ private fun Fault(
     title: String,
     proves: String,
     checked: Boolean,
+    enabled: Boolean = true,
     trailing: @Composable (() -> Unit)? = null,
     onCheck: (Boolean) -> Unit,
 ) {
     Row(Modifier.fillMaxWidth().padding(vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
-        Checkbox(checked, onCheck)
+        Checkbox(checked, onCheck, enabled = enabled)
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyMedium)
+            Text(title, style = MaterialTheme.typography.bodyMedium,
+                color = if (enabled) MaterialTheme.colorScheme.onSurface else SimMuted)
             Text(proves, style = MaterialTheme.typography.bodySmall, color = SimMuted)
         }
         trailing?.invoke()
