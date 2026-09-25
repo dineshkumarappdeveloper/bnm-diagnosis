@@ -20,6 +20,19 @@ name = "bnm-lab-relay"
 main = "src/index.ts"
 compatibility_date = "2026-08-01"
 
+# The app dials THIS host and nothing else: `Constants.REMOTE_RELAY_URL` in the
+# lab app is `wss://lab-relay.bnmapp.com`, compiled into every installer, and a
+# shipped build cannot be talked out of it. Without this binding `wrangler
+# deploy` would publish the Worker at bnm-lab-relay.<subdomain>.workers.dev and
+# every owner who pressed "Start" in Help > Remote support would get an
+# UnknownHostException instead of a session. `custom_domain = true` makes
+# Cloudflare create/own the DNS record for the hostname on deploy, so the route
+# ships with the code rather than living in somebody's dashboard.
+# RelayHostTest (composeApp desktopTest) fails if this and the constant drift.
+[[routes]]
+pattern = "lab-relay.bnmapp.com"
+custom_domain = true
+
 [observability]
 enabled = true
 

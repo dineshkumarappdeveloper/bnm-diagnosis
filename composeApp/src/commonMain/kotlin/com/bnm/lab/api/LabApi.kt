@@ -19,6 +19,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
@@ -76,6 +77,13 @@ sealed interface LabHeartbeatResult {
         val expiresAt: String?,
         val labName: String?,
         val seatNo: Int? = null,
+        /**
+         * `report_page_live` — has the app.bnmapp.com/r/ report page shipped?
+         * It decides which link a printed QR encodes (see `ReportShare`), and
+         * paper is permanent, so null ("this server said nothing") must leave
+         * the stored answer alone rather than read as false.
+         */
+        val reportPageLive: Boolean? = null,
     ) : LabHeartbeatResult
 
     /** 403 license_inactive | device_revoked — block creating new work. */
@@ -317,6 +325,7 @@ class LabApi(
                     expiresAt = obj.strField("expires_at"),
                     labName = obj.strField("lab_name"),
                     seatNo = obj?.get("seat_no")?.jsonPrimitive?.intOrNull,
+                    reportPageLive = obj?.get("report_page_live")?.jsonPrimitive?.booleanOrNull,
                 )
                 resp.status == HttpStatusCode.Unauthorized -> LabHeartbeatResult.InvalidSession
                 resp.status == HttpStatusCode.Forbidden -> LabHeartbeatResult.Blocked(
