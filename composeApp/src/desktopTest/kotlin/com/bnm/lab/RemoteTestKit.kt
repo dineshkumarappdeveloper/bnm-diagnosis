@@ -123,6 +123,7 @@ internal class FakeToolHost : RemoteToolHost {
         ToolSpec("boom", "Throws.", SCHEMA, readOnly = false, destructive = true),
         ToolSpec("refuse.me", "Refuses.", SCHEMA, readOnly = false, destructive = true),
         ToolSpec("fail.me", "Fails.", SCHEMA, readOnly = true, destructive = false),
+        ToolSpec("fail.quietly", "Fails with a detail the audit must not keep.", SCHEMA, readOnly = true, destructive = false),
         ToolSpec("big", "Too much.", SCHEMA, readOnly = true, destructive = false),
         ToolSpec("long.summary", "Over-long audit summary.", SCHEMA, readOnly = true, destructive = false),
     )
@@ -136,6 +137,8 @@ internal class FakeToolHost : RemoteToolHost {
             "boom" -> throw IllegalStateException("patient Jane Doe exploded") // must not reach the wire or the audit
             "refuse.me" -> ToolResult.Refused("Analyzer is busy — a frame arrived 3 s ago")
             "fail.me" -> ToolResult.Failed("Port COM3 could not be opened")
+            // What db.query does with a driver error: the engineer gets the detail, the audit a fixed line.
+            "fail.quietly" -> ToolResult.Failed("no such column: Kavitha", summaryForAudit = "SQL error")
             "big" -> ToolResult.Ok(text("x".repeat(950_000)), "big")
             "long.summary" -> ToolResult.Ok(text("ok"), "s".repeat(500))
             else -> ToolResult.Failed("no such tool in the fake")

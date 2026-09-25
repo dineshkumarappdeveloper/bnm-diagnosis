@@ -28,6 +28,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -391,6 +392,63 @@ class RemoteToolsTest {
             val meta = payload(b.call("db.query", """{"sql":"SELECT count(*) AS n FROM instruments"}""", NONE))
             assertEquals("0", meta.jsonObject.getValue("rows").jsonArray[0].jsonArray[0].jsonPrimitive.content)
             assertIs<ToolResult.Failed>(b.call("db.query", """{"sql":"SELECT * FROM no_such_table"}""", ALL))
+        } finally { b.close() }
+    }
+
+    @Test
+    fun `db query - frames need the analyzer tick and staff the records one, PIN hashes never leave, errors carry no literal`() = runBlocking<Unit> {
+        val b = Bench()
+        try {
+            val order = b.newOrder()
+            val cfg = b.hl7()
+            b.ingest(cfg, oru(order.accessionNo))
+            b.driver.execute(null, "INSERT INTO staff(id, name, role, pin_hash, active, created_at, updated_at, signature_png, registration_no) " +
+                "VALUES ('owner-1', 'Dr. Meena Rao', 'owner', 's1\$salt\$deadbeef', 1, 'a', 'b', 'iVBORw0KGgo=', 'TN-12345')", 0)
+
+            // The raw frame — the bytes instruments.log only shares scrubbed and
+            // under analyzer-data consent — is not one SELECT away, and records
+            // consent is not the tick that opens it.
+            val sql = """{"sql":"SELECT raw FROM instrument_log WHERE direction = 'rx'"}"""
+            val raw = b.call("db.query", sql, NONE)
+            assertIs<ToolResult.Refused>(raw)
+            assertTrue("instrument_log" in raw.reason, raw.reason)
+            assertIs<ToolResult.Refused>(b.call("db.query", sql, SupportConsent(records = true)))
+            val shared = payload(b.call("db.query", sql, SupportConsent(analyzerData = true)))
+            assertTrue("PID" in shared.toString(), "with the analyzer tick the frame comes through: $shared")
+
+            // Staff go the other way: the records tick, and the analyzer one does nothing for them.
+            val staff = b.call("db.query", """{"sql":"SELECT id, name, role FROM staff"}""", NONE)
+            assertIs<ToolResult.Refused>(staff)
+            assertTrue("staff" in staff.reason, staff.reason)
+            assertIs<ToolResult.Refused>(b.call("db.query", """{"sql":"SELECT id, name FROM staff"}""", SupportConsent(analyzerData = true)))
+
+            // Even with every box ticked, the PIN hash and the signature are refused by name…
+            val pin = b.call("db.query", """{"sql":"SELECT id, pin_hash FROM staff"}""", ALL)
+            assertIs<ToolResult.Refused>(pin)
+            assertTrue("pin_hash" in pin.reason, pin.reason)
+            assertIs<ToolResult.Refused>(b.call("db.query", """{"sql":"SELECT signature_png FROM staff"}""", ALL))
+            // …and blanked when a SELECT * would carry them.
+            val star = payload(b.call("db.query", """{"sql":"SELECT * FROM staff"}""", ALL))
+            val columns = star.jsonObject.getValue("columns").jsonArray.map { it.jsonPrimitive.content }
+            val row = star.jsonObject.getValue("rows").jsonArray[0].jsonArray.map { (it as? JsonPrimitive)?.contentOrNull }
+            assertEquals(DbQueryGuard.HIDDEN_CELL, row[columns.indexOf("pin_hash")])
+            assertEquals(DbQueryGuard.HIDDEN_CELL, row[columns.indexOf("signature_png")])
+            assertEquals("Dr. Meena Rao", row[columns.indexOf("name")], "everything else in the row is what was asked for")
+            assertEquals(listOf("pin_hash", "signature_png"), star.jsonObject.getValue("hidden_columns").jsonArray.map { it.jsonPrimitive.content })
+            assertFalse("deadbeef" in star.toString() || "iVBOR" in star.toString())
+
+            // An unterminated literal: SQLite echoes it back, the tool does not…
+            val broken = b.call("db.query", """{"sql":"SELECT * FROM patients WHERE name = 'Kavitha Raman"}""", ALL)
+            assertIs<ToolResult.Failed>(broken)
+            assertTrue(broken.message.startsWith("SQL error — check the statement"), broken.message)
+            assertFalse("Kavitha" in broken.message, broken.message)
+            assertEquals(RemoteTools.AUDIT_SQL_ERROR, broken.summaryForAudit, "the audit row keeps a fixed line")
+            // …and a bare-word name, which has no quotes to strip, reaches the
+            // engineer but still not the audit row that outlives the session.
+            val bareWord = b.call("db.query", """{"sql":"SELECT * FROM patients WHERE name = Kavitha"}""", ALL)
+            assertIs<ToolResult.Failed>(bareWord)
+            assertEquals(RemoteTools.AUDIT_SQL_ERROR, bareWord.summaryForAudit)
+            assertFalse("Kavitha" in bareWord.summaryForAudit)
         } finally { b.close() }
     }
 

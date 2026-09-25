@@ -126,8 +126,9 @@ class RemoteTools(
             NO_ARGS, readOnly = true, destructive = false), ::catalogTests),
         Tool(ToolSpec("db.query",
             "Run ONE read-only SQL statement (SELECT / WITH / EXPLAIN / read PRAGMA) on a read-only connection, " +
-                "max 200 rows, strings cut at 2000 chars. Tables holding patient records are refused unless the " +
-                "owner allowed looking up records for this session.",
+                "max 200 rows, strings cut at 2000 chars, 30 s. Tables holding patient or staff records are refused " +
+                "unless the owner allowed looking up records for this session, the analyzer frame log unless the " +
+                "owner shared analyzer data; PIN hashes and signature images are never shared.",
             SCHEMA_QUERY, readOnly = true, destructive = false), ::dbQuery),
         Tool(ToolSpec("logs.tail",
             "The last N lines (max 500) of the activity log on the lab PC (already redacted), optionally for one " +
@@ -401,20 +402,42 @@ class RemoteTools(
     private suspend fun dbQuery(call: ToolCall, args: JsonObject): ToolResult {
         val sql = args.str("sql")?.takeIf { it.isNotBlank() } ?: return ToolResult.Failed("sql is required")
         val maxRows = DbQueryGuard.clampRows(args.int("max_rows"))
-        val records = call.session.consent.grants(ConsentKind.RECORDS)
-        when (val v = DbQueryGuard.check(sql, records)) {
+        // The whole consent, not one flag: records covers patients and staff,
+        // analyzer data covers the frame log.
+        when (val v = DbQueryGuard.check(sql, call.session.consent)) {
             is DbQueryGuard.Verdict.Refused -> return ToolResult.Refused(v.reason)
             DbQueryGuard.Verdict.Allowed -> Unit
         }
         val ro = readOnlySql ?: return ToolResult.Failed("Database queries are not available on this device")
-        val rs = ro.query(sql, maxRows)
+        val rs = try {
+            ro.query(sql, maxRows)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // The driver's message echoes the engineer's own text back (an
+            // unterminated literal, a bare-word name), so the audit row —
+            // which outlives the session and is shown in Support history —
+            // gets a fixed line and the engineer gets the detail.
+            return ToolResult.Failed(DbQueryGuard.describeError(e.message), summaryForAudit = AUDIT_SQL_ERROR)
+        }
+        // A `SELECT *` on staff would carry the PIN hash and the signature image
+        // past the identifier check; blank those cells whatever the consent.
+        val hidden = DbQueryGuard.hiddenColumns(rs.columns)
+        val blank = rs.columns.map { it in hidden }
         val payload = buildJsonObject {
             putJsonArray("columns") { rs.columns.forEach { add(it) } }
             putJsonArray("rows") {
-                for (row in rs.rows) add(JsonArray(row.map { cell -> cell?.let { JsonPrimitive(DbQueryGuard.cut(it)) } ?: JsonNull }))
+                for (row in rs.rows) add(JsonArray(row.mapIndexed { i, cell ->
+                    when {
+                        blank[i] && cell != null -> JsonPrimitive(DbQueryGuard.HIDDEN_CELL)
+                        cell != null -> JsonPrimitive(DbQueryGuard.cut(cell))
+                        else -> JsonNull
+                    }
+                }))
             }
             put("row_count", rs.rows.size)
             put("truncated", rs.truncated)
+            if (hidden.isNotEmpty()) putJsonArray("hidden_columns") { hidden.forEach { add(it) } }
         }
         // Table names only — the SQL text itself may name a patient in a WHERE clause.
         val tables = DbQueryGuard.tablesMentioned(sql, KNOWN_TABLES)
@@ -720,6 +743,9 @@ class RemoteTools(
         private const val TCP_PROBE_TIMEOUT_MS = 3_000L
         private const val QUEUED_PREFIX = "Queued for manual claim — "
         private val DAY = Regex("""\d{4}-\d{2}-\d{2}""")
+
+        /** What a failed db.query writes to the audit — never the driver's text, which quotes the SQL. */
+        const val AUDIT_SQL_ERROR = "SQL error"
 
         /** For the audit summary of db.query: which of these the SQL named. */
         private val KNOWN_TABLES = listOf(
