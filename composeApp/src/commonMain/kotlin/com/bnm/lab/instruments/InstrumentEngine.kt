@@ -655,11 +655,19 @@ class InstrumentEngine(
         logRow(cfg, "info", summary, null)
     }
 
-    /** A complete frame the driver returned null for. Masked excerpt: sample ids stay shapes. */
+    /**
+     * A complete frame the driver returned null for. The excerpt is scrubbed
+     * the way a shared raw frame is (names and demographics out — a Mispa
+     * PatientID is a typed name on some analyzers, and [FrameScrubber.maskIds]
+     * only masks tokens with a digit in them), then masked; this summary goes
+     * to the activity log, which is emailed and served by `logs.tail`. A driver
+     * without a scrubber gets no excerpt at all.
+     */
     private suspend fun frameNotUnderstood(cfg: InstrumentConfig, text: String) {
         update(cfg.id) { it.copy(framesIgnored = it.framesIgnored + 1) }
-        val excerpt = FrameScrubber.maskIds(text.take(120)).replace('\r', ' ').replace('\n', ' ')
-        logRow(cfg, "error", "Frame not understood by ${cfg.driver}: $excerpt", null)
+        val cleaned = FrameScrubber.scrubRaw(cfg.driver, text)
+        val excerpt = cleaned?.let { FrameScrubber.maskIds(it.take(120)).replace('\r', ' ').replace('\n', ' ') }
+        logRow(cfg, "error", "Frame not understood by ${cfg.driver}" + (excerpt?.let { ": $it" } ?: ""), null)
     }
 
     private var ackSeq = 0

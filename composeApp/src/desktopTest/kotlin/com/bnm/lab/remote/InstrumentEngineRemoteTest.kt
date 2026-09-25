@@ -147,8 +147,19 @@ class InstrumentEngineRemoteTest {
             // A readable one still parses and counts.
             b.sendRaw(cfg, mispa("SPEC-1"))
             assertEquals(1L, b.status(cfg).framesParsed)
+
+            // An aborted run: the head is filled — PatientID is a typed NAME on
+            // some analyzers — but the 20 params are blank, so the driver finds
+            // nothing. The excerpt must not carry the name into the activity log.
+            b.sendRaw(cfg, "\$\$\$2026-09-25\$17\$0\$RAMESH KUMAR\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$###")
+            val aborted = b.log().first { it.summary.startsWith("Frame not understood by mispa_count_x") && "2***9-25" in it.summary }
+            assertFalse("RAMESH" in aborted.summary, aborted.summary)
+            assertEquals(2L, b.status(cfg).framesIgnored)
         } finally { b.close() }
     }
+
+
+
 
     @Test
     fun `restart(id) rebinds only that listener and keeps its counters`() = runBlocking<Unit> {
