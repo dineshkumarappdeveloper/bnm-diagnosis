@@ -184,8 +184,13 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
     driver.execute(null,
         "CREATE TABLE IF NOT EXISTS lab_reports (order_id TEXT NOT NULL PRIMARY KEY, " +
         "token TEXT NOT NULL, accession_no TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', " +
-        "published_at TEXT, expires_at TEXT, sha256 TEXT, created_at TEXT NOT NULL, updated_at TEXT)", 0)
+        "published_at TEXT, expires_at TEXT, sha256 TEXT, created_at TEXT NOT NULL, updated_at TEXT, " +
+        "attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT)", 0)
     driver.execute(null, "CREATE UNIQUE INDEX IF NOT EXISTS lab_reports_token ON lab_reports(token)", 0)
+    // Upload retries (2026-09-15) — appended after updated_at, in the SAME
+    // order as LabReports.sq (SELECT * maps positionally).
+    driver.addColumn("lab_reports", "attempts", "INTEGER NOT NULL DEFAULT 0")
+    driver.addColumn("lab_reports", "next_attempt_at", "TEXT")
 
     // ── I0/I1: analyzer interfacing (instruments + traffic log + claim queue
     // + measured result graphs) ──
@@ -211,6 +216,23 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
         "image_base64 TEXT, PRIMARY KEY (order_id, test_id, kind))", 0)
     // Analyzer bitmap on a graph row (2026-09-08) — appended last, like Instruments.sq.
     driver.addColumn("lab_result_graphs", "image_base64", "TEXT")
+    // Remote support's "check one known sample first" flag (2026-09-25) —
+    // appended last, like Instruments.sq.
+    driver.addColumn("instruments", "verify_pending", "INTEGER NOT NULL DEFAULT 0")
+    // The analyzer's own address for the Link check's ping (2026-09-25) — appended last.
+    driver.addColumn("instruments", "analyzer_host", "TEXT")
+
+    // ── Remote support audit trail (SupportAudit.sq). Belongs to the computer,
+    // not the tenant — deliberately absent from TenantReset. ──
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS support_sessions (id TEXT NOT NULL PRIMARY KEY, " +
+        "started_at TEXT NOT NULL, ended_at TEXT, duration_s INTEGER NOT NULL, consent_json TEXT NOT NULL, " +
+        "started_by TEXT NOT NULL, started_by_name TEXT NOT NULL, end_reason TEXT)", 0)
+    driver.execute(null,
+        "CREATE TABLE IF NOT EXISTS support_audit (id TEXT NOT NULL PRIMARY KEY, session_id TEXT NOT NULL, " +
+        "at TEXT NOT NULL, tool TEXT NOT NULL, summary TEXT NOT NULL, outcome TEXT NOT NULL, " +
+        "ms INTEGER NOT NULL, started_by TEXT NOT NULL)", 0)
+    driver.execute(null, "CREATE INDEX IF NOT EXISTS support_audit_time ON support_audit(at)", 0)
 
     return AppDatabase(driver)
 }

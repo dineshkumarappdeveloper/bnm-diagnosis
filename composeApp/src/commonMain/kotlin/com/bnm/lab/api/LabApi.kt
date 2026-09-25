@@ -537,8 +537,13 @@ class LabApi(
     // ── Report publishing (the printed QR resolves to this) ──────────────────
 
     /**
-     * `POST admin-lab/reports/publish` (device auth) — upload the approved PDF
-     * to the PRIVATE `lab-reports` bucket and register [token] as its resolver.
+     * `POST admin-lab/reports/publish` (device auth) — register [token] and
+     * store what it opens: [report], the report snapshot v1 (see
+     * `report/ReportSnapshot`) that the app.bnmapp.com page draws. No PDF is
+     * kept on the server.
+     *
+     * [pdfBase64] is the PDF-era body, still accepted by the server for older
+     * builds; this build sends the snapshot. At least one of the two is needed.
      *
      * NEVER on the printing path. The QR is printed from a locally-minted token
      * (see `ReportShare`) and this call drains later, so a lab with no
@@ -552,9 +557,11 @@ class LabApi(
         token: String,
         orderId: String,
         accessionNo: String,
-        pdfBase64: String,
+        report: JsonObject? = null,
+        pdfBase64: String? = null,
     ): Result<Unit> = withContext(Dispatchers.Default) {
         runCatching {
+            require(report != null || pdfBase64 != null) { "Nothing to publish" }
             val auth = deviceAuth()
             val resp = httpClient.post(edgeUrl("/reports/publish")) {
                 header(auth.first, auth.second)
@@ -564,7 +571,8 @@ class LabApi(
                         put("token", token)
                         put("orderId", orderId)
                         put("accessionNo", accessionNo)
-                        put("pdfBase64", pdfBase64)
+                        report?.let { put("report", it) }
+                        pdfBase64?.let { put("pdfBase64", it) }
                     }.toString()
                 )
             }
@@ -572,18 +580,20 @@ class LabApi(
         }
     }
 
-    /** `POST admin-lab/reports/{token}/revoke` — kill a link (wrong patient,
-     *  corrected report). The local row is marked revoked first, so a dropped
-     *  connection can never leave the lab thinking a live link is dead. */
     /**
-     * Send a PUBLISHED report to [to] (digits, country code first) as a
-     * WhatsApp document, from the lab's own WhatsApp Business number.
+     * Send a report to [to] (digits, country code first) as a WhatsApp
+     * document, from the lab's own WhatsApp Business number.
+     *
+     * [pdfBase64] is the PDF this PC just rendered: the server hands the bytes
+     * to Meta's media upload and sends that, keeping no copy — the server no
+     * longer stores report PDFs, so without them only a report published by an
+     * older PDF-era build can be sent (409 not_published otherwise).
      *
      * The failure modes are the interesting part and they come back as words
      * the screen can show: WhatsApp not connected for this business, the
      * 24-hour window closed (Meta refuses business-initiated messages outside
-     * it), the file not on the server yet, the link revoked. [idempotencyKey]
-     * makes a retry a no-op instead of a second copy in the patient's chat.
+     * it), the link revoked. [idempotencyKey] makes a retry a no-op instead of a
+     * second copy in the patient's chat.
      */
     suspend fun sendReportWhatsapp(
         token: String,
@@ -591,6 +601,7 @@ class LabApi(
         filename: String,
         caption: String,
         idempotencyKey: String,
+        pdfBase64: String? = null,
     ): Result<Unit> = withContext(Dispatchers.Default) {
         runCatching {
             val auth = deviceAuth()
@@ -603,6 +614,7 @@ class LabApi(
                         put("filename", filename)
                         put("caption", caption)
                         put("idempotencyKey", idempotencyKey)
+                        pdfBase64?.let { put("pdfBase64", it) }
                     }.toString()
                 )
             }
@@ -610,6 +622,9 @@ class LabApi(
         }
     }
 
+    /** `POST admin-lab/reports/{token}/revoke` — kill a link (wrong patient,
+     *  corrected report). The local row is marked revoked first, so a dropped
+     *  connection can never leave the lab thinking a live link is dead. */
     suspend fun revokeReport(token: String): Result<Unit> = withContext(Dispatchers.Default) {
         runCatching {
             val auth = deviceAuth()

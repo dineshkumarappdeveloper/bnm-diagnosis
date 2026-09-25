@@ -76,3 +76,48 @@ IS a GST invoice whose line items are tests.
   engine's are `lab_backup_*`) and what a backup carries is an allow-list
   (`BackupAllowList`), never a node dump. `DriverFactory` opens the driver
   with `busy_timeout=10000` so app writes ride out a snapshot.
+
+## Remote support ("Maintenance mode") — contract `docs/remote-support/CONTRACT.md`
+
+An OWNER-started, time-boxed session in which BNM's engineer reaches THIS copy
+of BNM Lab as an MCP server: app dials OUT (`RemoteSupportService`, desktop
+only) → relay (`relay/`, Cloudflare Worker + Durable Object, a dumb pipe) →
+the engineer's stdio bridge (`tools/remote-mcp/bnmlab-remote.mjs`, registered
+with `claude mcp add`). Engineer's runbook: `docs/remote-support/RUNBOOK.md`.
+
+- **Consent gate.** Nothing is reachable while no session runs. The owner
+  (or the owner's PIN) starts it from Help ▸ Remote support… / Settings ▸ App,
+  picks 1/4/24 h and ticks what is shared: analyzer data, records, screen.
+  Diagnostics-level tools need no tick; a tool's `requires` is enforced in
+  `RemoteRpcCore` on every call, not in the UI. `OfflinePolicy.allowsRemoteSupport`
+  is the standalone-edition exception: the owner pressed it.
+- **Every `tools/call` is signed** (Ed25519, contract §2.4) by the engineer's
+  key and verified against `RemoteSupportKeys.SUPPORT_PUBLIC_KEY_SPKI_B64`;
+  unsigned, stale (±5 min), replayed, expired or unconsented calls are refused
+  with −32001 and still audited. `CanonicalJson` (commonMain) is the one
+  canonical form; `tools/remote-mcp/test/canonical-vectors.json` pins it for
+  BOTH the Kotlin test and the Node test — never hand-edit a vector.
+- **PHI rules hold regardless of consent**: audit summaries carry names of
+  tools/fields and counts, never values; `instruments.log` masks ids and
+  scrubs HL7 PID/NK1/OBX-text and Mispa PatientID (`FrameScrubber`);
+  `db.query` refuses PHI tables without records consent (`DbQueryGuard`) and
+  only ever runs on its own read-only connection. Never log a message body,
+  an argument, the session code, the token or a key.
+- **Never add a tool that writes clinical data** — no result entry, no
+  claim/discard of unmatched results, no staff/PIN/licence changes, no SQL
+  writes, no file system, no shell, no printing. Support fixes the LINK; the
+  bench owns the results. Settings changed by support set `verify_pending`
+  and the bench presses Verified.
+- **Key rotation.** `bnmlab-remote.mjs keygen` → paste the SPKI into
+  `RemoteSupportKeys.kt` and ship a build BEFORE revoking the old key on the
+  engineers' machines. The paste is checked for SHAPE (a 44-byte Ed25519
+  SPKI) by `checkSupportKeyNotDev` and `RemoteSupportKeysReleaseTest`: a
+  truncated one verifies nothing and stops the app starting on every lab. 🔴 This branch embeds the DEV key whose private half is
+  committed (`tools/remote-mcp/test/dev-support.key`) — `lab.overview` reports
+  `support_key: dev`; REPLACE before release. Relay token: `wrangler secret
+  put BNM_SUPPORT_TOKEN`; relay licence key mirrors `docs/license-public-key.jwk.json`.
+- **Verify:** `./gradlew :composeApp:desktopTest :composeApp:compileDebugKotlinAndroid`,
+  `cd relay && npm test`, `cd tools/remote-mcp && node --test`. End to end
+  (opt-in): start `wrangler dev` with the TEST licence key (relay/README.md),
+  then `BNM_RELAY_URL=ws://127.0.0.1:8787 ./gradlew :composeApp:desktopTest
+  -Dbnm.e2e=true --tests 'com.bnm.lab.remote.RemoteSupportE2ETest'`.

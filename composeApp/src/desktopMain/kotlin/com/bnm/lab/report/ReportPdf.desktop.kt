@@ -15,6 +15,7 @@ import com.bnm.lab.report.ReportGraph
 import java.awt.Color
 import java.awt.Desktop
 import java.awt.print.PrinterJob
+import java.io.ByteArrayOutputStream
 import java.io.File
 
 /**
@@ -52,17 +53,29 @@ actual fun writeLabReportPdf(doc: ReportDoc): String {
     val dir = File(System.getProperty("java.io.tmpdir"), "bnm-diagnosis-reports").apply { mkdirs() }
     val safe = doc.accession.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "lab" }
     val file = File(dir, "$safe-report.pdf")
+    renderReport(doc) { it.save(file) }
+    AppLog.i("Report", "PDF written for ${doc.accession} (${file.length() / 1024} KB)")
+    return file.absolutePath
+}
+
+actual fun renderLabReportPdfBytes(doc: ReportDoc): ByteArray? {
+    val out = ByteArrayOutputStream()
+    renderReport(doc) { it.save(out) }
+    return out.toByteArray()
+}
+
+/** Lay [doc] out and hand the finished document to [save]; a failure is logged
+ *  and rethrown, whichever way the bytes were going. */
+private inline fun renderReport(doc: ReportDoc, save: (PDDocument) -> Unit) {
     try {
         PDDocument().use { pdf ->
             A4ReportWriter(pdf, doc).render()
-            pdf.save(file)
+            save(pdf)
         }
     } catch (e: Throwable) {
         AppLog.e("Report", "PDF generation failed for ${doc.accession}", e)
         throw e
     }
-    AppLog.i("Report", "PDF written for ${doc.accession} (${file.length() / 1024} KB)")
-    return file.absolutePath
 }
 
 actual fun openPdf(path: String): String = try {

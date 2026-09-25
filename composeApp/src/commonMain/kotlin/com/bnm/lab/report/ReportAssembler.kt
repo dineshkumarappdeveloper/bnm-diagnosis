@@ -2,16 +2,23 @@ package com.bnm.lab.report
 
 import com.bnm.lab.api.LabApi
 import com.bnm.lab.api.LabSyncDisabledException
+import com.bnm.lab.lab.LabReportShare
 import com.bnm.lab.lab.LabRepository
 import com.bnm.lab.lab.LabStatus
 import com.bnm.lab.lab.TestStage
 import com.bnm.lab.license.LicenseManager
 import com.bnm.lab.staff.Staff
 import com.bnm.lab.staff.StaffRepository
+import com.bnm.lab.sync.SyncPrefs
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.hours
+import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Instant
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
 
 /**
  * Builds the PRINTABLE report document: the pure [buildReportDoc] plus the two
@@ -203,68 +210,103 @@ class ReportAssembler(
 }
 
 /**
- * Drains `lab_reports` rows that were minted at approval but never uploaded.
+ * Drains `lab_reports` rows that were minted at approval but never published.
  *
  * THE POINT: printing must never wait on a server. The QR on the paper is
  * already correct — it points at a token the lab minted itself — and this class
  * is what eventually makes that link resolve. A lab can print for a week
  * offline and every one of those QRs starts working the moment the drain runs.
  *
- * Re-renders the PDF from the (frozen) results rather than keeping the printed
- * file around: the temp file is long gone by the time connectivity returns, and
- * results are immutable after approval, so the bytes carry the same content.
- * The signatories are resolved again by the staff ID stamped on the rows, so it
- * is the same PEOPLE — with whatever signature they have on file at upload.
+ * Publishes the report as DATA ([buildReportSnapshot]), not a PDF: the
+ * app.bnmapp.com page draws the report — and its PDF — in the patient's
+ * browser, so the server keeps a few kilobytes and no document. The snapshot is
+ * rebuilt from the (frozen) results rather than kept from the print: results
+ * are immutable after approval, so it carries the same content. The
+ * signatories are resolved again by the staff ID stamped on the rows, so it is
+ * the same PEOPLE — with whatever signature they have on file at upload.
+ *
+ * A row that fails (server down, refused, cannot be built) is counted and
+ * backed off ([retryDelay]) and sinks below fresh rows, so a stuck report can
+ * never hold up the ones behind it.
  */
 class ReportUploader(
     private val repo: LabRepository,
     private val api: LabApi,
     private val assembler: ReportAssembler,
     private val license: LicenseManager = LicenseManager(),
-    /** Renders the doc and returns the file path — the platform PDF writer.
-     *  Injectable so a test can drain without a real PDF stack. */
-    private val render: (ReportDoc) -> String = { doc -> writeLabReportPdf(doc) },
+    private val prefs: SyncPrefs = SyncPrefs(),
+    /** The publish call — [LabApi.publishReport] with the snapshot. Injectable
+     *  so a test can drain without a server. */
+    private val publish: suspend (row: LabReportShare, snapshot: JsonObject) -> Result<Unit> = { row, snapshot ->
+        api.publishReport(token = row.token, orderId = row.orderId, accessionNo = row.accessionNo, report = snapshot)
+    },
+    private val clock: () -> Instant = { kotlin.time.Clock.System.now() },
 ) {
 
     /**
-     * Upload up to [limit] queued reports. Returns how many now resolve.
+     * Publish up to [limit] queued reports that are due. Returns how many now
+     * resolve (an unchanged report that needed no upload counts).
      *
      * Never throws: a drain is background work behind an offline-first app, and
-     * a failed upload simply stays queued for the next run. A standalone licence
-     * stops the whole run on the first 409 rather than hammering an endpoint
-     * that will always refuse it.
+     * a failed upload simply stays queued, backed off, for a later run. A
+     * standalone licence stops the whole run on the first 409 rather than
+     * hammering an endpoint that will always refuse it.
      */
-    @OptIn(ExperimentalEncodingApi::class)
     suspend fun drain(limit: Int = 5): Int = withContext(Dispatchers.Default) {
         if (license.state.value.isStandalone) return@withContext 0
+        // Once per install: reports this seat published as PDFs go back in the
+        // queue and republish as snapshots — the page reads nothing else.
+        if (!prefs.reportsRequeuedForSnapshot) {
+            runCatching { repo.requeueUploadedReports() }.onSuccess { prefs.reportsRequeuedForSnapshot = true }
+        }
+        val now = clock()
         var done = 0
-        for (row in repo.pendingReportUploads().take(limit)) {
-            if (!ReportShare.isWellFormed(row.token)) continue // corrupt row: leave it, don't publish junk
+        for (row in repo.pendingReportUploads().filter { it.isDue(now) }.take(limit)) {
+            val defer = suspend {
+                repo.deferReportUpload(row.orderId, row.token, (now + retryDelay(row.attempts + 1)).toString())
+            }
+            // Corrupt row: never publish junk, and never let it block the queue.
+            if (!ReportShare.isWellFormed(row.token)) { defer(); continue }
             // Per-test release: the link resolves to every test signed off so
             // far (re-queued as more are released); nothing unapproved leaves.
             val approved = repo.approvedTestIds(row.orderId)
-            if (approved.isEmpty()) continue
-            val doc = assembler.assemble(row.orderId, stampReportedNow = false, testIds = approved) ?: continue
-            val path = runCatching { render(doc) }.getOrNull()?.takeIf { it.isNotBlank() } ?: continue
-            val bytes = readReportBytes(path) ?: continue
-            val result = api.publishReport(
-                token = row.token,
-                orderId = row.orderId,
-                accessionNo = row.accessionNo,
-                pdfBase64 = Base64.Default.encode(bytes),
-            )
+            if (approved.isEmpty()) { defer(); continue }
+            val doc = assembler.assemble(row.orderId, stampReportedNow = false, testIds = approved)
+            if (doc == null) { defer(); continue }
+            val snapshot = runCatching { buildReportSnapshot(doc, generatedAt = now.toString()) }.getOrNull()
+            if (snapshot == null) { defer(); continue }
+            val sha = ReportSnapshot.contentSha256(snapshot)
+            // Requeued, but the rebuilt report is what the server already has
+            // (a reprint, a released test that was already on it): no upload.
+            if (sha == row.sha256) {
+                repo.markReportUnchanged(row.orderId, row.token)
+                done++
+                continue
+            }
+            val result = publish(row, snapshot)
             when {
                 result.isSuccess -> {
-                    // sha256 stays null: the column is a re-upload optimisation,
-                    // and there is no commonMain byte hasher to fill it with yet.
-                    repo.markReportUploaded(row.orderId, null)
+                    repo.markReportUploaded(row.orderId, row.token, sha)
                     done++
                 }
                 // Standalone / unlinked licence — nothing here will ever publish.
                 result.exceptionOrNull() is LabSyncDisabledException -> return@withContext done
-                else -> Unit // transient: stays `pending`, retried next run
+                else -> defer() // stays `pending`, retried after the backoff
             }
         }
         done
+    }
+
+    companion object {
+        /**
+         * How long after the [attempt]th failure the row is tried again: the
+         * sweep interval (5 min), doubling, capped at 6 h. Never gives up — a
+         * report that cannot publish today (a server not deployed yet, a
+         * licence re-linked) must still publish once it can.
+         */
+        fun retryDelay(attempt: Int): Duration {
+            val steps = (attempt - 1).coerceIn(0, 10)
+            return (5.minutes * (1 shl steps)).coerceAtMost(6.hours)
+        }
     }
 }

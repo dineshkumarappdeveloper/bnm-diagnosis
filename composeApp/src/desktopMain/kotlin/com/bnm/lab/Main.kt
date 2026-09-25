@@ -47,6 +47,8 @@ import com.bnm.lab.diagnostics.DesktopDiagnostics
 import com.bnm.lab.diagnostics.FatalWindowError
 import com.bnm.lab.diagnostics.SupportReporter
 import com.bnm.lab.diagnostics.SupportUi
+import com.bnm.lab.remote.RemoteSupportService
+import com.bnm.lab.remote.RemoteSupportUi
 import com.bnm.lab.screens.backup.BackupExitFlowUi
 import com.bnm.lab.ui.theme.AppTheme
 import com.bnm.lab.ui.theme.ThemeManager
@@ -62,8 +64,13 @@ fun main(args: Array<String>) {
     DesktopDiagnostics.install()
     // One BNM Lab per data directory: a second copy would run a second backup
     // engine against the same pendrive, and a staged restore could not swap the
-    // database while the first copy still holds it open.
+    // database while the first copy still holds it open. This gate runs BEFORE
+    // either engine starts — a refused copy exits without having announced
+    // itself to the relay or touched the pendrive.
     if (!SingleInstance.acquire(appDataDir())) SingleInstance.refuseAndExit()
+    // The remote-support engine sits idle until an owner starts a session; it is
+    // installed this early so Help ▸ Remote support… works on the activation screen.
+    RemoteSupportService.instance.install()
     // The Backup pendrive engine ticks from here on — before the window exists —
     // but does nothing until DriverFactory has opened the database. Its
     // shutdown hook only persists what is unsaved and removes a half-written
@@ -106,6 +113,7 @@ fun main(args: Array<String>) {
             MenuBar {
                 Menu("Help") {
                     Item("Report a problem…", onClick = { SupportUi.open() })
+                    Item("Remote support…", onClick = { RemoteSupportUi.open() })
                     Item("Open logs folder", onClick = {
                         if (!SupportReporter.openLogsFolder()) SupportUi.open()
                     })
@@ -113,6 +121,8 @@ fun main(args: Array<String>) {
             }
             LaunchedEffect(Unit) {
                 SupportReporter.pendingCrash()?.let { SupportUi.open(crashNotice = it) }
+                // The screenshot tool (consent-gated) captures THIS window and nothing else.
+                RemoteSupportService.instance.registerWindow(window)
             }
             Box(Modifier.fillMaxSize()) {
                 App()
@@ -126,6 +136,11 @@ fun main(args: Array<String>) {
                             controller = BackupService.shared,
                             onExit = {
                                 AppLog.i("Lifecycle", "window closed by user")
+                                // A support session must not outlive the window that
+                                // shows its banner — but the exit flow can still be
+                                // cancelled, so this runs at the real exit, not at
+                                // the close request.
+                                RemoteSupportService.instance.endBlocking("app closing")
                                 exitApplication()
                             },
                             onCancel = { closing = false },

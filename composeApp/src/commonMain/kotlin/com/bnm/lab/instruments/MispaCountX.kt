@@ -54,6 +54,16 @@ object MispaCountX {
      * of back-to-back frames drains one call at a time.
      */
     fun extractFrame(buffer: String): Pair<Frame?, String> {
+        val (frameText, rest) = extractFrameText(buffer)
+        return frameText?.let { parse(it) } to rest
+    }
+
+    /**
+     * Same as [extractFrame] but hands back the frame TEXT, so the caller can
+     * tell "no complete frame yet" (null) from "a frame arrived that [parse]
+     * could not read" — the second is what the engine logs as an error.
+     */
+    fun extractFrameText(buffer: String): Pair<String?, String> {
         val start = buffer.indexOf(FRAME_START)
         if (start < 0) {
             // No frame start anywhere — keep only a tail in case `$$` arrived
@@ -64,7 +74,7 @@ object MispaCountX {
         if (end < 0) return null to buffer.substring(start)
         val frameText = buffer.substring(start, end + FRAME_END.length)
         val rest = buffer.substring(end + FRAME_END.length)
-        return parse(frameText) to rest
+        return frameText to rest
     }
 
     /** Parse one complete `$$$…###` frame. Null when structurally unusable. */
