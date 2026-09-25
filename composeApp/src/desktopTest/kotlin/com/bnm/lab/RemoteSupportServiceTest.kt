@@ -47,7 +47,7 @@ class RemoteSupportServiceTest {
         labName = { "Test Lab" },
         appVersion = "9.9.9-test",
         transports = transports,
-        verifier = Ed25519Verifier(RemoteSupportKeys.SUPPORT_PUBLIC_KEY_SPKI_B64),
+        verifier = Ed25519Verifier(RemoteSupportKeys.DEV_PUBLIC_KEY_SPKI_B64),   // requests are signed with the committed dev key
         clock = clock,
         scope = scope,
         newCode = { "ABCDEFGH" },
