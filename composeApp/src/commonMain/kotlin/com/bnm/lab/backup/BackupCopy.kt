@@ -31,6 +31,10 @@ object BackupCopy {
 
     const val NEW_SERIES_NOTE = "New orders and bills will start a new series on this computer."
 
+    /** The restore list was opened from a folder on this PC's own disk — a copy of the stick, not the stick. */
+    const val RESTORE_FROM_OWN_DISK_WARNING =
+        "These backups are on this computer's own disk. After the restore, set up the backup pendrive again — a copy here is lost with the computer."
+
     const val ACKNOWLEDGE_CODE =
         "I have written down or printed the recovery code and kept it away from this computer"
 

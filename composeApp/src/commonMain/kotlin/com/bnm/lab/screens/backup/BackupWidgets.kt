@@ -2,6 +2,7 @@ package com.bnm.lab.screens.backup
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,7 +34,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -183,7 +187,10 @@ fun BackupExitFlowUi(
             is BackupExitFlow.Decision.Flush -> {
                 val flushed = controller != null &&
                     runCatching { controller.flushOnExit(d.maxWaitMs) }.getOrDefault(false)
-                decision = BackupExitFlow.afterFlush(flushed)
+                // The engine's answer, or the live status: a flush that ran past
+                // the deadline may well have finished by the time this reads.
+                val clean = flushed || controller?.status?.value?.hasUnsavedChanges == false
+                decision = BackupExitFlow.afterFlush(clean)
             }
             BackupExitFlow.Decision.Confirm -> Unit
         }
@@ -199,11 +206,27 @@ fun BackupExitFlowUi(
     }
 }
 
-/** "Backing up…" — a scrim with a small card while the last generation is written. */
+/**
+ * "Backing up…" — a scrim with a small card while the last generation is
+ * written. The scrim is a wall, not a tint: a draw-only Box registers no hit,
+ * so clicks would fall through to the app beneath and a result saved "while
+ * closing" would re-mark the database dirty and turn a finished flush into
+ * "the pendrive could not take them". Every pointer event over it is consumed
+ * here, and it takes the keyboard focus so the field that had it stops
+ * receiving keys.
+ */
 @Composable
 fun BackupFlushOverlay() {
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
     Box(
-        Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)),
+        Modifier.fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.35f))
+            .pointerInput(Unit) {
+                awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
+            }
+            .focusRequester(focus)
+            .focusable(),
         contentAlignment = Alignment.Center,
     ) {
         Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surface, shadowElevation = 8.dp) {

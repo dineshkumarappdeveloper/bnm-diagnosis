@@ -16,9 +16,10 @@ import kotlin.test.assertTrue
 /**
  * The launch-time swap: the live database and its rollback journal are set
  * aside together (a journal deleted on its own would corrupt the very file
- * kept as the undo), the staged file takes their place, and only the newest
- * three set-aside sets are kept. Plus the two refusals and the preference
- * hand-over.
+ * kept as the undo) under the names SQLite pairs — so the set-aside copy is
+ * a database anyone can open, hot journal and all — the staged file takes
+ * their place, and only the newest three set-aside sets are kept. Plus the
+ * two refusals and the preference hand-over.
  */
 class RestoreSwapTest {
 
@@ -28,6 +29,7 @@ class RestoreSwapTest {
         try {
             val db = File(dir, "bnm_chat.db").apply { writeText("live") }
             File(dir, "bnm_chat.db-journal").writeText("hot journal")
+            File(dir, "bnm_chat.db-wal").writeText("frames")
             File(dir, "bnm_chat.db.restore-pending").writeText("restored")
             File(dir, RestoreStaging.APPLIED_MARKER).writeText("seq=7")
 
@@ -36,13 +38,18 @@ class RestoreSwapTest {
             assertEquals(7L, applied.seq)
             assertEquals("restored", db.readText())
             assertFalse(File(dir, "bnm_chat.db-journal").exists(), "no stale journal beside the restored file")
+            assertFalse(File(dir, "bnm_chat.db-wal").exists())
             assertFalse(File(dir, "bnm_chat.db.restore-pending").exists())
             assertFalse(File(dir, RestoreStaging.APPLIED_MARKER).exists())
             val setAside = dir.listFiles()!!.filter { it.name.contains(".before-restore-") }.associate { it.name to it.readText() }
+            // The sidecars carry the SET-ASIDE database's name plus SQLite's own
+            // suffix: opening `bnm_chat.db.before-restore-…` rolls the hot journal
+            // back and reads the WAL frames, exactly as the live file would have.
             assertEquals(
                 mapOf(
                     "bnm_chat.db.before-restore-20260915-091200" to "live",
-                    "bnm_chat.db-journal.before-restore-20260915-091200" to "hot journal",
+                    "bnm_chat.db.before-restore-20260915-091200-journal" to "hot journal",
+                    "bnm_chat.db.before-restore-20260915-091200-wal" to "frames",
                 ),
                 setAside,
             )
@@ -50,6 +57,20 @@ class RestoreSwapTest {
         } finally {
             dir.deleteRecursively()
         }
+    }
+
+    @Test
+    fun `a set-aside file's stamp is read past SQLite's sidecar suffix`() {
+        val db = File("/tmp/bnm_chat.db")
+        assertEquals("20260915-091200", RestoreStaging.setAsideStamp(db, "bnm_chat.db.before-restore-20260915-091200"))
+        assertEquals("20260915-091200", RestoreStaging.setAsideStamp(db, "bnm_chat.db.before-restore-20260915-091200-journal"))
+        assertEquals("20260915-091200", RestoreStaging.setAsideStamp(db, "bnm_chat.db.before-restore-20260915-091200-wal"))
+        assertEquals("20260915-091200", RestoreStaging.setAsideStamp(db, "bnm_chat.db.before-restore-20260915-091200-shm"))
+        assertNull(RestoreStaging.setAsideStamp(db, "bnm_chat.db"), "the live file")
+        assertNull(RestoreStaging.setAsideStamp(db, "bnm_chat.db-journal"), "the live journal")
+        assertNull(RestoreStaging.setAsideStamp(db, "bnm_chat.db.restore-pending"))
+        assertNull(RestoreStaging.setAsideStamp(db, "bnm_chat.db.before-restore-"), "no stamp at all")
+        assertEquals("bnm_chat.db.before-restore-20260915-091200-journal", RestoreStaging.setAsideName(db, "20260915-091200", "-journal"))
     }
 
     @Test
@@ -79,10 +100,10 @@ class RestoreSwapTest {
                 File(dir, "bnm_chat.db.restore-pending").writeText("restored $i")
                 RestoreStaging.applyPending(db, ZonedDateTime.of(2026, 9, i, 9, 0, 0, 0, ZoneId.of("Asia/Kolkata")))
             }
-            val stamps = dir.listFiles()!!.filter { it.name.contains(".before-restore-") }
-                .map { it.name.substringAfterLast(".before-restore-") }.toSortedSet()
+            val stamps = dir.listFiles()!!.mapNotNull { RestoreStaging.setAsideStamp(db, it.name) }.toSortedSet()
             assertEquals(sortedSetOf("20260903-090000", "20260904-090000", "20260905-090000"), stamps)
             assertEquals(6, dir.listFiles()!!.count { it.name.contains(".before-restore-") }, "three sets of db + journal")
+            assertTrue(File(dir, "bnm_chat.db.before-restore-20260903-090000-journal").isFile, "a set is pruned or kept whole")
             assertEquals("restored 5", db.readText())
         } finally {
             dir.deleteRecursively()
@@ -108,6 +129,17 @@ class RestoreSwapTest {
         assertEquals(true, RestoreGuards.sameLicence("abc", "abc"))
         assertEquals(false, RestoreGuards.sameLicence("abc", "def"))
         assertEquals(false, RestoreGuards.sameLicence("abc", null))
+    }
+
+    @Test
+    fun `licence fingerprint - a re-issued key is the same licence when the tokens agree on the licence id`() {
+        // The day the recovery code exists for: the key was re-issued (new hash), the licence is the same.
+        assertEquals(true, RestoreGuards.sameLicence("new-key-fp", "old-key-fp", storedLid = "lic-1", manifestLid = "lic-1"))
+        assertEquals(false, RestoreGuards.sameLicence("new-key-fp", "old-key-fp", storedLid = "lic-1", manifestLid = "lic-2"))
+        assertEquals(false, RestoreGuards.sameLicence("new-key-fp", "old-key-fp", storedLid = null, manifestLid = "lic-1"), "no id on this PC: unknown is not same")
+        assertEquals(false, RestoreGuards.sameLicence("new-key-fp", "old-key-fp", storedLid = "", manifestLid = ""))
+        assertEquals(true, RestoreGuards.sameLicence("abc", "abc", storedLid = "lic-1", manifestLid = "lic-2"), "the same key never needs the id")
+        assertNull(RestoreGuards.sameLicence(null, "abc", storedLid = "lic-1", manifestLid = "lic-1"), "not activated: still nothing to compare")
     }
 
     @Test

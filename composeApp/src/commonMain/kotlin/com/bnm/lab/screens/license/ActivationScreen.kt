@@ -153,6 +153,10 @@ fun ActivationScreen(
          *  the "ask" and the "wipe" can never disagree about what is happening —
          *  re-deriving it here risked prompting and then not erasing, or worse. */
         wipeFirst: Boolean = false,
+        /** This PC was restored from a backup pendrive and the key's fingerprint
+         *  differs from the restored one: activate WITHOUT a wipe and let the
+         *  licence id in the returned token decide (see below). */
+        restoredCheck: Boolean = false,
     ) {
         if (loading) return
         val k = key.trim()
@@ -174,9 +178,21 @@ fun ActivationScreen(
                 // unknown as "there is something here" so the fallback is always
                 // to ask — never to erase silently, never to adopt silently.
                 val hasLocalData = counts == null || !counts.isEmpty
+                val restored = backupController?.status?.value?.restoredFromBackup == true
                 when {
                     !licenseManager.isDifferentTenant(k, hasLocalData) ->
                         runActivate(replaceDeviceId, eraseConfirmed = true)
+                    // A PC restored from a backup pendrive holds records that
+                    // belong to the licence carried INSIDE the backup, and the
+                    // key in hand may be a RE-ISSUED key of that same licence —
+                    // the very case the recovery code exists for. The stored
+                    // fingerprint (of the old key) cannot tell that apart from
+                    // another lab's key; the licence id in the token BNM returns
+                    // can. So activate first, without a wipe, and decide on the
+                    // returned token: same licence → keep the records and take
+                    // the new fingerprint; another lab's → the usual question.
+                    hasLocalData && restored ->
+                        runActivate(replaceDeviceId, eraseConfirmed = true, restoredCheck = true)
                     hasLocalData -> pendingTenantSwitch = k to counts
                     // Different licence, but nothing stored — nothing to erase.
                     else -> runActivate(replaceDeviceId, eraseConfirmed = true)
@@ -211,6 +227,20 @@ fun ActivationScreen(
                 when (outcome) {
                     is LabActivateResult.Activated -> {
                         val a = outcome.license
+                        if (restoredCheck && !LicenseManager.sameLicenceId(
+                                licenseManager.claims()?.licenseId,
+                                licenseManager.claims(a.licenseJwt)?.licenseId,
+                            )
+                        ) {
+                            // Another lab's licence on a PC holding a restored
+                            // lab: nothing is saved here, and the operator gets
+                            // the erase question. BNM has already recorded this
+                            // device under that licence; the /activate after the
+                            // wipe reuses the same device id, so no second seat.
+                            AppLog.w("Licence", "activation after a restore: the key is not the restored records' licence")
+                            pendingTenantSwitch = k to runCatching { labRepo.tenantRowCounts() }.getOrNull()
+                            return@onSuccess
+                        }
                         licenseManager.saveActivation(
                             licenseJwt = a.licenseJwt,
                             deviceToken = a.deviceToken,

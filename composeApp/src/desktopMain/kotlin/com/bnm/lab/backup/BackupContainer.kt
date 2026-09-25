@@ -83,11 +83,21 @@ internal class BackupDamagedException(message: String) : IOException(message)
  * `ciphertext||tag`), 1 MiB of plaintext per chunk.
  *
  * Each chunk is bound to its position and to the header: nonce =
- * `nonce_prefix(4) || chunk index (int64 BE)`, AAD = `SHA-256(header bytes) ||
+ * `nonce_prefix(8) || chunk index (int32 BE)`, AAD = `SHA-256(header bytes) ||
  * chunk index || last flag`. The last chunk is flagged, so a file cut at a
  * chunk boundary is detected the same way as one cut mid-chunk. Nothing here
  * loads a payload into memory: encryption is an [OutputStream], decryption an
  * [InputStream], each holding one chunk.
+ *
+ * The data key lives for the whole vault, so the nonce prefix is what keeps
+ * two generations apart: `4 random bytes || int32(seq)`. The generation
+ * number is strictly monotonic within a vault, so no two generations of one
+ * vault can ever encrypt a chunk under the same (key, nonce) — with 4 random
+ * bytes alone (format 2) that was a birthday problem on 32 bits, one in a
+ * hundred by nine thousand generations, and a pendrive image would have
+ * handed an attacker keystream reuse on the first chunk of two files. Format
+ * 2 files (nonce = `prefix(4) || int64 index`) stay readable; none are
+ * written any more.
  *
  * Two unlock secrets wrap the one data key: the lab's licence key and the
  * recovery code, each stretched with PBKDF2 (600k iterations in production;
@@ -95,7 +105,11 @@ internal class BackupDamagedException(message: String) : IOException(message)
  * preferences, no files of its own; [BackupService] owns those.
  */
 internal object BackupContainer {
-    const val VERSION = 2
+    const val VERSION = 3
+    /** Format 2: a 4-byte random prefix and an int64 chunk index. Read, never written. */
+    const val VERSION_LEGACY = 2
+    private const val NONCE_PREFIX_BYTES = 8
+    private const val NONCE_PREFIX_BYTES_LEGACY = 4
     private val MAGIC = "BNMLABBK".toByteArray(Charsets.US_ASCII)
     private const val MAX_HEADER_BYTES = 64 * 1024
     private const val TAG_BITS = 128
@@ -151,15 +165,21 @@ internal object BackupContainer {
 
     fun normaliseLicenceKey(key: String): String = key.trim().uppercase()
 
-    fun newNoncePrefix(random: SecureRandom = SecureRandom()): String = b64(ByteArray(4).also { random.nextBytes(it) })
+    /** `4 random bytes || int32(seq)` — unique per generation of a vault by construction, see the class note. */
+    fun newNoncePrefix(seq: Long, random: SecureRandom = SecureRandom()): String =
+        b64(ByteArray(4).also { random.nextBytes(it) } + int32(seq.toInt()))
 
     // ── writing ──
 
-    /** Magic, version and the header; returns the header bytes the chunks are bound to. */
-    fun writeHeader(out: OutputStream, header: ContainerHeader): ByteArray {
+    /**
+     * Magic, version and the header; returns the header bytes the chunks are
+     * bound to. [version] is a test seam for writing a legacy-format fixture;
+     * production always writes [VERSION].
+     */
+    fun writeHeader(out: OutputStream, header: ContainerHeader, version: Int = VERSION): ByteArray {
         val bytes = backupJson.encodeToString(ContainerHeader.serializer(), header).toByteArray(Charsets.UTF_8)
         out.write(MAGIC)
-        out.write(VERSION)
+        out.write(version)
         out.write(int32(bytes.size))
         out.write(bytes)
         return bytes
@@ -187,7 +207,7 @@ internal object BackupContainer {
             throw BackupDamagedException("not a BNM Lab backup")
         }
         val version = input.read()
-        if (version != VERSION) throw BackupDamagedException("backup format $version is not readable by this build")
+        if (version != VERSION && version != VERSION_LEGACY) throw BackupDamagedException("backup format $version is not readable by this build")
         val lenBytes = ByteArray(4)
         if (readFully(input, lenBytes) < 4) throw BackupDamagedException("header cut short")
         val len = int32(lenBytes)
@@ -199,7 +219,11 @@ internal object BackupContainer {
         } catch (e: Exception) {
             throw BackupDamagedException("header unreadable")
         }
-        return header to bytes
+        // The version byte, not the JSON, says which nonce layout the chunks use;
+        // the prefix length must agree or the chunks cannot be what they claim.
+        val expected = if (version == VERSION_LEGACY) NONCE_PREFIX_BYTES_LEGACY else NONCE_PREFIX_BYTES
+        if (unb64(header.noncePrefix).size != expected) throw BackupDamagedException("header unreadable")
+        return header.copy(v = version) to bytes
     }
 
     fun readHeader(file: File): Pair<ContainerHeader, ByteArray> =
@@ -306,7 +330,12 @@ internal object BackupContainer {
         return got
     }
 
-    internal fun nonceFor(prefix: ByteArray, index: Long): ByteArray = prefix + int64(index)
+    /** The prefix length says the format: 8 bytes ⇒ `prefix || int32(index)`; the legacy 4 ⇒ `prefix || int64(index)`. */
+    internal fun nonceFor(prefix: ByteArray, index: Long): ByteArray = when (prefix.size) {
+        NONCE_PREFIX_BYTES -> prefix + int32(index.toInt())
+        NONCE_PREFIX_BYTES_LEGACY -> prefix + int64(index)
+        else -> throw BackupDamagedException("nonce prefix of ${prefix.size} bytes")
+    }
     internal fun aadFor(headerHash: ByteArray, index: Long, last: Boolean): ByteArray =
         headerHash + int64(index) + byteArrayOf(if (last) 1 else 0)
 }

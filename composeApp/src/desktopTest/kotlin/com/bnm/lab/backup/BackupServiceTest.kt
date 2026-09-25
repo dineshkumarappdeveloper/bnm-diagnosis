@@ -11,6 +11,7 @@ import com.russhwolf.settings.PropertiesSettings
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.nio.file.Files
+import java.util.Base64
 import java.util.Properties
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.Test
@@ -35,7 +36,19 @@ class BackupServiceTest {
 
     private class Pc(val dir: File, val settings: PropertiesSettings, val service: BackupService, val dbFile: File)
 
-    private fun pc(activated: Boolean, appVersion: String = "1.2.0"): Pc {
+    /** An unsigned token whose payload carries [lid] — the licence id a re-issued key keeps; `{}` without one. */
+    private fun jwt(lid: String?): String =
+        if (lid == null) "e30.e30.sig"
+        else "e30." + Base64.getUrlEncoder().withoutPadding().encodeToString("""{"lid":"$lid"}""".toByteArray()) + ".sig"
+
+    private fun pc(
+        activated: Boolean,
+        appVersion: String = "1.2.0",
+        lid: String? = null,
+        /** Which folders count as this PC's own disk — none by default, the temp pendrive shares the volume. */
+        ownDisk: (File) -> Boolean = { false },
+        beforeWrite: (String) -> Unit = {},
+    ): Pc {
         val dir = Files.createTempDirectory("bnm-pc").toFile()
         val s = PropertiesSettings(Properties())
         if (activated) {
@@ -44,7 +57,7 @@ class BackupServiceTest {
             s.putString("license_device_id", "device-old-pc")
             s.putString("license_device_token", "tok-old")
             s.putString("license_device_row_id", "row-old-pc")
-            s.putString("license_jwt", "e30.e30.sig") // {} payload: no edition claim, fine for display
+            s.putString("license_jwt", jwt(lid)) // no edition claim either way, fine for display
             s.putString("report_lh_address", "12 Main Rd, Salem")
             s.putString("pref_accession_prefix", "SUN")
             s.putString("session_token", "never-travels")
@@ -52,7 +65,7 @@ class BackupServiceTest {
         }
         val service = BackupService(
             prefs = BackupPrefs(s, flush = {}), dataDir = { dir }, nanos = { nano.get() }, wall = { wall.get() },
-            appVersion = appVersion, kdfIterations = 1_000, sameVolumeAsData = { _, _ -> false },
+            appVersion = appVersion, kdfIterations = 1_000, sameVolumeAsData = { f, _ -> ownDisk(f) }, beforeWrite = beforeWrite,
         )
         return Pc(dir, s, service, File(dir, "bnm_chat.db"))
     }
@@ -207,11 +220,14 @@ class BackupServiceTest {
     }
 
     @Test
-    fun `a newer backup and a foreign licence are refused - a same-PC roll-back is not`(): Unit = runBlocking {
+    fun `a newer backup and a foreign licence are refused - a re-issued key and a same-PC roll-back are not`(): Unit = runBlocking {
         val drive = Files.createTempDirectory("bnm-pendrive").toFile()
-        val old = pc(activated = true, appVersion = "1.3.0")
+        val old = pc(activated = true, appVersion = "1.3.0", lid = "lic-1")
         val stale = pc(activated = true, appVersion = "1.2.0")
-        val other = pc(activated = true, appVersion = "1.3.0").also { it.settings.putString("lab_license_fp", sha256Hex("BNMD-OTHER-LAB0-KEY0-0000")) }
+        val other = pc(activated = true, appVersion = "1.3.0", lid = "lic-2").also { it.settings.putString("lab_license_fp", sha256Hex("BNMD-OTHER-LAB0-KEY0-0000")) }
+        // The day the recovery code exists for: the key was re-issued (another
+        // fingerprint), the licence — its id in the signed token — is the same.
+        val reissued = pc(activated = true, appVersion = "1.3.0", lid = "lic-1").also { it.settings.putString("lab_license_fp", sha256Hex("BNMD-REIS-SUED-KEY0-0000")) }
         try {
             val repo = openDb(old)
             repo.upsertPatient(Patient(id = "p-1", name = "One", sex = "M"))
@@ -230,6 +246,11 @@ class BackupServiceTest {
             assertTrue(foreign.exceptionOrNull()!!.message!!.contains("different lab licence"))
             assertEquals(false, other.service.preview(gen, Unlock.LicenceKey(key)).getOrThrow().sameLicence)
 
+            openDb(reissued)
+            assertEquals(true, reissued.service.preview(gen, Unlock.LicenceKey(key)).getOrThrow().sameLicence, "the tokens agree on the licence id")
+            reissued.service.stageRestore(gen, Unlock.LicenceKey(key)).getOrThrow()
+            assertTrue(File(reissued.dir, "bnm_chat.db.restore-pending").isFile)
+
             // Same PC, roll back to generation 1 after more work: no secret asked, a before-restore generation first.
             repo.upsertPatient(Patient(id = "p-2", name = "Two", sex = "F"))
             old.service.stageRestore(gen, Unlock.ThisPc).getOrThrow()
@@ -239,11 +260,138 @@ class BackupServiceTest {
             assertNull(old.settings.getStringOrNull("license_device_id"), "a roll-back also mints a fresh device id — numbers issued after generation 1 can never repeat")
             assertTrue(old.settings.getBoolean(BackupPrefs.K_EXPECT_DROP, false), "the next generation is smaller on purpose")
             assertNotNull(old.settings.getStringOrNull(BackupPrefs.K_CODE), "own vault: the code stays")
+
+            // Until the process exits, this database gets no more generations: the
+            // pending file is the truth, and an interim one would spend the
+            // row-count-drop allowance the roll-back needs and pair the restored
+            // preferences with the records being replaced.
+            repo.upsertPatient(Patient(id = "p-3", name = "Three", sex = "M"))
+            assertTrue(old.service.dirty.isDirty)
+            nano.addAndGet((BackupPolicy.QUIET_MS + 1_000) * 1_000_000L)
+            old.service.tick()
+            assertEquals(2L, DriveScan.maxSeq(vault), "no generation of the about-to-be-replaced database")
+            assertTrue(old.settings.getBoolean(BackupPrefs.K_EXPECT_DROP, false), "the allowance is still there for the restored database")
+            val refused = old.service.backupNow()
+            assertTrue(refused.isFailure)
+            assertTrue(refused.exceptionOrNull()!!.message!!.contains("restore is waiting"), refused.exceptionOrNull()!!.message)
+            assertTrue(old.service.flushOnExit(5_000), "closing the window writes nothing either — and does not ask")
+            assertEquals(2L, DriveScan.maxSeq(vault))
         } finally {
             drive.deleteRecursively()
             old.dir.deleteRecursively()
             stale.dir.deleteRecursively()
             other.dir.deleteRecursively()
+            reissued.dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `close-window flush - the deadline is real, and a slow flush that finishes still counts`(): Unit = runBlocking {
+        val drive = Files.createTempDirectory("bnm-pendrive").toFile()
+        val holdMs = AtomicLong(0L)
+        val lab = pc(activated = true, beforeWrite = { reason -> if (reason == "close") Thread.sleep(holdMs.get()) })
+        try {
+            val repo = openDb(lab)
+            repo.upsertPatient(Patient(id = "p-1", name = "One", sex = "M"))
+            lab.service.setUp(drive.absolutePath, key).getOrThrow()
+            val vault = File(drive, BackupNaming.VAULT_DIR)
+
+            // Nothing unsaved: true at once, nothing written.
+            assertTrue(lab.service.flushOnExit(5_000))
+            assertEquals(1L, DriveScan.maxSeq(vault))
+
+            // Slow but within the deadline: waited for, and true.
+            repo.upsertPatient(Patient(id = "p-2", name = "Two", sex = "F"))
+            holdMs.set(300)
+            val t0 = System.nanoTime()
+            assertTrue(lab.service.flushOnExit(5_000))
+            assertTrue((System.nanoTime() - t0) / 1_000_000 >= 300, "waited for the snapshot")
+            assertEquals(2L, DriveScan.maxSeq(vault))
+            assertFalse(lab.service.dirty.isDirty)
+
+            // Slower than the deadline: the window gives up ON TIME and answers
+            // from the live state (still unsaved at that moment)…
+            repo.upsertPatient(Patient(id = "p-3", name = "Three", sex = "M"))
+            holdMs.set(1_500)
+            val t1 = System.nanoTime()
+            assertFalse(lab.service.flushOnExit(200))
+            val waited = (System.nanoTime() - t1) / 1_000_000
+            assertTrue(waited < 1_200, "gave up at the deadline, not after the snapshot ($waited ms)")
+            // …while the snapshot itself goes on and lands on its own thread.
+            val until = System.nanoTime() + 10_000_000_000L
+            while (lab.service.dirty.isDirty && System.nanoTime() < until) Thread.sleep(50)
+            assertFalse(lab.service.dirty.isDirty, "the slow flush finished")
+            assertEquals(3L, DriveScan.maxSeq(vault))
+            assertTrue(lab.service.flushOnExit(5_000), "asked again: nothing left unsaved")
+            assertEquals(BackupStatus.Phase.OK, lab.service.status.value.phase, lab.service.status.value.toString())
+        } finally {
+            drive.deleteRecursively()
+            lab.dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `a failed morning read-back is cleared by the next generation written and read back whole`(): Unit = runBlocking {
+        val drive = Files.createTempDirectory("bnm-pendrive").toFile()
+        val lab = pc(activated = true)
+        try {
+            val repo = openDb(lab)
+            repo.upsertPatient(Patient(id = "p-1", name = "One", sex = "M"))
+            lab.service.setUp(drive.absolutePath, key).getOrThrow()
+            val vault = File(drive, BackupNaming.VAULT_DIR)
+            // The newest generation loses its tail — a stick that lied about a write.
+            val newest = DriveScan.generationFiles(vault).single()
+            val bytes = newest.readBytes()
+            newest.writeBytes(bytes.copyOf(bytes.size - 64))
+
+            // Five minutes after launch the daily read-back runs — and fails.
+            nano.addAndGet(BackupPolicy.VERIFY_AFTER_START_MS * 1_000_000L)
+            lab.service.tick()
+            val failing = lab.service.status.value
+            assertEquals(BackupStatus.Phase.FAILING, failing.phase, failing.toString())
+            assertEquals(BackupService.MSG_UNREADABLE, failing.lastError)
+
+            // A generation written and read back whole IS a verified newest: the
+            // pendrive is not to be replaced for a morning that is over.
+            repo.upsertPatient(Patient(id = "p-2", name = "Two", sex = "F"))
+            lab.service.backupNow().getOrThrow()
+            val ok = lab.service.status.value
+            assertEquals(BackupStatus.Phase.OK, ok.phase, ok.toString())
+            assertNull(ok.lastError)
+            assertEquals(2L, DriveScan.maxSeq(vault))
+        } finally {
+            drive.deleteRecursively()
+            lab.dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `a restore from a copy on this computer's own disk keeps the key but never adopts the folder`(): Unit = runBlocking {
+        val drive = Files.createTempDirectory("bnm-pendrive").toFile()
+        val old = pc(activated = true)
+        // The new PC's Desktop holds a copy of the stick — the same volume as its data directory.
+        val desktop = Files.createTempDirectory("bnm-desktop").toFile()
+        val new = pc(activated = false, ownDisk = { f -> f.absolutePath.startsWith(desktop.absolutePath) })
+        try {
+            val repo = openDb(old)
+            repo.upsertPatient(Patient(id = "p-1", name = "One", sex = "M"))
+            old.service.setUp(drive.absolutePath, key).getOrThrow()
+            File(drive, BackupNaming.VAULT_DIR).copyRecursively(File(desktop, BackupNaming.VAULT_DIR))
+
+            val gen = new.service.findBackupsAt(desktop.absolutePath).getOrThrow().first()
+            val staged = new.service.stageRestore(gen, Unlock.LicenceKey(key)).getOrThrow()
+            assertTrue(File(new.dir, "bnm_chat.db.restore-pending").isFile, "the records themselves are restored")
+            assertNull(new.settings.getStringOrNull(BackupPrefs.K_DIR), "a folder on this PC's own disk is no backup pendrive")
+            assertNotNull(new.settings.getStringOrNull(BackupPrefs.K_DEK), "the vault key stays: setting up the real stick later is a re-bind")
+            assertEquals(old.settings.getStringOrNull(BackupPrefs.K_ID), new.settings.getStringOrNull(BackupPrefs.K_ID))
+            assertEquals(1L, new.settings.getLongOrNull(BackupPrefs.K_SEQ), "numbering still continues from the copy")
+            assertTrue(staged.notes.any { it.contains("own disk") }, staged.notes.toString())
+            assertEquals(BackupStatus.Phase.NOT_SET_UP, new.service.status.value.phase, "no green chip for a backup that dies with the PC")
+        } finally {
+            drive.deleteRecursively()
+            desktop.deleteRecursively()
+            old.dir.deleteRecursively()
+            new.dir.deleteRecursively()
         }
     }
 

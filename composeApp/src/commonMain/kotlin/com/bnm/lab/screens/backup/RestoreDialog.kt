@@ -64,6 +64,8 @@ internal class RestoreFlowState(initial: BackupGeneration? = null) {
     var candidates by mutableStateOf<List<DriveCandidate>>(emptyList())
     var loadingCandidates by mutableStateOf(initial == null)
     var folder by mutableStateOf<String?>(null)
+    /** [folder] sits on this PC's own disk: the generations are restorable, but this is no backup pendrive. */
+    var folderOnOwnDisk by mutableStateOf(false)
 
     var generations by mutableStateOf<List<BackupGeneration>>(emptyList())
     var selected by mutableStateOf(initial)
@@ -145,6 +147,9 @@ fun RestoreDialog(
             controller.findBackupsAt(folder)
                 .onSuccess { gens ->
                     state.folder = folder
+                    // Said before unlocking, not after: the engine will keep the
+                    // key but refuse to adopt a folder that dies with this PC.
+                    state.folderOnOwnDisk = BackupCopy.matchCandidate(folder, state.candidates)?.sameVolumeAsData == true
                     if (gens.isEmpty()) state.error = "No backups found there. Choose the pendrive itself, or its BNM Lab Backup folder."
                     else { state.generations = gens; state.step = RestoreFlowState.Step.GENERATIONS }
                 }
@@ -315,6 +320,14 @@ private fun GenerationsStep(state: RestoreFlowState, actions: RestoreActions) {
         "Newest first. Pick the copy to bring back — usually the top one.",
         style = MaterialTheme.typography.bodyMedium,
     )
+    if (state.folderOnOwnDisk) {
+        Text(
+            BackupCopy.RESTORE_FROM_OWN_DISK_WARNING,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.SemiBold,
+            color = AppTheme.colors.warning,
+        )
+    }
     state.generations.forEach { g ->
         val enabled = !g.damaged && !state.busy
         Surface(

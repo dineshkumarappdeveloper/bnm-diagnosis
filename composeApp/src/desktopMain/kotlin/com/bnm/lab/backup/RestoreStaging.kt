@@ -21,9 +21,19 @@ internal object RestoreGuards {
         return false
     }
 
-    /** Null on a PC with no fingerprint (not activated) — nothing to compare with. */
-    fun sameLicence(storedFp: String?, manifestFp: String?): Boolean? =
-        storedFp?.takeIf { it.isNotBlank() }?.let { it == manifestFp }
+    /**
+     * Null on a PC with no fingerprint (not activated) — nothing to compare
+     * with. The fingerprint is sha256 of the KEY, and a re-issued key (the
+     * day the recovery code exists for) hashes differently for the very same
+     * licence — so when the fingerprints differ, the `lid` claims of the two
+     * licence tokens (this PC's, and the one carried in the backup) get the
+     * last word: same licence id, same lab.
+     */
+    fun sameLicence(storedFp: String?, manifestFp: String?, storedLid: String? = null, manifestLid: String? = null): Boolean? {
+        val fp = storedFp?.takeIf { it.isNotBlank() } ?: return null
+        if (fp == manifestFp) return true
+        return !storedLid.isNullOrBlank() && storedLid == manifestLid
+    }
 
     private fun parse(v: String): List<Int>? {
         val core = v.trim().substringBefore('-').substringBefore('+')
@@ -83,6 +93,14 @@ internal object RestoreStaging {
      * newest [KEEP_SET_ASIDE] sets are kept), then move the staged file into
      * place. Null when nothing is pending. Throws when the swap cannot be
      * completed — the caller must NOT open a half-swapped database.
+     *
+     * A set-aside set is a database SQLite can open as it is: the sidecars go
+     * to `<db>.before-restore-<stamp>-journal` (and `-wal`, `-shm`), the names
+     * SQLite pairs with `<db>.before-restore-<stamp>` — so a hot journal left
+     * by a session that died mid-commit is rolled back the moment support (or
+     * a future undo) opens the copy, and WAL frames not yet checkpointed are
+     * still part of it. Named `<db>-journal.before-restore-<stamp>` the same
+     * journal would sit beside a torn page image that nothing ever repairs.
      */
     fun applyPending(dbFile: File, now: ZonedDateTime = ZonedDateTime.now()): Applied? {
         val pending = pendingFile(dbFile)
@@ -92,7 +110,7 @@ internal object RestoreStaging {
         DriveIo.retry("set the current database aside") {
             for (suffix in listOf("") + SIDECARS) {
                 val live = File(dir, dbFile.name + suffix)
-                if (live.exists()) Files.move(live.toPath(), File(dir, dbFile.name + suffix + SET_ASIDE_INFIX + stamp).toPath())
+                if (live.exists()) Files.move(live.toPath(), File(dir, setAsideName(dbFile, stamp, suffix)).toPath())
             }
         }
         DriveIo.retry("move the restored database into place") { DriveIo.move(pending.toPath(), dbFile.toPath()) }
@@ -103,11 +121,21 @@ internal object RestoreStaging {
         return Applied(seq)
     }
 
+    /** `bnm_chat.db.before-restore-20260915-091200` and, for a sidecar, that name plus `-journal` / `-wal` / `-shm`. */
+    fun setAsideName(dbFile: File, stamp: String, suffix: String = ""): String = dbFile.name + SET_ASIDE_INFIX + stamp + suffix
+
+    /** The stamp of a set-aside file, sidecar or not; null for a file that is not one. */
+    fun setAsideStamp(dbFile: File, name: String): String? {
+        if (!name.startsWith(dbFile.name + SET_ASIDE_INFIX)) return null
+        var rest = name.removePrefix(dbFile.name + SET_ASIDE_INFIX)
+        SIDECARS.firstOrNull { rest.endsWith(it) }?.let { rest = rest.removeSuffix(it) }
+        return rest.takeIf { it.isNotBlank() }
+    }
+
     /** Keep the newest [KEEP_SET_ASIDE] set-aside sets (a set = the database and its sidecars under one stamp). */
     fun pruneSetAside(dbFile: File) {
-        val files = dbFile.parentFile.listFiles { f -> f.isFile && f.name.startsWith(dbFile.name) && f.name.contains(SET_ASIDE_INFIX) }
-            ?: return
-        val byStamp = files.groupBy { it.name.substringAfterLast(SET_ASIDE_INFIX) }
+        val files = dbFile.parentFile.listFiles { f -> f.isFile } ?: return
+        val byStamp = files.mapNotNull { f -> setAsideStamp(dbFile, f.name)?.let { it to f } }.groupBy({ it.first }, { it.second })
         byStamp.keys.sortedDescending().drop(KEEP_SET_ASIDE).forEach { stamp ->
             byStamp.getValue(stamp).forEach { f -> runCatching { f.delete() } }
         }

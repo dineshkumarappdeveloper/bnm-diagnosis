@@ -13,10 +13,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.future.await
 import kotlinx.coroutines.swing.Swing
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedOutputStream
@@ -35,6 +37,7 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Base64
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -71,6 +74,8 @@ internal class BackupService(
     private val kdfIterations: Int = BackupPolicy.KDF_ITERATIONS,
     /** "That is this computer's own disk" — a seam only because a test's two temp folders share one volume. */
     private val sameVolumeAsData: (folder: File, dataDir: File) -> Boolean = { f, d -> DriveScan.sameVolumeAsData(f, d) },
+    /** Runs just before a generation is written — a seam so a test can hold a snapshot mid-flight. */
+    private val beforeWrite: (reason: String) -> Unit = {},
 ) : BackupController {
 
     companion object {
@@ -88,6 +93,9 @@ internal class BackupService(
         const val MSG_SMALLER = "Data looks smaller than before — older backups are being kept. If this is expected, press Back up now."
         const val MSG_FULL = "Pendrive full — use a bigger pendrive"
         const val MSG_UNREADABLE = "Backup could not be read back — replace the pendrive"
+        const val MSG_RESTORE_WAITING = "A restore is waiting — close and reopen BNM Lab first"
+        const val MSG_RESTORED_FROM_OWN_DISK =
+            "These backups were restored from a copy on this computer's own disk — set up the backup pendrive again from Settings › Backup pendrive."
         private const val REASON_SCHEDULED = "scheduled"
         private const val REASON_MANUAL = "manual"
         private const val REASON_CLOSE = "close"
@@ -120,6 +128,8 @@ internal class BackupService(
     @Volatile private var working = false
     @Volatile private var dbProblem = false
     @Volatile private var verifyFailed = false
+    /** A restore is staged for the next launch: the pending file is the truth now, and this database gets no more generations. */
+    @Volatile private var restoreStaged = false
     @Volatile private var lastError: String? = null
     /** The marker's `created` when another PC adopted this pendrive — writes are refused until an owner re-binds. */
     @Volatile private var movedOn: String? = null
@@ -157,6 +167,9 @@ internal class BackupService(
             this.driver = driver
             driver.addListener(*WATCHED_TABLES.toTypedArray(), listener = Query.Listener { dirty.markDirty() })
         }
+        // A staged restore is applied by the launch that follows it; a database
+        // attached with no pending file beside it means that launch is this one.
+        if (!RestoreStaging.pendingFile(dbFile).exists()) restoreStaged = false
         runCatching { stagingFile().delete() }
         AppLog.i("Backup", "engine attached to the database (set up=${prefs.isBound}, dirty=${dirty.isDirty})")
     }
@@ -215,7 +228,11 @@ internal class BackupService(
         probeDataVersion()
         if (now - lastPrefsHashAt >= ms(BackupPolicy.PREFS_HASH_MS)) probePrefsHash(now)
 
-        if (prefs.isBound && present && movedOn == null && !dbProblem) {
+        // After a staged restore the next launch replaces this database: a
+        // generation of what it replaces would only pair the restored
+        // preferences with the old records, and its success would spend the
+        // row-count-drop allowance the restore itself needs.
+        if (prefs.isBound && present && movedOn == null && !dbProblem && !restoreStaged) {
             if (prefs.ownerRebindPending) rebindOwner()
             val backingOff = now < failUntilNanos
             val safety = dirty.isDirty && now - lastSnapshotAt >= ms(BackupPolicy.SAFETY_MS)
@@ -385,10 +402,11 @@ internal class BackupService(
             val header = ContainerHeader(
                 backupId = manifest.backupId, lab = manifest.labName, created = manifest.createdAt, seq = seq,
                 counts = counts, appVersion = appVersion, kdf = slots.kdf, slots = slots.slots, check = slots.check,
-                noncePrefix = BackupContainer.newNoncePrefix(),
+                noncePrefix = BackupContainer.newNoncePrefix(seq),
             )
             val carried = BackupAllowList.collect(prefs.store)
 
+            beforeWrite(reason)
             ensureSpace(vault, staging.length())
             val monthDir = File(DriveScan.snapshotsDir(vault), BackupNaming.monthDir(created))
             val final = File(monthDir, BackupNaming.fileName(created, seq))
@@ -416,6 +434,9 @@ internal class BackupService(
             failUntilNanos = 0L
             lastError = null
             dbProblem = false
+            // Written and read back whole: by definition a verified newest, so a
+            // morning read-back that failed no longer condemns the pendrive.
+            verifyFailed = false
             if (dropped) {
                 prefs.retentionPaused = true
                 lastError = MSG_SMALLER
@@ -517,9 +538,13 @@ internal class BackupService(
         val temp = File(stagingFile().parentFile, "verify.db")
         try {
             temp.parentFile?.mkdirs()
-            temp.delete()
-            val (_, stream) = BackupContainer.open(File(newest.path), dek)
-            stream.use { BackupBundle.extract(it, temp) }
+            // Retried like every other read of the stick: an on-access scanner
+            // holding the file is not a bad pendrive. A bad tag is never retried.
+            DriveIo.retry("read newest generation back") {
+                temp.delete()
+                val (_, stream) = BackupContainer.open(File(newest.path), dek)
+                stream.use { BackupBundle.extract(it, temp) }
+            }
             val verdict = BackupSnapshot.quickCheck(temp)
             if (verdict != "ok") throw BackupDamagedException("quick_check: $verdict")
             prefs.lastVerifiedAt = wall()
@@ -597,6 +622,7 @@ internal class BackupService(
     }
 
     override suspend fun backupNow(): Result<Unit> = locked {
+        if (restoreStaged) error(MSG_RESTORE_WAITING)
         if (prefs.retentionPaused) {
             prefs.retentionPaused = false
             if (lastError == MSG_SMALLER) lastError = null
@@ -683,7 +709,14 @@ internal class BackupService(
             seq = m.seq, appVersion = m.appVersion,
             patients = m.counts.patients.toInt(), orders = m.counts.orders.toInt(), results = m.counts.results.toInt(),
             staff = m.counts.staff.toInt(), tests = m.counts.tests.toInt(),
-            sameLicence = RestoreGuards.sameLicence(licenceFp(), m.labLicenseFp),
+            // The fingerprint is of the KEY; a re-issued key hashes differently
+            // for the same licence. The licence id inside the two tokens settles
+            // that case (see RestoreGuards.sameLicence).
+            sameLicence = RestoreGuards.sameLicence(
+                storedFp = licenceFp(), manifestFp = m.labLicenseFp,
+                storedLid = licenceId(prefs.store.getStringOrNull("license_jwt")),
+                manifestLid = licenceId(head.prefs["license_jwt"]),
+            ),
             newerThanThisApp = RestoreGuards.isNewer(m.appVersion, appVersion),
             currentPatientsHere = here.patients.toInt(),
         )
@@ -726,7 +759,12 @@ internal class BackupService(
         prefs.restoredFromRowId = head.manifest.previousDeviceRowId
         prefs.restoredAt = wall()
 
-        // Adopt the vault this generation came from.
+        // Adopt the vault this generation came from — its key material always
+        // (a later set-up of the real stick is then a re-bind), the FOLDER only
+        // when it is not this computer's own disk. A copy of the stick on the
+        // Desktop must never become "the backup pendrive": every generation
+        // would go to C:, the chip would say green, and the backups would die
+        // with the PC — the one failure this feature exists to prevent.
         val vault = DriveScan.vaultOf(gen.path)?.takeIf { DriveScan.markerPresent(it) }
         val sameVault = prefs.vaultId == header.backupId
         prefs.vaultId = header.backupId
@@ -737,14 +775,23 @@ internal class BackupService(
             else -> if (sameVault) prefs.recoveryCode else null
         }
         if (vault != null) {
-            prefs.dir = vault.absolutePath
             prefs.seq = maxOf(prefs.seq, DriveScan.maxSeq(vault))
-            prefs.ownerRebindPending = true
+            if (sameVolumeAsData(vault, dataDir())) {
+                // The old binding (if any) named another vault: it is no longer ours.
+                if (!sameVault) prefs.unbind()
+                notes += MSG_RESTORED_FROM_OWN_DISK
+                AppLog.w("Backup", "restored from a copy on this computer's own disk — not adopted as the backup pendrive")
+            } else {
+                prefs.dir = vault.absolutePath
+                prefs.ownerRebindPending = true
+            }
         }
         prefs.retentionPaused = false
         dirty.reset()
         RestoreStaging.writeAppliedMarker(db, gen.seq)
         prefs.flushNow()
+        // From here until the process exits, this database gets no generation.
+        restoreStaged = true
         AppLog.i("Backup", "restore of generation ${gen.seq} staged for the next launch")
         publish()
         RestoreStaged(notes)
@@ -774,17 +821,31 @@ internal class BackupService(
     override suspend fun flushOnExit(maxWaitMs: Long): Boolean {
         if (!dirty.isDirty) return true
         if (!prefs.isBound) return false
-        // The snapshot cannot be interrupted; past the deadline the window closes
-        // and the shutdown hook removes the half-written file.
-        return withTimeoutOrNull(maxWaitMs) {
-            withContext(Dispatchers.IO) {
+        // A staged restore replaces this database at the next launch: nothing
+        // written since is worth a generation — the pending file is the truth.
+        if (restoreStaged) return true
+        // The snapshot cannot be interrupted, so it runs on its own thread and
+        // the window waits for it only up to the deadline (a coroutine timeout
+        // around blocking JDBC would wait for the whole snapshot and then throw
+        // its result away). Past the deadline the operator is asked; if they
+        // close anyway, the shutdown hook removes the half-written file.
+        val flush = CompletableFuture<Unit>()
+        Thread({
+            try {
                 engineLock.withLock {
                     probeDrive(nanos())
-                    if (!present || movedOn != null) false
-                    else snapshotLocked(REASON_CLOSE).isSuccess && !dirty.isDirty
+                    if (present && movedOn == null) snapshotLocked(REASON_CLOSE)
                 }
+            } catch (t: Throwable) {
+                AppLog.e("Backup", "close-window flush failed", t)
+            } finally {
+                flush.complete(Unit)
             }
-        } ?: false
+        }, "backup-close-flush").apply { isDaemon = true }.start()
+        withTimeoutOrNull(maxWaitMs) { flush.await() }
+        // Whatever happened above, the answer is the live state: a slow flush
+        // that finished IS a flush, and a fast one that missed a commit is not.
+        return !dirty.isDirty
     }
 
     override suspend fun beforeTenantWipe() {
@@ -895,7 +956,7 @@ internal class BackupService(
             "lastOk=${prefs.lastOkAt?.let(::iso)} lastVerified=${prefs.lastVerifiedAt?.let(::iso)} " +
             "dirtySince=${dirty.dirtySinceWall?.let(::iso)}\n" +
             "writeErrors=${prefs.writeErrors} consecutiveFailures=$consecutiveFailures retentionPaused=${prefs.retentionPaused} " +
-            "dbProblem=$dbProblem verifyFailed=$verifyFailed movedToAnotherPc=${movedOn != null}\n" +
+            "dbProblem=$dbProblem verifyFailed=$verifyFailed movedToAnotherPc=${movedOn != null} restoreStaged=$restoreStaged\n" +
             "restoredFrom=${prefs.restoredFrom?.take(8)} ownerRebindPending=${prefs.ownerRebindPending} " +
             "lastError=${s.lastError}"
     }
@@ -925,13 +986,20 @@ internal class BackupService(
     private fun deviceRowId(): String? = prefs.store.getStringOrNull("license_device_row_id")?.takeIf { it.isNotBlank() }
 
     /** The `ed` claim of the stored licence token — no verification, display only. */
-    private fun edition(): String? {
-        val jwt = prefs.store.getStringOrNull("license_jwt") ?: return null
+    private fun edition(): String? = claimOf(prefs.store.getStringOrNull("license_jwt"), "ed")
+
+    /** The `lid` claim of a licence token: the licence itself, which a re-issued key does not change. */
+    private fun licenceId(jwt: String?): String? = claimOf(jwt, "lid")
+
+    /** A string claim of a licence token — no verification; a JSON `null` reads as absent, not as "null". */
+    private fun claimOf(jwt: String?, name: String): String? {
+        if (jwt.isNullOrBlank()) return null
         return runCatching {
             var p = jwt.split(".")[1].replace('-', '+').replace('_', '/')
             while (p.length % 4 != 0) p += "="
-            Json.parseToJsonElement(String(Base64.getDecoder().decode(p), Charsets.UTF_8)).jsonObject["ed"]?.jsonPrimitive?.content
-        }.getOrNull()
+            Json.parseToJsonElement(String(Base64.getDecoder().decode(p), Charsets.UTF_8)).jsonObject[name]
+                ?.takeIf { it !is JsonNull }?.jsonPrimitive?.content
+        }.getOrNull()?.takeIf { it.isNotBlank() }
     }
 
     private fun movedMessage(created: String): String =

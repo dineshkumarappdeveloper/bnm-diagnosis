@@ -12,6 +12,10 @@ import java.nio.file.StandardCopyOption
  * holds a freshly written file open for a few seconds; a rename, delete or
  * read-back that lands in that window fails with a sharing violation and
  * would otherwise count as a failed backup. Ten tries, half a second apart.
+ *
+ * A [BackupDamagedException] is never retried: it says the BYTES are wrong
+ * (a bad tag, a file cut short), and reading the same bytes ten times, half
+ * a second apart, cannot change that verdict.
  */
 internal object DriveIo {
     fun <T> retry(
@@ -24,6 +28,8 @@ internal object DriveIo {
         for (attempt in 1..times) {
             try {
                 return block()
+            } catch (e: BackupDamagedException) {
+                throw e
             } catch (e: IOException) {
                 last = e
                 if (attempt == times) break

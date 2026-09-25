@@ -95,6 +95,16 @@ class BackupDialogsRenderTest {
     }
 
     @Test
+    fun `restore - generations from a folder on this computer's own disk`() {
+        val s = RestoreFlowState().apply {
+            step = RestoreFlowState.Step.GENERATIONS
+            folderOnOwnDisk = true
+            generations = listOf(BackupFixtures.generation(1204, 2), BackupFixtures.generation(1190, 30))
+        }
+        body("restore-generations-own-disk") { RestoreBody(s, RestoreActions()) }
+    }
+
+    @Test
     fun `restore - unlock with the recovery code`() {
         val s = RestoreFlowState(BackupFixtures.generation(1204, 2)).apply {
             useRecoveryCode = true

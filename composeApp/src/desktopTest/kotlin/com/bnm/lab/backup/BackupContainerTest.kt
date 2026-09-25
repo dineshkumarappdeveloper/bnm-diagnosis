@@ -3,11 +3,13 @@ package com.bnm.lab.backup
 import java.io.File
 import java.nio.file.Files
 import java.security.MessageDigest
+import java.security.SecureRandom
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -29,7 +31,7 @@ class BackupContainerTest {
         backupId = "vault-1", lab = "Test Lab", created = "2026-09-15T09:12:00+05:30", seq = 7,
         counts = BackupCounts(patients = 1204, orders = 3410, results = 22118, staff = 6, tests = 223),
         appVersion = "1.2.0", kdf = vault.slots.kdf, slots = vault.slots.slots, check = vault.slots.check,
-        noncePrefix = BackupContainer.newNoncePrefix(),
+        noncePrefix = BackupContainer.newNoncePrefix(7),
     )
 
     private fun write(payload: ByteArray, chunk: Int = BackupPolicy.CHUNK_BYTES, headerOnly: Boolean = false): File {
@@ -75,6 +77,54 @@ class BackupContainerTest {
         assertNull(BackupContainer.unlock(h, Unlock.ThisPc, null))
         val refused = assertFailsWith<BackupDamagedException> { BackupContainer.open(f, random(32)) }
         assertTrue(refused.message!!.contains("does not open"), refused.message)
+    }
+
+    @Test
+    fun `two generations of one vault never share a nonce - the generation number is in the prefix`() {
+        // The data key lives for the whole vault, so the prefix is the only thing
+        // keeping generations apart. Same random bytes on purpose: the seq alone
+        // must separate them.
+        val zeros = object : SecureRandom() {
+            override fun nextBytes(bytes: ByteArray) = bytes.fill(0)
+        }
+        val p7 = BackupContainer.unb64(BackupContainer.newNoncePrefix(7, zeros))
+        val p8 = BackupContainer.unb64(BackupContainer.newNoncePrefix(8, zeros))
+        assertEquals(8, p7.size)
+        assertEquals(12, BackupContainer.nonceFor(p7, 0).size)
+        assertFalse(BackupContainer.nonceFor(p7, 0).contentEquals(BackupContainer.nonceFor(p8, 0)), "seq 7 and seq 8, chunk 0")
+        assertFalse(BackupContainer.nonceFor(p7, 0).contentEquals(BackupContainer.nonceFor(p7, 1)), "chunk 0 and chunk 1 of one file")
+        // Two files with real randomness and the same seq still differ (a cloned vault on two sticks).
+        val a = BackupContainer.unb64(BackupContainer.newNoncePrefix(7))
+        val b = BackupContainer.unb64(BackupContainer.newNoncePrefix(7))
+        assertFalse(a.contentEquals(b))
+    }
+
+    @Test
+    fun `a format-2 file - 4-byte prefix, int64 index - still opens, and a prefix that does not match its format is refused`() {
+        val payload = random(20_000)
+        val legacyPrefix = BackupContainer.b64(ByteArray(4).also { SecureRandom().nextBytes(it) })
+        val h = header().copy(v = BackupContainer.VERSION_LEGACY, noncePrefix = legacyPrefix)
+        val f = Files.createTempFile("gen2", ".bnmlab").toFile().apply { deleteOnExit() }
+        f.outputStream().buffered().use { raw ->
+            val hb = BackupContainer.writeHeader(raw, h, version = BackupContainer.VERSION_LEGACY)
+            BackupContainer.encryptingStream(raw, vault.dek, hb, h.noncePrefix, 4096).use { it.write(payload) }
+        }
+        val (read, _) = BackupContainer.readHeader(f)
+        assertEquals(BackupContainer.VERSION_LEGACY, read.v, "the version byte, not the JSON, says the format")
+        assertContentEquals(payload, readAll(f, chunk = 4096))
+        assertEquals(payload.size.toLong(), BackupContainer.verifyFile(f, vault.dek, 4096))
+
+        // A current-format byte over a legacy 4-byte prefix is not a readable file.
+        val g = Files.createTempFile("gen3", ".bnmlab").toFile().apply { deleteOnExit() }
+        g.outputStream().buffered().use { raw ->
+            val hb = BackupContainer.writeHeader(raw, h.copy(v = BackupContainer.VERSION), version = BackupContainer.VERSION)
+            BackupContainer.encryptingStream(raw, vault.dek, hb, h.noncePrefix, 4096).use { it.write(payload) }
+        }
+        assertFailsWith<BackupDamagedException> { BackupContainer.readHeader(g) }
+        // And a format nobody wrote is refused before the header is even parsed.
+        val z = Files.createTempFile("gen9", ".bnmlab").toFile().apply { deleteOnExit() }
+        z.outputStream().buffered().use { raw -> BackupContainer.writeHeader(raw, h, version = 9) }
+        assertFailsWith<BackupDamagedException> { BackupContainer.readHeader(z) }
     }
 
     @Test

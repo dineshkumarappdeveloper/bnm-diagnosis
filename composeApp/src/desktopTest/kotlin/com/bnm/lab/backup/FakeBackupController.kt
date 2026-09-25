@@ -25,6 +25,8 @@ class FakeBackupController(initial: BackupStatus = BackupStatus()) : BackupContr
     var stageResult: Result<RestoreStaged> = Result.success(RestoreStaged(emptyList()))
     var offer: BackupGeneration? = null
     var flushResult: Boolean = true
+    /** Runs inside [flushOnExit] before it answers — "the engine finished after the deadline" is a status change here. */
+    var onFlush: () -> Unit = {}
 
     val calls = mutableListOf<String>()
     var closed = false
@@ -48,7 +50,7 @@ class FakeBackupController(initial: BackupStatus = BackupStatus()) : BackupContr
     }
     override suspend fun restoreOfferAtLaunch(): BackupGeneration? { calls += "restoreOfferAtLaunch"; return offer }
     override fun closeApp() { calls += "closeApp"; closed = true }
-    override suspend fun flushOnExit(maxWaitMs: Long): Boolean { calls += "flushOnExit:$maxWaitMs"; return flushResult }
+    override suspend fun flushOnExit(maxWaitMs: Long): Boolean { calls += "flushOnExit:$maxWaitMs"; onFlush(); return flushResult }
     override suspend fun beforeTenantWipe() { calls += "beforeTenantWipe" }
     override suspend fun afterTenantWipe() { calls += "afterTenantWipe" }
     override fun dismissBannerForSession() {
