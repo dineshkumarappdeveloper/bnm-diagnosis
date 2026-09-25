@@ -282,6 +282,56 @@ test('peer notices: lab drops off → calls are held back with a reason; lab bac
     assert.equal((await runTool(link, 'lab_call', { tool: 'echo', args: { text: 'back' } })).content[0].text, 'back');
 });
 
+test('peer notices: the lab-facing wording (`connected`/`disconnected`) is understood too', async () => {
+    const { relay, link } = setup();
+    await runTool(link, 'lab_connect', { code: relay.code });
+    relay.support.serverSend({ t: 'peer', state: 'disconnected' });
+    await until(() => link.peer === 'lab_disconnected');
+    relay.labReconnected('connected');
+    await until(() => link.peer === 'lab');
+    assert.equal((await runTool(link, 'lab_call', { tool: 'echo', args: { text: 'back' } })).content[0].text, 'back');
+});
+
+test('no_lab holds the calls but keeps the seat: the socket stays open and the session works when the lab returns', async () => {
+    const { relay, link } = setup();
+    await runTool(link, 'lab_connect', { code: relay.code });
+    const sock = relay.support;
+    const pending = runTool(link, 'lab_call', { tool: 'slow' });
+    await until(() => relay.calls.some((c) => c.name === 'slow'));
+    relay.noLab(); // the real DO answers this and leaves the socket alone
+    const res = await pending;
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /lab's connection to the relay dropped/);
+    assert.equal(sock.closed, null, 'the support seat must not be abandoned');
+    assert.equal(link.state, 'connected');
+    assert.equal(JSON.parse(textOf(await runTool(link, 'lab_status', {}))).peer, 'lab disconnected');
+    relay.labReconnected();
+    await until(() => link.peer === 'lab');
+    assert.equal((await runTool(link, 'lab_call', { tool: 'echo', args: { text: 'back' } })).content[0].text, 'back');
+});
+
+test('after no_lab a fresh lab_connect is not refused as busy — the old socket was hung up', async () => {
+    const { relay, link } = setup();
+    await runTool(link, 'lab_connect', { code: relay.code });
+    const first = relay.support;
+    relay.noLab();
+    await until(() => link.peer === 'lab_disconnected');
+    const again = await runTool(link, 'lab_connect', { code: relay.code });
+    assert.equal(again.isError, false, textOf(again));
+    assert.equal(first.closed?.by, 'client', 'the first socket was hung up, not left seated');
+    assert.equal(relay.sockets.length, 2);
+});
+
+test('a fatal relay error frame hangs the socket up instead of leaving it open', async () => {
+    const { relay, link } = setup();
+    await runTool(link, 'lab_connect', { code: relay.code });
+    const sock = relay.support;
+    sock.serverSend({ t: 'error', code: 'busy' }); // the real DO does not close on every error
+    await until(() => link.state === 'disconnected');
+    assert.equal(sock.closed?.by, 'client');
+    assert.match(link.lastError, /Another engineer is already connected/);
+});
+
 test('the lab ending the session rejects the call in flight and leaves the bridge disconnected', async () => {
     const { relay, link } = setup();
     await runTool(link, 'lab_connect', { code: relay.code });

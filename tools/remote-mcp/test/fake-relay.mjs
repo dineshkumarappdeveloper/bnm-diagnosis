@@ -142,8 +142,14 @@ export class FakeRelay {
         this.support?.serverSend({ t: 'peer', state: 'lab_disconnected' });
     }
 
-    labReconnected() {
-        this.support?.serverSend({ t: 'peer', state: 'connected' });
+    /** What the DO sends the engineer when a lab takes the seat again (session.ts). */
+    labReconnected(state = 'lab_connected') {
+        this.support?.serverSend({ t: 'peer', state });
+    }
+
+    /** The DO's answer when a frame arrives while the lab seat is empty: no close. */
+    noLab() {
+        this.support?.serverSend({ t: 'error', code: 'no_lab' });
     }
 
     labEnd() {
