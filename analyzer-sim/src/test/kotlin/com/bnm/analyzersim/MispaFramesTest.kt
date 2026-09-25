@@ -81,10 +81,55 @@ class MispaFramesTest {
     }
 
     @Test
-    fun `no-histograms still emits the section markers, just empty`() {
+    fun `no-histograms still emits the section markers, carrying nothing`() {
         val s = sections(MispaFrames.build(spec(histograms = false)))
         assertEquals(7, s.size, "the frame keeps its shape")
-        assertTrue(s[1].isEmpty() && s[2].isEmpty() && s[3].isEmpty() && s[4].isEmpty())
+        for (i in 1..4) {
+            assertTrue(s[i].isBlank(), "section $i should carry nothing, got '${s[i]}'")
+            // Blank, not EMPTY: two empty sections in a row would write "###"
+            // and the app's extractor would end the frame there. See below.
+            assertTrue(s[i].isNotEmpty(), "section $i is empty — the frame can self-truncate")
+        }
+    }
+
+    /**
+     * The frame must contain exactly ONE end-of-frame marker: its own.
+     *
+     * The app never parses a whole string off the wire — it runs
+     * `MispaCountX.extractFrameText` over an accumulating buffer and stops at
+     * the FIRST `###`. A frame carrying a second one arrives cut short and its
+     * tail merges with the next sample. `--no-histograms` on a profile that
+     * raises no disease flags used to emit six hashes in a row and do exactly
+     * that, so this sweeps every combination rather than the one that broke.
+     */
+    @Test
+    fun `a frame never carries a second end-of-frame marker`() {
+        for (profile in Profile.entries) {
+            for (histograms in listOf(true, false)) {
+                for (unknownCode in listOf(true, false)) {
+                    for (id in listOf("ACC-S1-00042", null)) {
+                        val frame = MispaFrames.build(
+                            spec(id = id, histograms = histograms, unknownCode = unknownCode, profile = profile))
+                        val where = "$profile histograms=$histograms unknownCode=$unknownCode id=$id"
+                        assertEquals(frame.length - 3, frame.indexOf("###", 3),
+                            "$where emitted a frame the app would cut short:\n$frame")
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * The blanking must not move the sections: the parser reads discriminators
+     * at index 4 and disease flags at index 5 BY POSITION, so a section dropped
+     * rather than blanked would silently file the disease flags as a histogram.
+     */
+    @Test
+    fun `the disease flags stay in section five even with no histograms`() {
+        val spec = spec(histograms = false, profile = Profile.ANAEMIA)
+        val s = sections(MispaFrames.build(spec))
+        assertEquals(7, s.size)
+        assertEquals(MispaFrames.diseaseFlags(spec), s[5].split('?').filter { it.isNotEmpty() })
     }
 
     @Test

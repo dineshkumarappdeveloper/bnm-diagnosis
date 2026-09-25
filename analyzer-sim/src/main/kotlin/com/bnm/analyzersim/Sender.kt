@@ -50,6 +50,7 @@ class Sender(
     /** Process exit code: 0 when every sample went out as intended. */
     fun run(): Int {
         out.info(banner())
+        for (caveat in caveats()) out.warn(caveat)
         val factory = factory()
         return try {
             when {
@@ -231,6 +232,7 @@ class Sender(
         sequence = index + 1,
         qc = o.qc,
         histograms = o.histograms,
+        cbcOnly = o.cbcOnly,
         image = o.image,
         unknownCode = o.unknownCode,
         badUnits = o.badUnits,
@@ -259,6 +261,30 @@ class Sender(
         else -> TcpClientTransport.factory(o.host, o.port)
     }
 
+    /**
+     * What this run will NOT do, said before it does anything.
+     *
+     * A switch that is quietly a no-op is worse than a missing one: the
+     * engineer ticks it off the commissioning list having tested nothing.
+     */
+    private fun caveats(): List<String> = buildList {
+        if (o.qc && o.analyzer == Analyzer.MISPA) add(
+            "--qc changes nothing on this link. The Mispa Count X format carries no processing-id field, " +
+                "so this goes out as an ordinary patient frame and BNM Lab WILL file it as a patient " +
+                "result. QC handling can only be rehearsed on the Mindray link.")
+    }
+
+    /** The banner shown before a live-lab run, which is the only warning between
+     *  a shell-history re-run and synthetic results on a real patient's order. */
+    private fun liveLabWarning(): String =
+        "  " + "!".repeat(66) + "\n" +
+            "  ! SENDING TO ANOTHER MACHINE: ${o.host}\n" +
+            "  ! These results are invented. Once BNM Lab has filed them they are\n" +
+            "  ! indistinguishable from the analyzer's own: on the order with that\n" +
+            "  ! accession, attributed to the instrument, approvable, printable.\n" +
+            "  ! Specimen id(s): " + summariseIds() + "\n" +
+            "  " + "!".repeat(66)
+
     private fun banner(): String = buildString {
         appendLine("BNM Analyzer Simulator — ${o.analyzer.label}")
         appendLine("  driver the lab must have selected: ${o.analyzer.driverKey}")
@@ -267,10 +293,12 @@ class Sender(
             o.usesSerial -> "serial ${o.serialPort} @ ${o.baud} 8-N-1"
             else -> "TCP ${o.host}:${o.port} (the simulator dials out, as the analyzer does)"
         })
-        appendLine("  samples: ${o.samples} · profile ${o.profile.cliName} · seed ${o.seed}")
+        appendLine("  samples: ${o.samples} · profile ${o.profile.cliName} · seed ${o.seed}" +
+            if (o.cbcOnly) " · CBC-only run (no differential)" else "")
         val faults = faultSummary()
         if (faults.isNotEmpty()) appendLine("  FAULTS: $faults")
-        append("  specimen id(s): " + if (o.noSpecimen) "none keyed (--no-specimen)" else summariseIds())
+        appendLine("  specimen id(s): " + if (o.noSpecimen) "none keyed (--no-specimen)" else summariseIds())
+        if (!o.dryRun && !o.usesSerial && !Cli.isLoopback(o.host)) append(liveLabWarning())
     }
 
     private fun summariseIds(): String =
@@ -287,14 +315,18 @@ class Sender(
         if (o.unknownCode) add("unknown-code")
         if (o.badUnits) add("bad-units")
         if (o.noSpecimen) add("no-specimen")
-        if (o.qc) add("qc")
+        // Only where it changes the frame: the Mispa has no QC field, and a
+        // summary line saying "qc" over a plain patient frame is a lie the
+        // engineer would take to mean the app's QC handling had been exercised.
+        if (o.qc && o.analyzer == Analyzer.MINDRAY) add("qc")
     }.joinToString(", ")
 
     private fun describe(spec: SampleSpec): String {
         val c = spec.cbc
         val id = spec.specimenId ?: "(no specimen id)"
         return "$id · WBC ${fmt(c.wbc, 2)} · RBC ${fmt(c.rbc, 2)} · HGB ${fmt(c.hgb, 1)} g/dL · " +
-            "PLT ${fmt(c.plt, 0)}" + if (spec.qc) " · QC" else ""
+            "PLT ${fmt(c.plt, 0)}" +
+            if (spec.qc && o.analyzer == Analyzer.MINDRAY) " · QC" else ""
     }
 
     private fun percentOf(part: Int, whole: Int): Int = if (whole == 0) 0 else part * 100 / whole

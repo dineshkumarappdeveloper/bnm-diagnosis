@@ -187,17 +187,32 @@ fun cbcFor(profile: Profile, seed: Long): Cbc {
             diff = Diff.of(28.0 + rng.jitter(6.0), 62.0 + rng.jitter(6.0), 7.0 + rng.jitter(2.0),
                 2.0 + rng.jitter(1.0), 1.0 + rng.jitter(0.5)),
         )
-        Profile.RANDOM -> Cbc(
-            wbc = round2(rng.between(2.5, 19.0)),
-            rbc = round2(rng.between(3.1, 6.0)),
-            hgb = round1(rng.between(7.5, 17.5)),
-            mcv = round1(rng.between(68.0, 104.0)),
-            plt = round0(rng.between(60.0, 520.0)),
-            mpv = round1(rng.between(7.0, 12.5)),
-            rdwCv = round1(rng.between(11.5, 19.0)),
-            diff = Diff.of(rng.between(35.0, 80.0), rng.between(12.0, 45.0), rng.between(2.0, 11.0),
-                rng.between(0.4, 7.0), rng.between(0.1, 1.5)),
-        )
+        Profile.RANDOM -> {
+            // HGB is DERIVED here, not drawn. Three free uniforms for hgb, rbc
+            // and mcv are each individually plausible and jointly impossible:
+            // at the default seed they used to give MCHC 55.7 g/dL, a
+            // haemoglobin concentration no red cell can hold (the solubility
+            // ceiling is around 37). The frame parsed, the arithmetic agreed
+            // with itself, and a pathologist reading the rehearsal result would
+            // have concluded the app had corrupted the numbers. A real
+            // patient's haemoglobin follows the cell volume, so draw the
+            // CONCENTRATION across its physiological range and let HGB fall out
+            // of it — which lands MCH (= MCV × MCHC / 100) in range for free.
+            val rbc = round2(rng.between(3.1, 6.0))
+            val mcv = round1(rng.between(68.0, 104.0))
+            val mchc = rng.between(31.0, 35.5)
+            Cbc(
+                wbc = round2(rng.between(2.5, 19.0)),
+                rbc = rbc,
+                hgb = round1(rbc * mcv / 10.0 * mchc / 100.0),
+                mcv = mcv,
+                plt = round0(rng.between(60.0, 520.0)),
+                mpv = round1(rng.between(7.0, 12.5)),
+                rdwCv = round1(rng.between(11.5, 19.0)),
+                diff = Diff.of(rng.between(35.0, 80.0), rng.between(12.0, 45.0), rng.between(2.0, 11.0),
+                    rng.between(0.4, 7.0), rng.between(0.1, 1.5)),
+            )
+        }
     }
 }
 

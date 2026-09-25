@@ -63,6 +63,38 @@ class ValuesTest {
         }
     }
 
+    /**
+     * Derived-and-consistent is not the same as possible. Three independent
+     * draws for HGB, RBC and MCV agree with each other perfectly and still
+     * describe a patient who cannot exist: the random profile used to emit
+     * MCHC 55.7 g/dL at the default seed, roughly half again the concentration
+     * haemoglobin can reach in solution. A lab reading that rehearsal result
+     * concludes the app corrupted it.
+     */
+    @Test
+    fun `the red-cell indices are ones a patient could actually have`() {
+        for (profile in Profile.entries) for (seed in -200L..200L) {
+            val c = cbcFor(profile, seed)
+            assertTrue(c.mchc in 25.0..39.0,
+                "$profile seed $seed: MCHC ${c.mchc} g/dL cannot exist in vivo ($c)")
+            assertTrue(c.mch in 18.0..40.0, "$profile seed $seed: MCH ${c.mch} pg ($c)")
+        }
+    }
+
+    /**
+     * The random profile is the one with nothing holding it in place, so it is
+     * held to the tighter band a real analyzer's population sits in.
+     */
+    @Test
+    fun `the random profile stays inside a normal analyzer's spread`() {
+        for (seed in -200L..200L) {
+            val c = cbcFor(Profile.RANDOM, seed)
+            assertTrue(c.mchc in 29.0..37.0, "seed $seed drew MCHC ${c.mchc} ($c)")
+            assertTrue(c.mch in 20.0..40.0, "seed $seed drew MCH ${c.mch} ($c)")
+            assertTrue(c.hgb > 0.0 && c.hct > 0.0, "seed $seed drew $c")
+        }
+    }
+
     @Test
     fun `a seed is a patient — the same seed is the same blood count forever`() {
         for (profile in Profile.entries) {

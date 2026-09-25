@@ -50,7 +50,9 @@ data class Options(
     val port: Int = 0,
     val serialPort: String? = null,
     val baud: Int = 115200,
-    val ids: List<String> = listOf("SIM-0001"),
+    /** Self-identifying on purpose: an id that could be mistaken for a real
+     *  accession is one `findOrder` tail-match away from a patient's order. */
+    val ids: List<String> = listOf("BNMTEST-0001"),
     val count: Int = 0,
     val intervalSeconds: Double = 0.0,
     val profile: Profile = Profile.NORMAL,
@@ -58,6 +60,8 @@ data class Options(
     val patientId: String? = null,
     val qc: Boolean = false,
     val histograms: Boolean = true,
+    /** Mindray run mode CBC: no differential at all, not merely no curves. */
+    val cbcOnly: Boolean = false,
     val image: Boolean = false,
     val seed: Long = 1L,
     val ackTimeoutMs: Long = 5_000,
@@ -66,6 +70,8 @@ data class Options(
     val noSpecimen: Boolean = false,
     val faults: Faults = Faults(),
     val dryRun: Boolean = false,
+    /** Typed by hand, this run, to send synthetic results to another machine. */
+    val liveLab: Boolean = false,
     val verbose: Boolean = false,
 ) {
     /** How many samples this run sends. Defaults to "one per id". */
@@ -102,14 +108,18 @@ object Cli {
 
         WHAT TO SEND
           --id <ids>           specimen id(s): one, a comma list, or a pattern
-                               such as ACC-S1-000{1..5}
+                               such as 'ACC-S1-000{1..5}'. QUOTE the pattern:
+                               bash and zsh expand braces before this tool
+                               sees them
           --count <n>          how many samples (default: one per id; ids cycle)
           --interval <s>       seconds between samples (default 0)
           --profile <name>     ${Profile.names}
           --patient "<name>"   patient name (mindray PID-5; mispa carries none)
           --patient-id <id>    patient id
-          --qc                 a QC material run (mindray MSH-11 = Q)
-          --no-histograms      numbers only, no curves
+          --qc                 a QC material run (mindray MSH-11 = Q; the Mispa
+                               format has no such field, and says so)
+          --no-histograms      numbers only, no curves — still a 5-part run
+          --cbc-only           mindray run mode CBC: no differential at all
           --image              attach the DIFF scattergram bitmap (mindray, ~40 KB)
           --seed <n>           reproducible values and curves (default 1)
 
@@ -129,6 +139,11 @@ object Cli {
           --burst <n>          n connections at once
           --hang               connect, send nothing, hold the socket open
 
+        SENDING TO A LAB THAT IS NOT THIS MACHINE
+          --live-lab           required before --host may name anything but this
+                               machine. These results are indistinguishable from
+                               the analyzer's once BNM Lab has filed them.
+
         SEEING WHAT HAPPENS
           --dry-run            print the frame, send nothing
           --verbose            print the frame as it goes out (long base64 blobs
@@ -136,9 +151,9 @@ object Cli {
           --list-profiles      describe the value profiles and exit
 
         EXAMPLES
-          analyzer-sim mindray --host 192.168.1.50
+          analyzer-sim mindray --host 192.168.1.50 --live-lab
           analyzer-sim mindray --id ACC-S1-00042 --profile critical --image
-          analyzer-sim mispa --serial COM3 --id ACC-S1-000{1..5} --interval 2
+          analyzer-sim mispa --serial COM3 --id 'ACC-S1-000{1..5}' --interval 2
           analyzer-sim mindray --no-specimen            # lands in the claim queue
           analyzer-sim mindray --truncated              # half a frame, then silence
     """.trimIndent()
@@ -191,6 +206,8 @@ object Cli {
                 "--patient-id" -> o = o.copy(patientId = next(arg))
                 "--qc" -> o = o.copy(qc = true)
                 "--no-histograms" -> o = o.copy(histograms = false)
+                "--cbc-only" -> o = o.copy(cbcOnly = true)
+                "--live-lab" -> o = o.copy(liveLab = true)
                 "--image" -> o = o.copy(image = true)
                 "--seed" -> o = o.copy(seed = long(arg))
                 "--ack-timeout" -> o = o.copy(ackTimeoutMs = (double(arg) * 1000).toLong())
@@ -206,7 +223,7 @@ object Cli {
                 "--hang" -> faults = faults.copy(hang = true)
                 "--dry-run" -> o = o.copy(dryRun = true)
                 "--verbose" -> o = o.copy(verbose = true)
-                else -> throw CliError("Unknown option '$arg'. Run with --help for the list.")
+                else -> throw CliError(unknownOption(arg))
             }
             i++
         }
@@ -216,20 +233,77 @@ object Cli {
         return opts
     }
 
-    private fun validate(o: Options) {
+    /**
+     * Everything the tool refuses to do, in one place — the menu runs this too,
+     * so a combination that is impossible on the command line is impossible
+     * from the no-flags path as well.
+     */
+    internal fun validate(o: Options) {
         if (o.usesSerial) {
             if (o.analyzer == Analyzer.MINDRAY) throw CliError(
                 "The Mindray driver is TCP-only: it waits for an ACK on the same socket, and a " +
                     "serial cable has no way to carry one. Drop --serial and give --host/--port.")
             if (o.baud !in 1..4_000_000) throw CliError("--baud ${o.baud} is not a serial speed.")
+            // The three faults below are all about a CONNECTION, and a cable has
+            // none. Worse than useless on serial: the app builds one frame
+            // assembler per listener and only reports leftover bytes when the
+            // link closes, so a half frame neither shows up in the log nor goes
+            // away — it waits in the buffer and merges with the next sample.
+            if (o.faults.truncated) throw CliError(
+                "--truncated needs a connection to cut, and a serial cable has none. On this link the app " +
+                    "would never log the unframed bytes, and the half frame would sit in its buffer and " +
+                    "merge with your next sample — losing both. Rehearse truncation over --host/--port.")
+            if (o.faults.burst > 0) throw CliError(
+                "--burst opens several connections at once; a serial cable is one link, opened once. " +
+                    "Several senders would interleave their bytes into one stream and nothing would frame. " +
+                    "Rehearse a burst over --host/--port.")
+            if (o.faults.hang) throw CliError(
+                "--hang holds a connection open with nothing on it; a cable is always 'open', so there is " +
+                    "nothing to rehearse. Use --host/--port, where the app shows the peer with bytes 0.")
         } else if (o.port !in 1..65535) {
             throw CliError("--port ${o.port} is outside 1-65535.")
         }
+        if (o.cbcOnly && o.analyzer != Analyzer.MINDRAY) throw CliError(
+            "--cbc-only is a Mindray run mode. The Mispa Count X is a 3-part analyzer: it always reports " +
+                "LYMP/MID/GRAN and has no CBC-only mode to imitate.")
         if (o.count < 0) throw CliError("--count cannot be negative.")
         if (o.faults.burst < 0) throw CliError("--burst cannot be negative.")
         if (o.ids.isEmpty()) throw CliError("--id was given but expanded to nothing.")
         if (o.ackTimeoutMs < 0) throw CliError("--ack-timeout cannot be negative.")
+        if (!o.dryRun && !o.usesSerial && !isLoopback(o.host) && !o.liveLab) throw CliError(
+            "--host ${o.host} is not this machine, and this tool has no --live-lab. Everything it sends is " +
+                "INVENTED, and BNM Lab files it exactly as it would the analyzer's own numbers: onto the " +
+                "order with that accession, attributed to the instrument, with nothing in the frame, the " +
+                "log or the report to say it was generated. If that machine is a bench install and you " +
+                "meant it, add --live-lab. If it is a lab seeing patients, do not.")
     }
+
+    /**
+     * Whether [host] is this machine, decided from the TEXT.
+     *
+     * Deliberately no name resolution: a DNS lookup would put the network's
+     * opinion between the engineer and their own typing, and a name that
+     * happens to resolve to 127.0.0.1 today is not a promise about tomorrow.
+     * Anything that is not plainly loopback is treated as somebody else's PC.
+     */
+    fun isLoopback(host: String): Boolean {
+        val h = host.trim().removePrefix("[").removeSuffix("]").lowercase()
+        if (h == "localhost" || h == "::1" || h == "0:0:0:0:0:0:0:1") return true
+        val octets = h.split('.')
+        if (octets.size != 4) return false
+        val numbers = octets.map { it.toIntOrNull() ?: return false }
+        return numbers[0] == 127 && numbers.all { it in 0..255 }
+    }
+
+    /**
+     * An unknown argument that is not spelled like a flag is nearly always a
+     * brace pattern the shell already expanded, so say that instead of leaving
+     * the engineer staring at a command the help text itself printed.
+     */
+    private fun unknownOption(arg: String): String =
+        if (arg.startsWith("-")) "Unknown option '$arg'. Run with --help for the list."
+        else "Unknown option '$arg'. If that came from an --id pattern such as ACC-S1-000{1..5}, your shell " +
+            "expanded the braces before the simulator saw them — quote it: --id 'ACC-S1-000{1..5}'."
 
     /**
      * "A", "A,B", or a pattern with one `{start..end}` range: `ACC-S1-000{1..5}`

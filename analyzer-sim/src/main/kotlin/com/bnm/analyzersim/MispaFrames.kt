@@ -89,8 +89,8 @@ object MispaFrames {
      *
      * QC runs are not modelled: the Mispa format carries no processing-id
      * field, so a QC material simply arrives as another sample — which is
-     * itself worth knowing during commissioning, and is why the CLI says so
-     * rather than silently ignoring `--qc`.
+     * itself worth knowing during commissioning, and is why a `--qc` run on
+     * this analyzer warns (see `Sender.run`) rather than silently pretending.
      */
     fun build(spec: SampleSpec): String {
         val params = parameters(spec).toMutableMap()
@@ -122,7 +122,8 @@ object MispaFrames {
         } else {
             // Still emit the section markers: a frame missing them would be a
             // different shape, and we are here to imitate the analyzer, not to
-            // hand the parser an easier problem.
+            // hand the parser an easier problem. [joinSections] is what keeps
+            // four empty ones in a row from spelling an end-of-frame marker.
             sections += ""
             sections += ""
             sections += ""
@@ -131,8 +132,37 @@ object MispaFrames {
         sections += diseaseFlags(spec).joinToString("?")
         sections += parameterFlags(spec).joinToString(SEP)
 
-        return FRAME_START + sections.joinToString("#") + FRAME_END
+        val frame = FRAME_START + joinSections(sections) + FRAME_END
+        check(frame.indexOf(FRAME_END, FRAME_START.length) == frame.length - FRAME_END.length) {
+            "the frame grew a second end-of-frame marker; the app would read it as a short frame: $frame"
+        }
+        return frame
     }
+
+    /**
+     * Join the sections with `#`, never writing three of them in a row.
+     *
+     * Two adjacent EMPTY sections put `#` `#` `#` in the middle of the frame —
+     * a literal end-of-frame marker. That is not academic: the app does not
+     * parse whole strings off the wire, it runs `MispaCountX.extractFrameText`
+     * over an accumulating buffer and stops at the FIRST `###`. Such a frame
+     * therefore reaches the driver cut short (the disease flags never arrive)
+     * and the leftover bytes stay in the buffer to merge with whatever comes
+     * next on the same link.
+     *
+     * A single space is written instead. It keeps the section COUNT — the
+     * parser reads discriminators at index 4 and disease flags at index 5, BY
+     * POSITION, so dropping a section would silently move them — while parsing
+     * as nothing at all: `trim()` empties it again and no point list can be
+     * read out of it. `--no-histograms` is what gets here today; the rule is
+     * written once so a future section cannot reintroduce the bug.
+     */
+    private fun joinSections(sections: List<String>): String =
+        sections.mapIndexed { i, section ->
+            val nextToEmpty = sections.getOrNull(i - 1)?.isEmpty() == true ||
+                sections.getOrNull(i + 1)?.isEmpty() == true
+            if (section.isEmpty() && nextToEmpty) " " else section
+        }.joinToString("#")
 
     /** H / L / N per header parameter, in PARAM_ORDER. The parser ignores this
      *  section; a real analyzer sends it, so we do too. */

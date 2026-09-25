@@ -71,7 +71,7 @@ object MindrayFrames {
         // BC-5130 leaves the factory with. The app converts them to the lab's
         // catalog units, and that conversion is exactly what we want exercised.
         val hgbUnit = if (spec.badUnits) "bogus/L" else "g/L"
-        return listOf(
+        val rows = listOf(
             p("6690-2", "WBC", "LN", fmt(c.wbc, 2), "10*9/L", "4.00-10.00", 4.0, 10.0, c.wbc),
             p("704-7", "BAS#", "LN", fmt(c.absolute(d.bas), 2), "10*9/L", "0.00-0.10", 0.0, 0.1, c.absolute(d.bas)),
             p("706-2", "BAS%", "LN", fmt(d.bas, 1), "%", "0.0-1.0", 0.0, 1.0, d.bas),
@@ -102,7 +102,18 @@ object MindrayFrames {
             p("10013", "PLCC", "99MRC", fmt(c.plcc, 0), "10*9/L", "30-90", 30.0, 90.0, c.plcc),
             p("10014", "PLCR", "99MRC", fmt(c.plcr, 1), "%", "11.0-45.0", 11.0, 45.0, c.plcr),
         )
+        // A CBC-only run counted cells and never fired the DIFF channel, so the
+        // five-part rows and the research flags are not in the message at all —
+        // absent, not zero. That is the case worth rehearsing: the app has to
+        // file a result whose differential parameters simply never arrived.
+        return if (spec.cbcOnly) rows.filterNot { it.name in DIFFERENTIAL } else rows
     }
+
+    /** The rows a CBC-only run does not report. */
+    private val DIFFERENTIAL = setOf(
+        "NEU#", "NEU%", "LYM#", "LYM%", "MON#", "MON%", "EOS#", "EOS%", "BAS#", "BAS%",
+        "ALY#", "ALY%", "LIC#", "LIC%",
+    )
 
     /**
      * The alert flags the run would raise. Only the NAME reaches the app (the
@@ -121,8 +132,12 @@ object MindrayFrames {
         if (c.rdwCv > 16.0) out += "12035" to "Anisocytosis"
         if (c.plt < 150.0) out += "12041" to "Thrombocytopenia"
         if (c.plt > 450.0) out += "12042" to "Thrombocytosis"
-        if (c.diff.neu > 80.0) out += "34165-1" to "Left Shift?"
-        if (c.diff.lym > 50.0) out += "15192-8" to "Abn Lympho?"
+        if (!spec.cbcOnly) {
+            // Both are read off the differential; an analyzer that did not run
+            // one cannot raise them.
+            if (c.diff.neu > 80.0) out += "34165-1" to "Left Shift?"
+            if (c.diff.lym > 50.0) out += "15192-8" to "Abn Lympho?"
+        }
         return out
     }
 
@@ -130,7 +145,11 @@ object MindrayFrames {
     fun settings(spec: SampleSpec): List<Triple<String, String, String>> = listOf(
         Triple("08001", "Take Mode", "Open Vial"),
         Triple("08002", "Blood Mode", "Whole Blood"),
-        Triple("08003", "Test Mode", if (spec.histograms) "CBC+5DIFF" else "CBC"),
+        // The RUN mode, which is not the same question as whether the curves
+        // ride along: --no-histograms drops the plots from a 5-part run and
+        // leaves this at CBC+5DIFF, because a message saying "CBC" while still
+        // carrying NEU/LYM/MON/EOS/BAS is a frame no analyzer would emit.
+        Triple("08003", "Test Mode", if (spec.cbcOnly) "CBC" else "CBC+5DIFF"),
         Triple("01002", "Ref Group", if (spec.ageYears < 12) "Child" else "General"),
     )
 
