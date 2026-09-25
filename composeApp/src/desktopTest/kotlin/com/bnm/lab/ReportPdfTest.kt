@@ -6,13 +6,19 @@ import com.bnm.lab.report.ReportDoc
 import com.bnm.lab.report.ReportPalette
 import com.bnm.lab.report.ReportRow
 import com.bnm.lab.report.ReportSection
+import com.bnm.lab.report.renderLabReportPdfBytes
+import com.bnm.lab.report.reportPdfBase64
 import com.bnm.lab.report.sampleReportDoc
 import com.bnm.lab.report.writeLabReportPdf
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.text.PDFTextStripper
 import java.io.File
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -263,7 +269,41 @@ class ReportPdfTest {
         assertTrue(text.lines().none { longApprover in it }, "the approver name must be wrapped onto more than one line")
         assertTrue(text.lines().none { longVerifier in it }, "the verifier name must be wrapped onto more than one line")
         assertTrue("Krishnamoorthy" in text && "Counter 2" in text, "no part of either name may be dropped")
-        assertTrue("Scan to download" in text, "the QR caption still prints between them")
+        assertTrue("Scan to view" in text, "the QR caption still prints between them")
+    }
+
+    // ── in-memory render (the WhatsApp Business send) ──
+
+    @Test
+    fun `the PDF for a send is rendered in memory — same document, no file to be locked`() {
+        // Windows: "Open PDF" leaves <accession>-report.pdf open (and locked) in
+        // Acrobat. The send must not write that path, or saving over it throws.
+        val doc = sampleReportDoc(pagination = ReportPagination.PER_TEST).copy(accession = "ACC-MEM-00077")
+        val onDisk = File(System.getProperty("java.io.tmpdir"), "bnm-diagnosis-reports/ACC-MEM-00077-report.pdf")
+        onDisk.delete()
+
+        val bytes = assertNotNull(renderLabReportPdfBytes(doc))
+        assertFalse(onDisk.exists(), "an in-memory render must not touch the temp file")
+        assertEquals("%PDF-", bytes.copyOf(5).decodeToString())
+        val fromMemory = PDDocument.load(bytes).use { pdf -> PDFTextStripper().getText(pdf) to pdf.numberOfPages }
+        val fromFile = PDDocument.load(File(writeLabReportPdf(doc))).use { pdf -> PDFTextStripper().getText(pdf) to pdf.numberOfPages }
+        assertEquals(fromFile, fromMemory, "the send carries the same report the print path writes")
+        onDisk.delete()
+    }
+
+    @OptIn(ExperimentalEncodingApi::class)
+    @Test
+    fun `the send's PDF helper never throws — a failed render is a result the dialog can show`() {
+        val doc = sampleReportDoc()
+        val failed = reportPdfBase64(doc) { throw java.io.IOException("The process cannot access the file") }
+        assertTrue(failed.isFailure)
+        assertEquals("The process cannot access the file", failed.exceptionOrNull()?.message)
+
+        assertEquals(null, reportPdfBase64(doc) { null }.getOrThrow(), "no PDF on this platform: send without one")
+        assertEquals(null, reportPdfBase64(doc) { ByteArray(0) }.getOrThrow(), "an empty render is not a document")
+
+        val b64 = assertNotNull(reportPdfBase64(doc).getOrThrow())
+        assertEquals("%PDF-", Base64.Default.decode(b64).copyOf(5).decodeToString())
     }
 
     @Test

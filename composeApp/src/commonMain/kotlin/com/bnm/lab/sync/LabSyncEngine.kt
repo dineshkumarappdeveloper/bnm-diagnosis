@@ -80,10 +80,10 @@ class LabSyncEngine(
     private val license: LicenseManager,
     private val prefs: SyncPrefs = SyncPrefs(),
     /**
-     * Drains queued report PDFs to the server (the printed QR's target).
+     * Publishes queued report snapshots to the server (the printed QR's target).
      *
      * Injected as a lambda rather than a ReportUploader so the sync engine keeps
-     * knowing nothing about LabRepository/StaffRepository/the PDF stack. Null =
+     * knowing nothing about LabRepository/StaffRepository/the report stack. Null =
      * no report publishing on this seat. Never allowed to fail a sweep: a report
      * that does not upload just stays queued and its QR resolves once it does.
      */

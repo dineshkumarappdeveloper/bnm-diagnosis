@@ -4,6 +4,8 @@ package com.bnm.lab.report
 
 actual fun writeLabReportPdf(doc: ReportDoc): String = ""
 
+actual fun renderLabReportPdfBytes(doc: ReportDoc): ByteArray? = null
+
 actual fun openPdf(path: String): String = "PDF reports arrive on iOS later"
 
 actual fun printPdf(path: String): String = "PDF reports arrive on iOS later"

@@ -1145,12 +1145,17 @@ class LabRepository(
 
     /**
      * The share token for [orderId], minting one on FIRST call and returning the
-     * SAME one forever after.
+     * SAME one forever after — unless that link was revoked.
      *
      * Reuse is the whole point. A reprint that minted a second token would
      * silently kill every copy already handed to a patient — the old QR would
      * resolve to a report the server no longer knows about. `reportForOrder`
-     * therefore always wins, and only a genuinely absent (or corrupt) row mints.
+     * therefore wins, and only an absent, corrupt or REVOKED row mints.
+     *
+     * A revoked token is dead on purpose (wrong patient, corrected report):
+     * printing it again would put a link that 404s on fresh paper, and
+     * republishing under it would bring the killed link back. So a revoked row
+     * is replaced by a new token, queued like any first print.
      *
      * Zero network: the token is local randomness ([ReportShare.newToken]) and
      * the row starts life `pending`, i.e. queued for upload. Printing never
@@ -1159,7 +1164,9 @@ class LabRepository(
     suspend fun reportShareToken(orderId: String, accessionNo: String): String =
         withContext(Dispatchers.Default) {
             val existing = repQ.reportForOrder(orderId).executeAsOneOrNull()
-            if (existing != null && ReportShare.isWellFormed(existing.token)) return@withContext existing.token
+            if (existing != null && existing.state != "revoked" && ReportShare.isWellFormed(existing.token)) {
+                return@withContext existing.token
+            }
             val now = nowIso()
             val token = ReportShare.newToken()
             repQ.upsertReport(orderId, token, accessionNo, "pending", null, null, null, now, now)
@@ -1171,15 +1178,36 @@ class LabRepository(
         repQ.reportForOrder(orderId).executeAsOneOrNull()?.toModel()
     }
 
-    /** Drain queue for [com.bnm.lab.report.ReportUploader]: minted, not yet on the server. */
+    /** Drain queue for [com.bnm.lab.report.ReportUploader]: minted, not yet on
+     *  the server, fewest failed attempts first. Backoff is the caller's call
+     *  ([LabReportShare.isDue]). */
     suspend fun pendingReportUploads(): List<LabReportShare> = withContext(Dispatchers.Default) {
         repQ.pendingUploads().executeAsList().map { it.toModel() }
     }
 
-    /** The server has the PDF: the printed QR now resolves. */
-    suspend fun markReportUploaded(orderId: String, sha256: String?) = withContext(Dispatchers.Default) {
-        val now = nowIso()
-        repQ.markUploaded(now, sha256, now, orderId)
+    /** The server has [token]'s report: the printed QR now resolves. [sha256] is
+     *  the published snapshot's, so an unchanged rebuild can skip the upload. */
+    suspend fun markReportUploaded(orderId: String, token: String, sha256: String?) = withContext(Dispatchers.Default) {
+        repQ.markUploaded(publishedAt = nowIso(), sha256 = sha256, orderId = orderId, token = token)
+    }
+
+    /** Requeued, but nothing changed since [token]'s last upload: resolvable again, no upload. */
+    suspend fun markReportUnchanged(orderId: String, token: String) = withContext(Dispatchers.Default) {
+        repQ.markUnchanged(orderId = orderId, token = token)
+    }
+
+    /** [token]'s upload did not happen: count the attempt and wait until [nextAttemptAt]. */
+    suspend fun deferReportUpload(orderId: String, token: String, nextAttemptAt: String) = withContext(Dispatchers.Default) {
+        repQ.deferUpload(nextAttemptAt = nextAttemptAt, orderId = orderId, token = token)
+    }
+
+    /**
+     * One-time: every report the server holds as a PDF goes back in the queue
+     * so it republishes as the report snapshot (same token, same QR). Returns
+     * how many rows were requeued.
+     */
+    suspend fun requeueUploadedReports(): Long = withContext(Dispatchers.Default) {
+        repQ.requeueAllUploaded(nowIso()).value
     }
 
     /**
@@ -1255,6 +1283,7 @@ class LabRepository(
         orderId = order_id, token = token, accessionNo = accession_no, state = state,
         publishedAt = published_at, expiresAt = expires_at, sha256 = sha256,
         createdAt = created_at, updatedAt = updated_at,
+        attempts = attempts.toInt(), nextAttemptAt = next_attempt_at,
     )
 
     private fun Emr_inbox.toModel() = EmrInboxItem(id, visit_id, test_name, instructions, status,
@@ -1582,9 +1611,20 @@ data class LabReportShare(
     val sha256: String? = null,
     val createdAt: String = "",
     val updatedAt: String? = null,
+    /** Failed upload attempts since the last success or requeue. */
+    val attempts: Int = 0,
+    /** ISO instant before which the drain leaves this row alone; null = due. */
+    val nextAttemptAt: String? = null,
 ) {
     val isUploaded: Boolean get() = state == "uploaded"
     val isRevoked: Boolean get() = state == "revoked"
+
+    /** Whether the drain may try this row at [now]. An unreadable stamp is due
+     *  — a corrupt value must never park a report forever. */
+    fun isDue(now: kotlin.time.Instant): Boolean {
+        val at = nextAttemptAt?.takeIf { it.isNotBlank() } ?: return true
+        return runCatching { kotlin.time.Instant.parse(at) <= now }.getOrDefault(true)
+    }
 }
 
 private fun nowIso(): String = kotlin.time.Clock.System.now().toString()

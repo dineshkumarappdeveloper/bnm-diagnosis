@@ -1,5 +1,6 @@
 package com.bnm.lab
 
+import com.bnm.lab.report.ReportShare
 import com.bnm.lab.report.WaShareMode
 import com.bnm.lab.report.hasWaPhone
 import com.bnm.lab.report.waBillMessage
@@ -39,7 +40,8 @@ class WhatsAppShareTest {
 
     @Test
     fun `the message names the patient and the link, and never a result`() {
-        val url = "https://x.supabase.co/functions/v1/admin-lab/reports/r/abc123"
+        val url = ReportShare.resolveUrl("abc123")
+        assertEquals("https://app.bnmapp.com/r/#abc123", url, "the token rides in the fragment, never the path")
         val m = waReportMessage("Kavitha Subramanian", "SRT Diagnostics", "ACC-S1-00042", url)
         assertTrue(m.startsWith("Dear Kavitha,"), m)
         assertTrue("SRT Diagnostics" in m)
