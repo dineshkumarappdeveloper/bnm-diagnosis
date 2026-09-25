@@ -525,6 +525,8 @@ class RemoteToolsTest {
         val b = Bench()
         try {
             assertEquals(true, payload(b.call("session.end")).bool("ended"))
+            // The end is deferred a moment so the reply leaves the socket first.
+            waitFor("engine told to end") { b.controller.ended != null }
             assertEquals("Ended by the BNM engineer", b.controller.ended)
         } finally { b.close() }
     }

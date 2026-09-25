@@ -234,3 +234,15 @@ compose.desktop {
         }
     }
 }
+
+// ── Remote support end-to-end test (RemoteSupportE2ETest) — opt-in only.
+// `./gradlew :composeApp:desktopTest -Dbnm.e2e=true` (or -Pbnm.e2e=true) reaches
+// the test JVM through this block; without it the test skips itself. The relay
+// and bridge settings ride along as environment (see docs/remote-support/RUNBOOK.md).
+tasks.withType<Test>().configureEach {
+    val e2e = providers.gradleProperty("bnm.e2e").orElse(providers.systemProperty("bnm.e2e")).orNull
+    if (e2e != null) systemProperty("bnm.e2e", e2e)
+    for (name in listOf("BNM_RELAY_URL", "BNM_SUPPORT_TOKEN", "BNM_E2E_LICENSE_JWT", "BNM_E2E_TRANSCRIPT")) {
+        System.getenv(name)?.let { environment(name, it) }
+    }
+}

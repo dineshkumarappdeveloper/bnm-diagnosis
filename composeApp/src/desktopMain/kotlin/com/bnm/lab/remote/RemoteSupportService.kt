@@ -88,6 +88,7 @@ class RemoteSupportService internal constructor(
         clock = clock,
         appVersion = appVersion,
         onAction = ::recordAction,
+        labName = labName,
     )
 
     /** One started session: its state for the core, its socket, its job. */
@@ -188,7 +189,7 @@ class RemoteSupportService internal constructor(
                 attempt++
                 var reason: String
                 try {
-                    val t = transports.connect(labUrl())
+                    val t = transports.connect(labUrl(r))
                     r.transport = t
                     try {
                         t.send(helloFrame(r))
@@ -355,7 +356,12 @@ class RemoteSupportService internal constructor(
         _status.update { if (run === r && !r.ended.get()) it.block() else it }
     }
 
-    private fun labUrl(): String = relayUrl().trimEnd('/') + "/v1/lab"
+    /**
+     * `?session=` lets the relay route the socket straight to the session's
+     * Durable Object instead of peeking the hello in the front Worker; the
+     * hello is validated the same either way (`session_mismatch` if they differ).
+     */
+    private fun labUrl(r: Run): String = relayUrl().trimEnd('/') + "/v1/lab?session=" + r.session.id
     private fun relayHost(): String = relayUrl().substringAfter("://").substringBefore('/')
 
     /** Plain words for the dialog and the log; never the URL, never a stack. */
@@ -366,7 +372,12 @@ class RemoteSupportService internal constructor(
             is SSLException -> "the secure connection to BNM's relay failed"
             else -> e.message?.takeIf { it.isNotBlank() && !it.contains("://") } ?: "the connection failed"
         }
-        else -> "the connection failed (${e::class.simpleName})"
+        // Ktor's WebSocketException and friends: keep the message (it names the
+        // handshake status or the close code, never a URL) — that is the one
+        // line support asks for when a lab says "it would not connect".
+        else -> e.message?.takeIf { it.isNotBlank() && !it.contains("://") }
+            ?.let { "the connection failed (${e::class.simpleName}: ${it.take(120)})" }
+            ?: "the connection failed (${e::class.simpleName})"
     }
 
     private fun relayError(code: String?): String = when (code) {

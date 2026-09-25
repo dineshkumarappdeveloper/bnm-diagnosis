@@ -39,6 +39,8 @@ class RemoteRpcCore(
     private val appVersion: String,
     /** Every tools/call — ok, refused or failed — after its audit row is written. */
     private val onAction: suspend (SupportAuditRow) -> Unit = {},
+    /** The lab's name for `initialize`'s `_meta.bnm`, what the engineer's `lab_connect` shows. */
+    private val labName: () -> String? = { null },
 ) {
     /** What the core must remember about one session between frames. */
     class Live(val session: SupportSession, val expiresAtMono: Long) {
@@ -82,6 +84,22 @@ class RemoteRpcCore(
             putJsonObject("serverInfo") {
                 put("name", SERVER_NAME)
                 put("version", appVersion)
+            }
+            // The bridge signs every tools/call over the session id, and the
+            // relay — a dumb pipe — never tells it one. So the lab does, here,
+            // with the facts `lab_connect` reports back to the engineer.
+            putJsonObject("_meta") {
+                putJsonObject("bnm") {
+                    put("session_id", live.session.id)
+                    put("lab", labName().orEmpty())
+                    put("app_version", appVersion)
+                    putJsonObject("consent") {
+                        put("analyzer_data", live.session.consent.analyzerData)
+                        put("records", live.session.consent.records)
+                        put("screen", live.session.consent.screen)
+                    }
+                    put("expires_in_s", ((live.expiresAtMono - clock.monotonicMs()) / 1_000L).coerceAtLeast(0L))
+                }
             }
         })
     }

@@ -29,9 +29,11 @@ internal class KtorWebSocketTransportFactory : RemoteTransportFactory {
                     pingInterval(20, TimeUnit.SECONDS)
                 }
             }
-            install(WebSockets) {
-                maxFrameSize = MAX_FRAME_BYTES
-            }
+            // No `maxFrameSize` here: the OkHttp engine refuses the switch outright
+            // ("Max frame size switch is not supported in OkHttp engine") and the
+            // socket never opens. The relay closes anything over 1 MiB (1009) and
+            // RemoteRpcCore caps its own replies at 900 KB, so nothing is lost.
+            install(WebSockets)
         }
     }
 
@@ -58,10 +60,5 @@ internal class KtorWebSocketTransportFactory : RemoteTransportFactory {
         override suspend fun close() {
             runCatching { ws.close(CloseReason(CloseReason.Codes.NORMAL, "end")) }
         }
-    }
-
-    private companion object {
-        /** The relay's own limit is 1 MiB (close 1009); refuse anything bigger before it does. */
-        const val MAX_FRAME_BYTES = 1_048_576L
     }
 }

@@ -91,7 +91,7 @@ class RemoteSupportServiceTest {
         assertEquals("false", consent["analyzer_data"]!!.jsonPrimitive.content)
         assertEquals("true", consent["records"]!!.jsonPrimitive.content)
         assertEquals("false", consent["screen"]!!.jsonPrimitive.content)
-        assertEquals(listOf("wss://relay.test/v1/lab"), transports.urls)
+        assertEquals(listOf("wss://relay.test/v1/lab?session=3f1c2a8e-6d0b-4c7e-9a1f-000000000002"), transports.urls)
 
         val st = phase(RemoteSupportStatus.Phase.WAITING_FOR_ENGINEER)
         assertTrue(st.isActive)

@@ -23,8 +23,12 @@ import com.bnm.lab.update.downloadAndLaunchInstaller
 import io.ktor.network.selector.SelectorManager
 import io.ktor.network.sockets.aSocket
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -81,6 +85,9 @@ class RemoteTools(
 ) : RemoteToolHost {
 
     private class Tool(val spec: ToolSpec, val run: suspend (ToolCall, JsonObject) -> ToolResult)
+
+    /** Only `session.end` uses it — the one action that must outlive its own reply. */
+    private val endScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val tools: List<Tool> = listOf(
         // ── read ──
@@ -601,7 +608,13 @@ class RemoteTools(
 
     private suspend fun sessionEnd(call: ToolCall, @Suppress("UNUSED_PARAMETER") args: JsonObject): ToolResult {
         val c = controller ?: return ToolResult.Failed("No session engine on this device")
-        c.end("Ended by the BNM engineer")
+        // Ending inside the call would close the socket before this reply is
+        // on the wire and the engineer would see a dropped connection instead
+        // of "ended". So: answer first, end a moment later on the engine's own time.
+        endScope.launch {
+            delay(END_GRACE_MS)
+            c.end("Ended by the BNM engineer")
+        }
         return ok(buildJsonObject { put("ended", true) }, "session ended by engineer")
     }
 
@@ -701,6 +714,8 @@ class RemoteTools(
         const val MAX_LOG_LINES = 500
         /** instrument_log is trimmed to this many rows by the engine, so one fetch is the whole table. */
         private const val LOG_WINDOW = 500L
+        /** How long `session.end` waits after answering before it really ends — enough for one frame to leave. */
+        private const val END_GRACE_MS = 300L
         private const val BUSY_WINDOW_MS = 10_000L
         private const val TCP_PROBE_TIMEOUT_MS = 3_000L
         private const val QUEUED_PREFIX = "Queued for manual claim — "

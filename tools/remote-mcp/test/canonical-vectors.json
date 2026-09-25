@@ -9,7 +9,8 @@
     "order — the bridge must build the canonical string by hand (see the 'key order' vector).",
     "Loaded by composeApp/src/desktopTest/.../remote/CanonicalJsonTest.kt AND tools/remote-mcp/test/canonical.test.mjs —",
     "same input must give the same canonical string and hash on both sides. Regenerate only by running",
-    "both suites; never hand-edit a canonical/sha256 value."
+    "both suites; never hand-edit a canonical/sha256 value.",
+    "Written with JSON.stringify (Node), never with a Python/other serialiser: number literals in `input` must stay in JS form (1e-7, not 1e-07)."
   ],
   "vectors": [
     {
@@ -86,7 +87,7 @@
         "neg": -42,
         "dec": 2.5,
         "small": -0.001,
-        "exp": 1e-07,
+        "exp": 1e-7,
         "zero": 0,
         "big": 9007199254740991
       },
@@ -284,7 +285,7 @@
         "neg": -7,
         "dec": 3.14,
         "tenth": 0.1,
-        "small_exp": 1.5e-07,
+        "small_exp": 1.5e-7,
         "big_exp": 1e+21,
         "twenty_digits": 100000000000000000000,
         "zero": 0
