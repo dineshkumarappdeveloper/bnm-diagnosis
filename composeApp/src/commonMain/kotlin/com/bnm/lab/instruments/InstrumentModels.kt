@@ -127,6 +127,16 @@ data class StoredInstrumentFrame(
     val driver: String,
     val specimenId: String? = null,
     val patientId: String? = null,
+    /**
+     * The patient's name AS KEYED ON THE ANALYZER (HL7 PID-5), when the driver
+     * sends one. Never authoritative — it is bench text, not the lab's record —
+     * but it is what "Create order from this result" pre-fills the registration
+     * form from, so the operator checks a name instead of retyping one and
+     * splitting the patient into two near-duplicate rows.
+     */
+    val patientName: String? = null,
+    /** PID-8 as the app stores sex ('M' | 'F' | 'O'); null when the analyzer said nothing usable. */
+    val patientSex: String? = null,
     val date: String? = null,
     val sequenceId: String? = null,
     val params: Map<String, String> = emptyMap(),

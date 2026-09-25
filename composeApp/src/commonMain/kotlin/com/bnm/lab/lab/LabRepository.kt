@@ -88,7 +88,10 @@ class LabRepository(
 
     // ── Patients ─────────────────────────────────────────────────────────────
 
-    suspend fun upsertPatient(p: Patient): Patient = withContext(Dispatchers.Default) {
+    suspend fun upsertPatient(p: Patient): Patient = withContext(Dispatchers.Default) { upsertPatientTx(p) }
+
+    /** [upsertPatient]'s body, callable from inside an open transaction. */
+    private fun upsertPatientTx(p: Patient): Patient {
         val now = nowIso()
         val existing = pQ.byId(p.id).executeAsOneOrNull()
         val saved = p.copy(
@@ -97,7 +100,7 @@ class LabRepository(
         )
         pQ.upsert(saved.id, saved.name, saved.sex, saved.dob, saved.ageYears, saved.phone,
             saved.address, saved.createdAt, saved.updatedAt, saved.deletedAt)
-        saved
+        return saved
     }
 
     suspend fun patientById(id: String): Patient? = withContext(Dispatchers.Default) {
@@ -636,71 +639,120 @@ class LabRepository(
         notes: String? = null,
     ): Result<LabOrder> = withContext(Dispatchers.Default) {
         runCatching {
-            pQ.byId(patientId).executeAsOneOrNull() ?: error("Patient not found: $patientId")
-            val expanded = LinkedHashSet<String>()
-            expanded += testIds
-            for (pid in panelIds) {
-                val panel = tQ.panelById(pid).executeAsOneOrNull()?.toModel() ?: error("Panel not found: $pid")
-                expanded += panel.testIds
-            }
-            require(expanded.isNotEmpty()) { "Order needs at least one test" }
-            val tests = expanded.map { tid ->
-                tQ.testById(tid).executeAsOneOrNull()?.toModel() ?: error("Test not found: $tid")
-            }
-            val seat = accessionSeat()
-            val orderId = Uuid.random().toString()
-            val now = nowIso()
-            // P4: the referrer's negotiated rate list, applied through the ONE
-            // pricing brain — the order lines snapshot the EFFECTIVE price, so
-            // the bill, the report and every later commission statement all
-            // read the same number no matter how the catalog moves afterwards.
-            val rates = if (referrerId.isNullOrBlank()) emptyMap()
-            else rrQ.ratesFor(referrerId).executeAsList().associate { it.test_id to it.price }
-            // Commission resolves through the SAME three-level rule and is frozen
-            // onto each line next to the price. Reading it live at statement time
-            // was the bug: a renegotiated rate rewrote history.
-            val labBasePct = setQ.getSetting(SETTING_BASE_COMMISSION).executeAsOneOrNull()
-                ?.toDoubleOrNull() ?: 0.0
-            val referrerPct = if (referrerId.isNullOrBlank()) null
-            else referrerPctOrInherit(rQ.byId(referrerId).executeAsOneOrNull()?.commission_pct)
-            val commissionOverrides = if (referrerId.isNullOrBlank()) emptyMap()
-            else cQ.commissionsFor(referrerId).executeAsList()
-                .associate { it.test_id to it.commission_pct }
             db.transactionWithResult {
-                // Atomic allocate: seed the seat row if new, lift it past every
-                // number this database already holds under the series, bump,
-                // then read. The lift is what makes a seat change safe: a
-                // connected seat handed S1 continues after the ACC-S1 numbers
-                // every install up to 1.2.0 printed and the lab's other seats
-                // synced here, instead of re-issuing one (or failing on the
-                // UNIQUE accession_no, forever, on a seat that is behind).
-                accQ.init(seat, prefs.accessionPrefix)
-                val prefix = accQ.getSeries(seat).executeAsOne().prefix
-                val series = "$prefix-$seat-"
-                accQ.raiseHighWater(accQ.highestIssued(series, AccessionSeat.seriesEnd(series)).executeAsOne(), seat)
-                accQ.bump(seat)
-                val seq = accQ.highWater(seat).executeAsOne()
-                val accession = series + seq.toString().padStart(5, '0')
-
-                oQ.insertOrder(orderId, accession, patientId, referrerId, invoiceId,
-                    LabStatus.REGISTERED, priority, notes, now, now)
-                for (t in tests) {
-                    val price = resolvePrice(t.price, rates[t.id])
-                    val commissionPct = if (referrerId.isNullOrBlank()) 0.0
-                    else resolveCommissionPct(labBasePct, referrerPct, commissionOverrides[t.id])
-                    oQ.insertOrderTest(Uuid.random().toString(), orderId, t.id, t.name, price,
-                        "pending", commissionPct, null)
-                    for (param in t.parameters) {
-                        resQ.insertEmpty(Uuid.random().toString(), orderId, t.id, param.key, param.unit)
-                    }
-                }
-                LabOrder(
-                    id = orderId, accessionNo = accession, patientId = patientId,
-                    referrerId = referrerId, invoiceId = invoiceId, status = LabStatus.REGISTERED,
-                    priority = priority, notes = notes, createdAt = now, updatedAt = now,
-                )
+                createLabOrderTx(patientId, testIds, panelIds, referrerId, invoiceId, priority, notes)
             }
         }
+    }
+
+    /**
+     * Register a NEW patient and their first order as ONE unit of work.
+     *
+     * The two writes used to be two transactions, and the second one can fail on
+     * its own — SQLITE_BUSY while the backup engine holds the database through a
+     * `VACUUM INTO`, most realistically. That left a patient row committed under
+     * a registration that never happened, with nothing on screen saying so; the
+     * operator pressed the button again and wrote a SECOND copy of the same
+     * person — exactly the near-duplicate the duplicate guard exists to prevent,
+     * and invisible to it when no phone was typed.
+     *
+     * Either both rows exist or neither does. The patient's id is minted by the
+     * caller (it is theirs to keep); [Patient.createdAt] / `updatedAt` are
+     * stamped here as [upsertPatient] stamps them.
+     */
+    suspend fun createPatientAndOrder(
+        patient: Patient,
+        testIds: List<String> = emptyList(),
+        panelIds: List<String> = emptyList(),
+        referrerId: String? = null,
+        invoiceId: String? = null,
+        priority: String = "routine",
+        notes: String? = null,
+    ): Result<Pair<Patient, LabOrder>> = withContext(Dispatchers.Default) {
+        runCatching {
+            db.transactionWithResult {
+                val saved = upsertPatientTx(patient)
+                saved to createLabOrderTx(saved.id, testIds, panelIds, referrerId, invoiceId, priority, notes)
+            }
+        }
+    }
+
+    /**
+     * [createLabOrder]'s body. 🔴 Must be called INSIDE an open transaction —
+     * the accession allocation below is a bump-then-read that is only atomic
+     * because of it.
+     */
+    private fun createLabOrderTx(
+        patientId: String,
+        testIds: List<String>,
+        panelIds: List<String>,
+        referrerId: String?,
+        invoiceId: String?,
+        priority: String,
+        notes: String?,
+    ): LabOrder {
+        pQ.byId(patientId).executeAsOneOrNull() ?: error("Patient not found: $patientId")
+        val expanded = LinkedHashSet<String>()
+        expanded += testIds
+        for (pid in panelIds) {
+            val panel = tQ.panelById(pid).executeAsOneOrNull()?.toModel() ?: error("Panel not found: $pid")
+            expanded += panel.testIds
+        }
+        require(expanded.isNotEmpty()) { "Order needs at least one test" }
+        val tests = expanded.map { tid ->
+            tQ.testById(tid).executeAsOneOrNull()?.toModel() ?: error("Test not found: $tid")
+        }
+        val seat = accessionSeat()
+        val orderId = Uuid.random().toString()
+        val now = nowIso()
+        // P4: the referrer's negotiated rate list, applied through the ONE
+        // pricing brain — the order lines snapshot the EFFECTIVE price, so
+        // the bill, the report and every later commission statement all
+        // read the same number no matter how the catalog moves afterwards.
+        val rates = if (referrerId.isNullOrBlank()) emptyMap()
+        else rrQ.ratesFor(referrerId).executeAsList().associate { it.test_id to it.price }
+        // Commission resolves through the SAME three-level rule and is frozen
+        // onto each line next to the price. Reading it live at statement time
+        // was the bug: a renegotiated rate rewrote history.
+        val labBasePct = setQ.getSetting(SETTING_BASE_COMMISSION).executeAsOneOrNull()
+            ?.toDoubleOrNull() ?: 0.0
+        val referrerPct = if (referrerId.isNullOrBlank()) null
+        else referrerPctOrInherit(rQ.byId(referrerId).executeAsOneOrNull()?.commission_pct)
+        val commissionOverrides = if (referrerId.isNullOrBlank()) emptyMap()
+        else cQ.commissionsFor(referrerId).executeAsList()
+            .associate { it.test_id to it.commission_pct }
+        // Atomic allocate: seed the seat row if new, lift it past every
+        // number this database already holds under the series, bump,
+        // then read. The lift is what makes a seat change safe: a
+        // connected seat handed S1 continues after the ACC-S1 numbers
+        // every install up to 1.2.0 printed and the lab's other seats
+        // synced here, instead of re-issuing one (or failing on the
+        // UNIQUE accession_no, forever, on a seat that is behind).
+        accQ.init(seat, prefs.accessionPrefix)
+        val prefix = accQ.getSeries(seat).executeAsOne().prefix
+        val series = "$prefix-$seat-"
+        accQ.raiseHighWater(accQ.highestIssued(series, AccessionSeat.seriesEnd(series)).executeAsOne(), seat)
+        accQ.bump(seat)
+        val seq = accQ.highWater(seat).executeAsOne()
+        val accession = series + seq.toString().padStart(5, '0')
+
+        oQ.insertOrder(orderId, accession, patientId, referrerId, invoiceId,
+            LabStatus.REGISTERED, priority, notes, now, now)
+        for (t in tests) {
+            val price = resolvePrice(t.price, rates[t.id])
+            val commissionPct = if (referrerId.isNullOrBlank()) 0.0
+            else resolveCommissionPct(labBasePct, referrerPct, commissionOverrides[t.id])
+            oQ.insertOrderTest(Uuid.random().toString(), orderId, t.id, t.name, price,
+                "pending", commissionPct, null)
+            for (param in t.parameters) {
+                resQ.insertEmpty(Uuid.random().toString(), orderId, t.id, param.key, param.unit)
+            }
+        }
+        return LabOrder(
+            id = orderId, accessionNo = accession, patientId = patientId,
+            referrerId = referrerId, invoiceId = invoiceId, status = LabStatus.REGISTERED,
+            priority = priority, notes = notes, createdAt = now, updatedAt = now,
+        )
     }
 
     suspend fun orderById(id: String): LabOrder? = withContext(Dispatchers.Default) {
@@ -1381,9 +1433,8 @@ class LabRepository(
             return from to toExclusive
         }
 
-        private val ENTRY_OPEN_STATUSES = setOf(
-            LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED,
-        )
+        /** @see LabStatus.ENTRY_OPEN — one set, shared with the analyzer paths. */
+        private val ENTRY_OPEN_STATUSES = LabStatus.ENTRY_OPEN
 
         /**
          * Phone identity key: digits only, last 10 kept — so '+91 98765 43210',

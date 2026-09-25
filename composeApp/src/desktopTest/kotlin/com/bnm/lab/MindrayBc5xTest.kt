@@ -86,6 +86,9 @@ class MindrayBc5xTest {
         assertEquals("TestSampleID", f.specimenId)
         assertEquals("ChartNo", f.patientId)
         assertEquals("FirstName LastName", f.patientName)
+        // PID-8, normalised to what the app stores. The protocol's own sample
+        // spells it out, so both "Male" and "M" have to land on 'M'.
+        assertEquals("M", f.patientSex)
         assertEquals("20010203040506", f.date)     // OBR-7 wins over MSH-7
         assertEquals("1", f.sequenceId)
         assertFalse(f.isQc)

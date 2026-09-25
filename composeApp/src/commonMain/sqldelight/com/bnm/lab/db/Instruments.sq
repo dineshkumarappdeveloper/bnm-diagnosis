@@ -54,7 +54,14 @@ CREATE TABLE IF NOT EXISTS instrument_results (
     status TEXT NOT NULL DEFAULT 'unmatched',   -- unmatched | applied | discarded
     matched_order_id TEXT,
     received_at TEXT NOT NULL,
-    applied_at TEXT
+    applied_at TEXT,
+    -- WHO took this row out of the queue, and how. entered_by on the result
+    -- rows is the ANALYZER (that part is right — the instrument produced the
+    -- number), so without these two a manual claim onto the wrong patient is
+    -- indistinguishable from a frame that matched on its own. Appended last,
+    -- because every query here is SELECT * and maps positionally.
+    claimed_by TEXT,                     -- staff name, as the log prints it
+    claimed_by_id TEXT                   -- staff id, for when two people share a name
 );
 CREATE INDEX IF NOT EXISTS instrument_results_open ON instrument_results(status, received_at);
 
@@ -121,11 +128,16 @@ SELECT count(*) FROM instrument_results WHERE status = 'unmatched';
 unmatchedById:
 SELECT * FROM instrument_results WHERE id = ?;
 
+-- claimed_by/_id are NULL for the automatic listener path (no human chose this
+-- order) and set for a claim made from the queue. That difference is the whole
+-- point of the columns: it is what a wrong-patient enquiry a week later asks.
 markResultApplied:
-UPDATE instrument_results SET status = 'applied', matched_order_id = ?, applied_at = ? WHERE id = ?;
+UPDATE instrument_results SET status = 'applied', matched_order_id = ?, applied_at = ?,
+       claimed_by = ?, claimed_by_id = ? WHERE id = ?;
 
 markResultDiscarded:
-UPDATE instrument_results SET status = 'discarded', applied_at = ? WHERE id = ?;
+UPDATE instrument_results SET status = 'discarded', applied_at = ?,
+       claimed_by = ?, claimed_by_id = ? WHERE id = ?;
 
 -- Mispa operators often key just the numeric part of the accession on the
 -- analyzer keypad ('42' for ACC-S1-00042) — resolve by numeric tail, newest

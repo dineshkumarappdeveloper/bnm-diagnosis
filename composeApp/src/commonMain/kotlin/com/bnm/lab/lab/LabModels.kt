@@ -459,6 +459,17 @@ object LabStatus {
 
     /** Pipeline order; cancelled sits outside the line. */
     val FLOW = listOf(REGISTERED, COLLECTED, IN_PROGRESS, ENTERED, VERIFIED, APPROVED, REPORTED, DELIVERED)
+
+    /**
+     * The stages at which an order still accepts result values. Past ENTERED a
+     * signature is on the numbers and nothing may rewrite them.
+     *
+     * ONE set, because three places ask the question and a disagreement between
+     * them would be a wrong answer somewhere: [LabRepository.enterResult]
+     * refuses, the analyzer listener queues instead of applying, and the claim
+     * picker only offers orders that will actually take the frame.
+     */
+    val ENTRY_OPEN = setOf(REGISTERED, COLLECTED, IN_PROGRESS, ENTERED)
 }
 
 /** What a tenant-switch confirmation shows before erasing anything. */
