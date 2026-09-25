@@ -1,0 +1,67 @@
+-- ── Remote support ("Maintenance mode") audit trail ──
+--
+-- support_sessions = every owner-started support session: when, for how long,
+--                    what the owner consented to, who pressed Start, how it
+--                    ended. One row per session; ended_at/end_reason land when
+--                    it closes (expiry, End pressed, owner signed out, error).
+-- support_audit    = one row per tool call BNM's engineer made during a
+--                    session — refused and failed ones included. `summary` is
+--                    what the host wrote for the audit: field names, counts,
+--                    instrument names, NEVER patient data, results, raw frames,
+--                    SQL text or the session code.
+--
+-- DELIBERATELY NOT IN TenantReset.sq. A tenant switch wipes the previous lab's
+-- records because they belong to that lab; this trail belongs to the COMPUTER
+-- and its owner — "who from BNM touched this PC, when, and what did they do" —
+-- and must survive a licence change exactly like the activity log does. Do not
+-- add wipes for these tables there.
+
+CREATE TABLE IF NOT EXISTS support_sessions (
+    id TEXT NOT NULL PRIMARY KEY,
+    started_at TEXT NOT NULL,             -- ISO instant
+    ended_at TEXT,                        -- ISO instant, NULL while running
+    duration_s INTEGER NOT NULL,          -- the box the owner chose (1 h / 4 h / 24 h)
+    consent_json TEXT NOT NULL,           -- {"analyzer_data":bool,"records":bool,"screen":bool}
+    started_by TEXT NOT NULL,             -- staff id
+    started_by_name TEXT NOT NULL,
+    end_reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS support_audit (
+    id TEXT NOT NULL PRIMARY KEY,
+    session_id TEXT NOT NULL,             -- '' for actions taken outside a session (e.g. instruments.verified)
+    at TEXT NOT NULL,                     -- ISO instant
+    tool TEXT NOT NULL,                   -- 'instruments.restart', 'db.query', …
+    summary TEXT NOT NULL,                -- ≤ 200 chars, never PHI
+    outcome TEXT NOT NULL,                -- 'ok' | 'refused' | 'failed'
+    ms INTEGER NOT NULL,
+    started_by TEXT NOT NULL              -- staff id who started the session
+);
+CREATE INDEX IF NOT EXISTS support_audit_time ON support_audit(at);
+
+-- ── sessions ──
+
+insertSession:
+INSERT OR REPLACE INTO support_sessions(id, started_at, ended_at, duration_s, consent_json, started_by, started_by_name, end_reason)
+VALUES (?, ?, NULL, ?, ?, ?, ?, NULL);
+
+endSession:
+UPDATE support_sessions SET ended_at = ?, end_reason = ? WHERE id = ? AND ended_at IS NULL;
+
+recentSessions:
+SELECT * FROM support_sessions ORDER BY started_at DESC LIMIT :limit;
+
+-- ── audit rows ──
+
+insertAudit:
+INSERT OR REPLACE INTO support_audit(id, session_id, at, tool, summary, outcome, ms, started_by)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+recentAudit:
+SELECT * FROM support_audit ORDER BY at DESC, id DESC LIMIT :limit;
+
+auditForSession:
+SELECT * FROM support_audit WHERE session_id = ? ORDER BY at DESC, id DESC;
+
+countAudit:
+SELECT count(*) FROM support_audit;

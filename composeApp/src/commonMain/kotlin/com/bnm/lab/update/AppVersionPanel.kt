@@ -26,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,6 +40,10 @@ import androidx.compose.ui.unit.dp
 import com.bnm.lab.api.ApiClient
 import com.bnm.lab.license.OfflinePolicy
 import com.bnm.lab.license.LicenseManager
+import com.bnm.lab.remote.RemoteSupportController
+import com.bnm.lab.remote.RemoteSupportCopy
+import com.bnm.lab.remote.RemoteSupportUi
+import com.bnm.lab.remote.platformRemoteSupportController
 import kotlinx.coroutines.launch
 
 /**
@@ -57,6 +62,8 @@ fun AppVersionPanel(
     modifier: Modifier = Modifier,
     /** Called when an installer was launched — the host should close the app. */
     onQuitForUpdate: () -> Unit = {},
+    /** The remote-support engine; null on platforms without one hides the row. */
+    remoteSupport: RemoteSupportController? = platformRemoteSupportController(),
     /** Injectable for tests/previews. */
     checkNow: suspend (UpdatePlatform) -> UpdateCheck = { p ->
         // Its own short-lived client: the update check talks to GitHub, not to
@@ -260,6 +267,25 @@ fun AppVersionPanel(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = { SupportUi.open() }) { Text("Report a problem") }
                     OutlinedButton(onClick = { SupportReporter.openLogsFolder() }) { Text("Open logs folder") }
+                }
+            }
+
+            // Beside it, because it is the next thing support asks for when a
+            // report is not enough: "can we take a look?".
+            remoteSupport?.let { rs ->
+                val rsStatus by rs.status.collectAsState()
+                Spacer(Modifier.height(12.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(8.dp))
+                Text("Remote support", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    RemoteSupportCopy.settingsSubtitle(rsStatus),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                Button(onClick = { RemoteSupportUi.open() }) {
+                    Text(if (rsStatus.isActive) "Session details" else "Remote support…")
                 }
             }
         }

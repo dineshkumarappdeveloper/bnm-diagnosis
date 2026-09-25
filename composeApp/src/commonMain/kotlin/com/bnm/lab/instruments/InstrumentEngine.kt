@@ -1,6 +1,7 @@
 package com.bnm.lab.instruments
 
 import com.bnm.lab.diagnostics.AppLog
+import com.bnm.lab.remote.FrameScrubber
 
 import app.cash.sqldelight.coroutines.asFlow
 import app.cash.sqldelight.coroutines.mapToList
@@ -27,6 +28,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -68,12 +70,23 @@ import kotlin.uuid.Uuid
  * app-lifetime scope, constructed once in App(), started from a
  * LaunchedEffect. A tenant switch calls [stopAll] BEFORE the wipe so a frame
  * arriving mid-switch can't seed the new tenant with the old lab's data.
+ *
+ * Remote-support hardening (2026-09-25): per-instrument counters in the
+ * [status] map, [restart] of ONE listener (config edits no longer bounce every
+ * analyzer), a self-heal loop that retries an errored listener every
+ * [healIntervalMs] (the re-plugged USB-serial cable is the commonest "not
+ * linking" ticket), error rows for frames the driver could not read, a log row
+ * per ACK/NAK sent, the `verify_pending` gate (settings changed by support →
+ * claim queue until the bench confirms one sample) and [dryRun], which parses
+ * and maps a pasted frame without routing or writing anything.
  */
 @OptIn(ExperimentalUuidApi::class)
 class InstrumentEngine(
     private val db: AppDatabase,
     private val labRepo: LabRepository,
     private val json: Json,
+    /** How often an enabled instrument in `error` is retried. Tests shorten it. */
+    private val healIntervalMs: Long = 10_000L,
 ) {
     private val scope = CoroutineScope(
         SupervisorJob() + Dispatchers.Default +
@@ -85,6 +98,8 @@ class InstrumentEngine(
     private val q get() = db.instrumentsQueries
     private val restartMutex = Mutex()
     private val listeners = mutableMapOf<String, ListenerHandle>()
+    /** The bind failure already written to the log per instrument — the self-heal loop retries every few seconds and must not write a row per attempt. */
+    private val loggedBindFailure = mutableMapOf<String, String>()
 
     private val _status = MutableStateFlow<Map<String, InstrumentStatus>>(emptyMap())
     val status: StateFlow<Map<String, InstrumentStatus>> = _status
@@ -94,15 +109,47 @@ class InstrumentEngine(
      *  mark applied). */
     data class ApplyOutcome(val matched: Boolean, val applied: Int, val summary: String)
 
+    /**
+     * What [dryRun] found out about a pasted frame — the parse and the mapping
+     * an incoming frame WOULD get, with nothing written. Ids are masked: this
+     * travels to a support engineer.
+     */
+    data class DryRun(
+        val driver: String,
+        /** The driver produced a result frame. */
+        val parsed: Boolean,
+        /** Why not, or a caveat (QC run, test frame) — plain words. */
+        val note: String? = null,
+        val specimenIdMasked: String? = null,
+        val paramKeys: List<String> = emptyList(),
+        val units: Map<String, String> = emptyMap(),
+        val histograms: List<String> = emptyList(),
+        /** An open order with that accession exists (lookup only). */
+        val wouldMatch: Boolean = false,
+        val accessionMasked: String? = null,
+        val orderStatus: String? = null,
+        /** "ordered_tests" when an order matched, else "catalog" (best overlap
+         *  among active tests — helps fix a param map before any order exists). */
+        val mappingBasis: String? = null,
+        val testName: String? = null,
+        /** analyzerKey → catalog parameter key. */
+        val mapped: Map<String, String> = emptyMap(),
+        val unmapped: List<String> = emptyList(),
+        /** "HGB bogus → g/dL" — pairs the unit converter cannot bridge. */
+        val unitMismatches: List<String> = emptyList(),
+    )
+
     private class ListenerHandle(
         val job: Job?,
         val serial: SerialHandle?,
         val assembler: FrameAssembler?,
     ) {
-        fun close() {
+        /** Waits for the accept loop to release its socket: the relaunch that
+         *  follows binds the SAME port, and would lose the race to the old one. */
+        suspend fun close() {
             runCatching { serial?.close() }
             assembler?.abandon()
-            job?.cancel()
+            job?.let { runCatching { it.cancel(); it.join() } }
         }
     }
 
@@ -110,33 +157,102 @@ class InstrumentEngine(
 
     fun start() {
         scope.launch { restartAll() }
+        scope.launch {
+            while (currentCoroutineContext().isActive) {
+                delay(healIntervalMs)
+                runCatching { healOnce() }
+            }
+        }
     }
 
     /** Tear down and relaunch every listener from current config. Called on
-     *  start and after any config change from the Instruments screen. */
+     *  start and when the licence identity changes (tenant switch). Config
+     *  edits use [restart] for the one row they touched. Counters survive. */
     suspend fun restartAll() = restartMutex.withLock {
         withContext(Dispatchers.Default) {
-            listeners.values.forEach { it.close() }
+            listeners.values.toList().forEach { it.close() }
             listeners.clear()
             val configs = runCatching { q.listInstruments().executeAsList().map { it.toModel() } }
                 .getOrDefault(emptyList())
             val next = mutableMapOf<String, InstrumentStatus>()
-            for (cfg in configs) {
-                next[cfg.id] =
-                    if (!cfg.enabled) InstrumentStatus("off", "Disabled")
-                    else launchListener(cfg)
-            }
+            for (cfg in configs) next[cfg.id] = relaunch(cfg, _status.value[cfg.id])
             _status.value = next
         }
+    }
+
+    /**
+     * Restart exactly ONE listener from its current config, leaving every
+     * other analyzer's socket/port untouched. A row that no longer exists is
+     * dropped from the status map. Busy-guarding ("a frame arrived 3 s ago")
+     * is the caller's decision — the remote tool refuses, the engine obeys.
+     */
+    suspend fun restart(id: String) = restartMutex.withLock {
+        withContext(Dispatchers.Default) {
+            listeners.remove(id)?.close()
+            val cfg = runCatching { q.instrumentById(id).executeAsOneOrNull()?.toModel() }.getOrNull()
+            if (cfg == null) {
+                _status.value = _status.value - id
+            } else {
+                _status.value = _status.value + (id to relaunch(cfg, _status.value[id]))
+            }
+        }
+    }
+
+    /**
+     * The self-heal pass: every ENABLED instrument whose listener sits in
+     * `error` (serial open failed, cable unplugged, TCP bind refused) is
+     * re-opened. Silent by design — [setStatus] logs the transition when the
+     * state or its detail actually changes, never each attempt, and the bind
+     * failure row in [tcpListenLoop] is written once per distinct error too.
+     * Public so a test (and the remote tool) can run one pass on demand.
+     */
+    suspend fun healOnce() {
+        val errored = _status.value.filterValues { it.state == "error" }.keys.toList()
+        if (errored.isEmpty()) return
+        restartMutex.withLock {
+            withContext(Dispatchers.Default) {
+                for (id in errored) {
+                    val current = _status.value[id] ?: continue
+                    if (current.state != "error") continue
+                    val cfg = runCatching { q.instrumentById(id).executeAsOneOrNull()?.toModel() }.getOrNull()
+                        ?: continue
+                    if (!cfg.enabled) continue
+                    listeners.remove(id)?.close()
+                    val fresh = launchListener(cfg)
+                    // A TCP launch reports "listening" before the bind has happened.
+                    // Keep showing the error until the accept loop proves otherwise
+                    // — otherwise every retry would flip error → listening → error
+                    // and log two transitions a pass.
+                    val merged = if (cfg.transport == InstrumentTransport.TCP && fresh.state == "listening") current
+                        else carry(current, fresh)
+                    if (merged.state != current.state || merged.detail != current.detail) {
+                        if (merged.state == "error") AppLog.w("Analyzer", "${cfg.id} -> ${merged.state}: ${merged.detail.orEmpty()}")
+                        else AppLog.i("Analyzer", "${cfg.id} -> ${merged.state}: ${merged.detail.orEmpty()}")
+                    }
+                    _status.value = _status.value + (id to merged)
+                }
+            }
+        }
+    }
+
+    /** Launch (or park) one instrument and carry its counters over. Must run under [restartMutex]. */
+    private fun relaunch(cfg: InstrumentConfig, prev: InstrumentStatus?): InstrumentStatus {
+        val fresh = if (!cfg.enabled) InstrumentStatus("off", "Disabled") else launchListener(cfg)
+        val merged = carry(prev?.copy(boundAt = null), fresh)
+        if (prev?.state != merged.state || prev.detail != merged.detail) {
+            if (merged.state == "error") AppLog.w("Analyzer", "${cfg.id} -> ${merged.state}: ${merged.detail.orEmpty()}")
+            else AppLog.i("Analyzer", "${cfg.id} -> ${merged.state}: ${merged.detail.orEmpty()}")
+        }
+        return merged
     }
 
     /** Stop every listener without touching config. Used by the tenant-switch
      *  wipe: no analyzer byte may land between "old lab erased" and "new lab
      *  activated". [restartAll] brings listeners back. */
     suspend fun stopAll() = restartMutex.withLock {
-        listeners.values.forEach { it.close() }
+        listeners.values.toList().forEach { it.close() }
         listeners.clear()
-        _status.value = _status.value.mapValues { InstrumentStatus("off", "Stopped") }
+        _status.value = _status.value.mapValues { (_, st) -> carry(st, InstrumentStatus("off", "Stopped")) }
     }
 
     private fun launchListener(cfg: InstrumentConfig): InstrumentStatus = when (cfg.transport) {
@@ -176,7 +292,7 @@ class InstrumentEngine(
                         InstrumentStatus("error", "Couldn't open $portName — in use, or unplugged?")
                     } else {
                         listeners[cfg.id] = ListenerHandle(job = null, serial = handle, assembler = assembler)
-                        InstrumentStatus("listening", "$portName @ ${cfg.baud}")
+                        InstrumentStatus("listening", "$portName @ ${cfg.baud}", boundAt = nowIso())
                     }
                 }
             }
@@ -189,9 +305,19 @@ class InstrumentEngine(
         try {
             val server = aSocket(selector).tcp().bind("0.0.0.0", port)
             try {
+                // The real "listening" moment (launchListener reported it optimistically).
+                loggedBindFailure.remove(cfg.id)
+                setStatus(cfg.id, InstrumentStatus("listening", "TCP port $port", boundAt = nowIso()))
                 logRow(cfg, "info", "Listening on TCP port $port", null)
                 while (currentCoroutineContext().isActive) {
                     val socket = server.accept()
+                    // "Test connection" dials 127.0.0.1 and is accepted like any
+                    // client; letting it stamp peerIp would erase the one fact
+                    // that says WHICH box is talking — and put "peer=127.0.0.1"
+                    // in the support report the lab pastes to BNM.
+                    peerIpOf(socket.remoteAddress)
+                        ?.takeIf { !LinkCheck.isLoopback(it) }
+                        ?.let { ip -> update(cfg.id) { it.copy(peerIp = ip) } }
                     scope.launch {
                         // One assembler per connection: analyzers open, send, close.
                         // HL7 analyzers wait for an ACK on the same socket, so the
@@ -227,21 +353,56 @@ class InstrumentEngine(
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Throwable) {
-            setStatus(cfg.id, InstrumentStatus("error", e.message ?: "TCP listen failed on port $port"))
-            logRow(cfg, "error", "TCP listen failed: ${e.message}", null)
+            val detail = e.message ?: "TCP listen failed on port $port"
+            // The self-heal loop retries every few seconds: one row per
+            // distinct failure, not one per attempt.
+            val repeat = loggedBindFailure[cfg.id] == detail
+            loggedBindFailure[cfg.id] = detail
+            setStatus(cfg.id, InstrumentStatus("error", detail))
+            if (!repeat) logRow(cfg, "error", "TCP listen failed: ${e.message}", null)
         } finally {
             runCatching { selector.close() }
         }
     }
 
+    /** A state transition. Counters, last-frame and last-error stamps carry over from the previous status. */
     private fun setStatus(id: String, s: InstrumentStatus) {
         val before = _status.value[id]
-        _status.value = _status.value + (id to s)
+        val merged = carry(before, s)
+        _status.value = _status.value + (id to merged)
         // Transitions only — lastFrameAt moves on every frame and would drown the log.
-        if (before?.state != s.state || before.detail != s.detail) {
-            if (s.state == "error") AppLog.w("Analyzer", "$id -> ${s.state}: ${s.detail.orEmpty()}")
-            else AppLog.i("Analyzer", "$id -> ${s.state}: ${s.detail.orEmpty()}")
+        if (before?.state != merged.state || before.detail != merged.detail) {
+            if (merged.state == "error") AppLog.w("Analyzer", "$id -> ${merged.state}: ${merged.detail.orEmpty()}")
+            else AppLog.i("Analyzer", "$id -> ${merged.state}: ${merged.detail.orEmpty()}")
         }
+    }
+
+    /** A counter bump or stamp on an instrument whose state does not change. No-op for an unknown id. */
+    private fun update(id: String, f: (InstrumentStatus) -> InstrumentStatus) {
+        val cur = _status.value[id] ?: return
+        _status.value = _status.value + (id to f(cur))
+    }
+
+    /**
+     * [fresh] decides state/detail; everything the listener accumulated
+     * ([prev]) rides along: counters, lastFrameAt, peer, the last error. A
+     * new error stamps lastError/lastErrorAt; leaving `listening` clears boundAt.
+     */
+    private fun carry(prev: InstrumentStatus?, fresh: InstrumentStatus): InstrumentStatus {
+        if (prev == null) return fresh.copy(
+            lastError = fresh.detail.takeIf { fresh.state == "error" },
+            lastErrorAt = if (fresh.state == "error") nowIso() else null,
+        )
+        val newError = fresh.state == "error" && (prev.state != "error" || prev.detail != fresh.detail)
+        return prev.copy(
+            state = fresh.state,
+            detail = fresh.detail,
+            lastFrameAt = fresh.lastFrameAt ?: prev.lastFrameAt,
+            peerIp = fresh.peerIp ?: prev.peerIp,
+            boundAt = if (fresh.state == "listening") (fresh.boundAt ?: prev.boundAt) else null,
+            lastError = if (newError) fresh.detail else prev.lastError,
+            lastErrorAt = if (newError) nowIso() else prev.lastErrorAt,
+        )
     }
 
     /**
@@ -259,6 +420,7 @@ class InstrumentEngine(
         private val intake = Channel<ByteArray>(Channel.UNLIMITED)
         private val job: Job = scope.launch {
             for (bytes in intake) {
+                update(cfg.id) { it.copy(bytesIn = it.bytesIn + bytes.size) }
                 buffer.append(bytes.decodeToString())
                 trimOverflow()
                 drainFrames()
@@ -314,8 +476,10 @@ class InstrumentEngine(
             if (reply != null) {
                 val nak = Hl7Ack.forMessage(Hl7Message.parse(head), "AE", ackControlId = ackControlId(), timestamp = hl7Timestamp())
                 runCatching { reply(nak) }
+                    .onSuccess { ackSent(cfg, "NAK sent (MSA|AE — message abandoned)") }
                     .onFailure { logRow(cfg, "error", "MSA|AE could not be sent: ${it.message}", null) }
             }
+            update(cfg.id) { it.copy(framesIgnored = it.framesIgnored + 1) }
             buffer.setLength(0)
         }
 
@@ -323,9 +487,18 @@ class InstrumentEngine(
             while (true) {
                 when (cfg.driver) {
                     "mispa_count_x" -> {
-                        val (frame, rest) = MispaCountX.extractFrame(buffer.toString())
+                        val (text, rest) = MispaCountX.extractFrameText(buffer.toString())
                         buffer.setLength(0); buffer.append(rest)
-                        if (frame == null) return
+                        if (text == null) return
+                        update(cfg.id) { it.copy(framesIn = it.framesIn + 1) }
+                        val frame = MispaCountX.parse(text)
+                        if (frame == null) {
+                            // It framed ($$$…###) but the driver found nothing in it.
+                            // Silence here was the worst kind of "not linking": bytes
+                            // arriving, nothing on screen, nothing in the log.
+                            frameNotUnderstood(cfg, text)
+                            continue
+                        }
                         ingestMispa(cfg, frame)
                     }
                     "mindray_hl7" -> {
@@ -335,10 +508,12 @@ class InstrumentEngine(
                         val (message, rest) = Mllp.extract(buffer.toString())
                         buffer.setLength(0); buffer.append(rest)
                         if (message == null) return
+                        update(cfg.id) { it.copy(framesIn = it.framesIn + 1) }
                         ingestHl7(cfg, message, reply)
                     }
                     else -> {
                         logRow(cfg, "error", "No parser for driver '${cfg.driver}'", null)
+                        update(cfg.id) { it.copy(framesIgnored = it.framesIgnored + 1) }
                         buffer.setLength(0)
                         return
                     }
@@ -350,6 +525,7 @@ class InstrumentEngine(
     // ── ingestion (Mispa Count X) ──
 
     private suspend fun ingestMispa(cfg: InstrumentConfig, frame: MispaCountX.Frame) {
+        update(cfg.id) { it.copy(framesParsed = it.framesParsed + 1) }
         setStatus(cfg.id, InstrumentStatus("listening",
             _status.value[cfg.id]?.detail, lastFrameAt = nowIso()))
         val stored = StoredInstrumentFrame(
@@ -383,6 +559,7 @@ class InstrumentEngine(
         if (reply != null) {
             val ack = Hl7Ack.forMessage(msg, "AA", ackControlId = ackControlId(), timestamp = hl7Timestamp())
             runCatching { reply(ack) }
+                .onSuccess { ackSent(cfg, "ACK sent (MSA|AA for ${msg.controlId.ifBlank { "message" }})") }
                 .onFailure { logRow(cfg, "error", "ACK could not be sent: ${it.message}", null) }
         } else {
             logRow(cfg, "info", "No reply path on this transport — analyzer will not get an ACK", null)
@@ -392,13 +569,16 @@ class InstrumentEngine(
         val excerpt = text.take(4000)
         val frame = MindrayBc5x.parse(msg, text)
         if (frame == null) {
+            update(cfg.id) { it.copy(framesIgnored = it.framesIgnored + 1) }
             logRow(cfg, "rx", "${msg.messageType.ifBlank { "message" }} acknowledged and ignored (not a result)", excerpt)
             return
         }
         if (frame.isQc) {
+            update(cfg.id) { it.copy(framesIgnored = it.framesIgnored + 1) }
             logRow(cfg, "rx", "QC result acknowledged and ignored (${frame.specimenId ?: "no id"})", excerpt)
             return
         }
+        update(cfg.id) { it.copy(framesParsed = it.framesParsed + 1) }
         setStatus(cfg.id, InstrumentStatus("listening",
             _status.value[cfg.id]?.detail, lastFrameAt = nowIso()))
         val stored = StoredInstrumentFrame(
@@ -445,6 +625,12 @@ class InstrumentEngine(
 
     /** Match a parsed frame to an open order, else the claim queue. */
     private suspend fun routeFrame(cfg: InstrumentConfig, stored: StoredInstrumentFrame) {
+        // Read the flag fresh: the running listener's cfg was captured at launch,
+        // and "Verified" clears the flag without restarting the listener.
+        if (isVerifyPending(cfg.id)) {
+            queueUnmatched(cfg, stored, VERIFY_PENDING_REASON)
+            return
+        }
         val order = stored.specimenId?.let { findOrder(it) }
         if (order == null) {
             queueUnmatched(cfg, stored,
@@ -458,6 +644,25 @@ class InstrumentEngine(
         }
         val outcome = applyFrameToOrder(cfg, stored, order)
         if (!outcome.matched) queueUnmatched(cfg, stored, outcome.summary)
+        else update(cfg.id) { it.copy(framesApplied = it.framesApplied + 1) }
+    }
+
+    private suspend fun isVerifyPending(instrumentId: String): Boolean =
+        instrumentId.isNotBlank() && withContext(Dispatchers.Default) {
+            runCatching { q.instrumentById(instrumentId).executeAsOneOrNull()?.verify_pending == 1L }.getOrDefault(false)
+        }
+
+    /** An ACK/NAK went out: a row so the log shows both directions, and a count. */
+    private suspend fun ackSent(cfg: InstrumentConfig, summary: String) {
+        update(cfg.id) { it.copy(acksSent = it.acksSent + 1) }
+        logRow(cfg, "info", summary, null)
+    }
+
+    /** A complete frame the driver returned null for. Masked excerpt: sample ids stay shapes. */
+    private suspend fun frameNotUnderstood(cfg: InstrumentConfig, text: String) {
+        update(cfg.id) { it.copy(framesIgnored = it.framesIgnored + 1) }
+        val excerpt = FrameScrubber.maskIds(text.take(120)).replace('\r', ' ').replace('\n', ' ')
+        logRow(cfg, "error", "Frame not understood by ${cfg.driver}: $excerpt", null)
     }
 
     private var ackSeq = 0
@@ -503,16 +708,8 @@ class InstrumentEngine(
      */
     suspend fun applyFrameToOrder(cfg: InstrumentConfig, stored: StoredInstrumentFrame, order: LabOrder): ApplyOutcome {
         val overrides = parseOverrides(cfg.paramMapJson)
-        val tests = labRepo.orderTests(order.id)
-        var best: Pair<LabTest, Map<String, String>>? = null   // test → analyzerKey→paramKey
-        for (ot in tests) {
-            val test = labRepo.testById(ot.testId) ?: continue
-            val mapping = mapParams(stored.params.keys, test, overrides)
-            if (mapping.isNotEmpty() && mapping.size > (best?.second?.size ?: 0)) {
-                best = test to mapping
-            }
-        }
-        val (test, mapping) = best
+        val tests = labRepo.orderTests(order.id).mapNotNull { labRepo.testById(it.testId) }
+        val (test, mapping) = selectMapping(stored.params.keys, tests, overrides)
             ?: return ApplyOutcome(false, 0,
                 "no ordered test on ${order.accessionNo} takes these parameters")
 
@@ -570,6 +767,7 @@ class InstrumentEngine(
     // ── claim queue ──
 
     private suspend fun queueUnmatched(cfg: InstrumentConfig, stored: StoredInstrumentFrame, reason: String) {
+        update(cfg.id) { it.copy(framesUnmatched = it.framesUnmatched + 1) }
         withContext(Dispatchers.Default) {
             q.insertUnmatched(
                 Uuid.random().toString(), cfg.id.ifBlank { null }, stored.specimenId,
@@ -617,23 +815,86 @@ class InstrumentEngine(
     fun unmatchedFlow(): Flow<List<Instrument_results>> =
         q.listUnmatched().asFlow().mapToList(Dispatchers.Default)
 
-    suspend fun saveInstrument(cfg: InstrumentConfig) {
+    /** Upsert one analyzer and restart ONLY its listener. Returns the row id (minted for a new row). */
+    suspend fun saveInstrument(cfg: InstrumentConfig): String {
+        val id = cfg.id.ifBlank { Uuid.random().toString() }
         withContext(Dispatchers.Default) {
             val now = nowIso()
             q.upsertInstrument(
-                cfg.id.ifBlank { Uuid.random().toString() }, cfg.name.trim().ifBlank { "Analyzer" },
+                id, cfg.name.trim().ifBlank { "Analyzer" },
                 cfg.driver, cfg.transport, cfg.serialPort?.trim()?.ifBlank { null },
                 cfg.baud.toLong(), cfg.tcpPort?.toLong(),
                 if (cfg.enabled) 1L else 0L, cfg.paramMapJson,
                 cfg.createdAt.ifBlank { now }, now,
+                if (cfg.verifyPending) 1L else 0L,
+                cfg.analyzerHost?.trim()?.ifBlank { null },
             )
         }
-        restartAll()
+        restart(id)
+        return id
     }
 
     suspend fun deleteInstrument(id: String) {
         withContext(Dispatchers.Default) { q.deleteInstrument(id) }
-        restartAll()
+        restart(id)
+    }
+
+    suspend fun instrumentById(id: String): InstrumentConfig? = withContext(Dispatchers.Default) {
+        q.instrumentById(id).executeAsOneOrNull()?.toModel()
+    }
+
+    suspend fun listInstruments(): List<InstrumentConfig> = withContext(Dispatchers.Default) {
+        q.listInstruments().executeAsList().map { it.toModel() }
+    }
+
+    /**
+     * The "check one known sample first" gate. Set by remote support when it
+     * changed the driver or the param map; cleared by "Verified" on the
+     * Instruments screen. No listener restart — [routeFrame] reads it per frame.
+     */
+    suspend fun setVerifyPending(id: String, pending: Boolean) = withContext(Dispatchers.Default) {
+        q.setVerifyPending(if (pending) 1L else 0L, nowIso(), id)
+    }
+
+    /**
+     * Parse [frameText] with [cfg]'s driver and work out what the live path
+     * WOULD do — the driver's parse, the order lookup (never a claim, never a
+     * write) and the same [selectMapping] the apply path uses. Specimen ids
+     * beginning `BNMTEST-` are always reported as non-matching so an engineer
+     * can paste a fabricated frame without ever hitting a real order.
+     */
+    suspend fun dryRun(cfg: InstrumentConfig, frameText: String): DryRun {
+        val parsed = parseFrameText(cfg.driver, frameText)
+            ?: return DryRun(driver = cfg.driver, parsed = false,
+                note = "The ${driverFor(cfg.driver)?.label ?: cfg.driver} driver found no result in that text")
+        val (stored, note) = parsed
+        val specimen = stored.specimenId
+        val isTest = specimen?.uppercase()?.startsWith("BNMTEST-") == true
+        val order = if (specimen == null || isTest) null else findOrder(specimen)
+        val overrides = parseOverrides(cfg.paramMapJson)
+        val ordered = order?.let { o -> labRepo.orderTests(o.id).mapNotNull { labRepo.testById(it.testId) } }
+        val basisTests = ordered?.takeIf { it.isNotEmpty() } ?: labRepo.listTests()
+        val basis = if (ordered != null && ordered.isNotEmpty()) "ordered_tests" else "catalog"
+        val pick = selectMapping(stored.params.keys, basisTests, overrides)
+        val mapping = pick?.second.orEmpty()
+        return DryRun(
+            driver = cfg.driver,
+            parsed = true,
+            note = listOfNotNull(note, if (isTest) "BNMTEST- specimen — never matched to an order" else null)
+                .joinToString("; ").ifBlank { null },
+            specimenIdMasked = specimen?.let { FrameScrubber.maskId(it) },
+            paramKeys = stored.params.keys.toList(),
+            units = stored.units,
+            histograms = (stored.histograms.keys + stored.images.keys).toList(),
+            wouldMatch = order != null && order.status in ENTRY_OPEN,
+            accessionMasked = order?.let { FrameScrubber.maskId(it.accessionNo) },
+            orderStatus = order?.status,
+            mappingBasis = basis,
+            testName = pick?.first?.name,
+            mapped = mapping,
+            unmapped = stored.params.keys.filter { it !in mapping },
+            unitMismatches = pick?.let { (test, m) -> unitMismatches(stored, test, m) }.orEmpty(),
+        )
     }
 
     suspend fun clearLog() = withContext(Dispatchers.Default) { q.clearLog() }
@@ -666,6 +927,8 @@ class InstrumentEngine(
         serialPort = serial_port, baud = baud.toInt(), tcpPort = tcp_port?.toInt(),
         enabled = enabled == 1L, paramMapJson = param_map_json,
         createdAt = created_at, updatedAt = updated_at,
+        verifyPending = verify_pending == 1L,
+        analyzerHost = analyzer_host,
     )
 
     companion object {
@@ -675,12 +938,78 @@ class InstrumentEngine(
         private val SB_STR = Mllp.SB.toString()
         private val EB_STR = Mllp.EB.toString()
 
+        /** Why a frame sits in the claim queue while `verify_pending` is set — shown on the Instruments screen. */
+        const val VERIFY_PENDING_REASON =
+            "Analyzer settings changed by support — check one known sample, then press Verified"
+
         private val ENTRY_OPEN = setOf(
             LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED,
         )
 
         private val STRING_MAP = MapSerializer(String.serializer(), String.serializer())
         private val DOUBLE_LIST = ListSerializer(Double.serializer())
+
+        /**
+         * The test whose catalog parameters best overlap the analyzer's params,
+         * with the mapping — pure, shared by the live apply path and [dryRun]
+         * so the two can never disagree about what a frame maps to.
+         */
+        internal fun selectMapping(
+            analyzerKeys: Collection<String>,
+            tests: List<LabTest>,
+            overrides: Map<String, String>,
+        ): Pair<LabTest, Map<String, String>>? {
+            var best: Pair<LabTest, Map<String, String>>? = null   // test → analyzerKey→paramKey
+            for (test in tests) {
+                val mapping = mapParams(analyzerKeys, test, overrides)
+                if (mapping.isNotEmpty() && mapping.size > (best?.second?.size ?: 0)) {
+                    best = test to mapping
+                }
+            }
+            return best
+        }
+
+        /** "HGB bogus → g/dL" for every mapped param whose analyzer unit the converter cannot bridge. Pure. */
+        internal fun unitMismatches(stored: StoredInstrumentFrame, test: LabTest, mapping: Map<String, String>): List<String> =
+            mapping.mapNotNull { (analyzerKey, paramKey) ->
+                val raw = stored.params[analyzerKey] ?: return@mapNotNull null
+                val target = test.parameters.firstOrNull { it.key == paramKey }?.unit
+                val from = stored.units[analyzerKey]
+                if (AnalyzerUnits.convert(raw, from, target) == raw && AnalyzerUnits.needsConversion(from, target))
+                    "$analyzerKey $from → $target" else null
+            }
+
+        /**
+         * A frame as pasted by a person — with or without its transport framing
+         * — through the driver, to storage form. Second value: a caveat worth
+         * repeating (a QC run). Null when the driver finds no result.
+         */
+        internal fun parseFrameText(driver: String, text: String): Pair<StoredInstrumentFrame, String?>? = when (driver) {
+            "mispa_count_x" -> {
+                val t = text.trim()
+                val (extracted, _) = MispaCountX.extractFrameText(t)
+                val frameText = extracted
+                    ?: (if (t.startsWith("$$$")) t else "$$$$t").let { if (it.endsWith("###")) it else "$it###" }
+                MispaCountX.parse(frameText)?.let { f ->
+                    StoredInstrumentFrame(
+                        driver = driver, specimenId = f.specimenId, patientId = f.patientId, date = f.date,
+                        sequenceId = f.sequenceId, params = f.params, histograms = f.histograms,
+                    ) to null
+                }
+            }
+            "mindray_hl7" -> {
+                val body = if (text.indexOf(Mllp.SB) >= 0) Mllp.extract(text).first ?: text.trim(Mllp.SB, Mllp.EB, Mllp.CR)
+                    else text.trim()
+                MindrayBc5x.parse(body)?.let { f ->
+                    StoredInstrumentFrame(
+                        driver = driver, specimenId = f.specimenId, patientId = f.patientId, date = f.date,
+                        sequenceId = f.sequenceId, params = f.params, histograms = f.histograms, meta = f.meta,
+                        units = f.units, images = f.images,
+                    ) to (if (f.isQc) "QC run — the live path acknowledges and ignores these" else null)
+                }
+            }
+            else -> null
+        }
 
         /** "LYMP%" → "lymppct", "MID#" → "midabs", "RDW-SD" → "rdwsd". */
         internal fun norm(s: String): String =

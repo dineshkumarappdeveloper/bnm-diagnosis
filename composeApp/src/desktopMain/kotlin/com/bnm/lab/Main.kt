@@ -35,12 +35,17 @@ import com.bnm.lab.diagnostics.DesktopDiagnostics
 import com.bnm.lab.diagnostics.FatalWindowError
 import com.bnm.lab.diagnostics.SupportReporter
 import com.bnm.lab.diagnostics.SupportUi
+import com.bnm.lab.remote.RemoteSupportService
+import com.bnm.lab.remote.RemoteSupportUi
 
 @OptIn(ExperimentalComposeUiApi::class)
 fun main() {
     // FIRST, before any other code runs: a failure in startup or in the first
     // frame of the UI is exactly the kind a lab cannot describe over the phone.
     DesktopDiagnostics.install()
+    // The remote-support engine sits idle until an owner starts a session; it is
+    // installed this early so Help ▸ Remote support… works on the activation screen.
+    RemoteSupportService.instance.install()
     // Full HTTP bodies only for a developer who asks for them — and only ever
     // to the console, never into a log file that gets emailed.
     ApiClient.consoleHttpBodies = System.getenv("BNM_HTTP_DEBUG") != null
@@ -57,6 +62,8 @@ fun main() {
         Window(
             onCloseRequest = {
                 AppLog.i("Lifecycle", "window closed by user")
+                // A support session must not outlive the window that shows its banner.
+                RemoteSupportService.instance.endBlocking("app closing")
                 exitApplication()
             },
             state = state,
@@ -68,6 +75,7 @@ fun main() {
             MenuBar {
                 Menu("Help") {
                     Item("Report a problem…", onClick = { SupportUi.open() })
+                    Item("Remote support…", onClick = { RemoteSupportUi.open() })
                     Item("Open logs folder", onClick = {
                         if (!SupportReporter.openLogsFolder()) SupportUi.open()
                     })
@@ -75,6 +83,8 @@ fun main() {
             }
             LaunchedEffect(Unit) {
                 SupportReporter.pendingCrash()?.let { SupportUi.open(crashNotice = it) }
+                // The screenshot tool (consent-gated) captures THIS window and nothing else.
+                RemoteSupportService.instance.registerWindow(window)
             }
             App()
         }

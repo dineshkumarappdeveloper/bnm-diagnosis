@@ -38,4 +38,13 @@ object Constants {
      * Found under Project Settings > General > Your apps > Web app > OAuth 2.0 Client IDs
      */
     const val GOOGLE_WEB_CLIENT_ID = "YOUR_FIREBASE_WEB_CLIENT_ID.apps.googleusercontent.com"
+
+    /**
+     * BNM's remote-support relay (Cloudflare Worker, `relay/`). The app dials
+     * OUT to `<url>/v1/lab` over WebSocket only while the owner has started a
+     * support session — nothing listens on the lab PC. Placeholder host until
+     * the relay is deployed; a developer overrides it with the `BNM_RELAY_URL`
+     * environment variable (read in `RemoteSupportService`).
+     */
+    const val REMOTE_RELAY_URL = "wss://lab-relay.bnmapp.com"
 }

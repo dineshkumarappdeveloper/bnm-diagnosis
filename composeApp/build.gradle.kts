@@ -105,6 +105,7 @@ kotlin {
             implementation(libs.ktor.client.content.negotiation)
             implementation(libs.ktor.serialization.kotlinx.json)
             implementation(libs.ktor.client.logging)
+            implementation(libs.ktor.client.websockets) // remote support session to BNM's relay (remote/)
             implementation(libs.ktor.network) // raw TCP for ESC/POS network thermal printers
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.kotlinx.coroutines.core)
@@ -118,6 +119,13 @@ kotlin {
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
+        }
+        // The analyzer simulator, so the real drivers can be tested against the
+        // frames that tool actually emits (AnalyzerSimFidelityTest) — the only
+        // thing that keeps the simulator from drifting away from the parsers.
+        // Test-only: nothing in the shipped app depends on it.
+        val desktopTest by getting {
+            dependencies { implementation(project(":analyzer-sim")) }
         }
     }
 }
@@ -231,5 +239,17 @@ compose.desktop {
                 packageName = "bnm-lab"
             }
         }
+    }
+}
+
+// ── Remote support end-to-end test (RemoteSupportE2ETest) — opt-in only.
+// `./gradlew :composeApp:desktopTest -Dbnm.e2e=true` (or -Pbnm.e2e=true) reaches
+// the test JVM through this block; without it the test skips itself. The relay
+// and bridge settings ride along as environment (see docs/remote-support/RUNBOOK.md).
+tasks.withType<Test>().configureEach {
+    val e2e = providers.gradleProperty("bnm.e2e").orElse(providers.systemProperty("bnm.e2e")).orNull
+    if (e2e != null) systemProperty("bnm.e2e", e2e)
+    for (name in listOf("BNM_RELAY_URL", "BNM_SUPPORT_TOKEN", "BNM_E2E_LICENSE_JWT", "BNM_E2E_TRANSCRIPT")) {
+        System.getenv(name)?.let { environment(name, it) }
     }
 }

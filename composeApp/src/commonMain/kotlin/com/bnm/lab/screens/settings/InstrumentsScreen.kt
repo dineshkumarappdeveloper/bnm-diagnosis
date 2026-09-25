@@ -25,6 +25,7 @@ import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Downloading
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Verified
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -41,6 +42,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -58,30 +60,71 @@ import com.bnm.lab.instruments.INSTRUMENT_DRIVERS
 import com.bnm.lab.instruments.InstrumentConfig
 import com.bnm.lab.instruments.InstrumentEngine
 import com.bnm.lab.instruments.InstrumentTransport
+import com.bnm.lab.instruments.LinkCheck
+import com.bnm.lab.instruments.LinkCheckReport
+import com.bnm.lab.instruments.LinkEnvironment
+import com.bnm.lab.instruments.LinkFacts
+import com.bnm.lab.instruments.LinkFactsSnapshot
+import com.bnm.lab.instruments.LinkLogRow
+import com.bnm.lab.instruments.LinkLogSummaries
 import com.bnm.lab.instruments.driverFor
+import com.bnm.lab.instruments.gatherLinkFacts
 import com.bnm.lab.instruments.listSerialPorts
+import com.bnm.lab.instruments.platformLinkEnvironment
 import com.bnm.lab.instruments.serialSupported
+import com.bnm.lab.staff.LocalStaffSession
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
  * Instruments (I0) — connect lab analyzers so results enter themselves.
  *
- * Three panels: the configured analyzers (with live listener status), the
- * claim queue (frames that arrived without a resolvable accession), and the
- * raw traffic log (commissioning against real hardware is 90% "what did the
- * machine actually send").
+ * Three panels: the configured analyzers (with live listener status and the
+ * Link check verdict), the claim queue (frames that arrived without a
+ * resolvable accession), and the raw traffic log (commissioning against real
+ * hardware is 90% "what did the machine actually send"). Each analyzer's
+ * editor carries the full Link check ([LinkCheckPanel]): the ordered
+ * checklist that names the step that blocks.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun InstrumentsScreen(
     engine: InstrumentEngine,
     onBack: () -> Unit,
+    /** "Verified" pressed after remote support changed an analyzer's settings — the host writes the audit row. */
+    onVerified: suspend (InstrumentConfig) -> Unit = {},
+    /** PC facts for the Link check (addresses, firewall, ping, ports); the platform's own when null. Tests pass a fake. */
+    environment: LinkEnvironment? = null,
 ) {
     val scope = rememberCoroutineScope()
+    val signedIn = LocalStaffSession.current.signedIn
+    val env = environment ?: remember { platformLinkEnvironment() }
     val instruments by engine.instrumentsFlow().collectAsState(emptyList())
     val statuses by engine.status.collectAsState()
     val unmatched by engine.unmatchedFlow().collectAsState(emptyList())
-    val log by engine.logFlow(100).collectAsState(emptyList())
+    // 300 rows so a chatty analyzer can't push a quiet one's newest rows out of the Link check; the list shows 100.
+    val log by engine.logFlow(300).collectAsState(emptyList())
+
+    // ── Link check: the PC facts every analyzer shares (addresses, serial
+    // ports, firewall per port, ping per analyzer host) are read once every
+    // 10 s, or now on "Check again"; status counters and log rows are live. ──
+    var snapshot by remember { mutableStateOf<LinkFactsSnapshot?>(null) }
+    var refreshKey by remember { mutableStateOf(0) }
+    val factsKey = instruments.map { Triple(it.transport, it.tcpPort, it.analyzerHost) }
+    LaunchedEffect(refreshKey, factsKey) {
+        while (isActive) {
+            snapshot = gatherLinkFacts(env, instruments)
+            delay(10_000)
+        }
+    }
+    fun factsFor(inst: InstrumentConfig): LinkFacts = snapshot?.forInstrument(inst) ?: LinkFactsSnapshot.pending(env)
+    fun logsFor(inst: InstrumentConfig): LinkLogSummaries = LinkLogSummaries.of(
+        log.filter { it.instrument_id == inst.id }.map { LinkLogRow(it.direction, it.summary, it.created_at) })
+    // The queue itself, not the session counter: claiming or discarding a result
+    // removes it here, while framesUnmatched only ever grows (listUnmatched caps
+    // at 50, which is far past the point where the count stops being the news).
+    fun queuedFor(inst: InstrumentConfig): Int = unmatched.count { it.instrument_id == inst.id }
 
     var editing by remember { mutableStateOf<InstrumentConfig?>(null) }
     var claiming by remember { mutableStateOf<String?>(null) }      // instrument_results.id
@@ -128,12 +171,27 @@ fun InstrumentsScreen(
                                 InstrumentRow(
                                     inst = inst,
                                     statusLine = statusLine(statuses[inst.id]),
-                                    statusColor = statusColor(statuses[inst.id]?.state),
+                                    verdict = LinkCheck.evaluate(inst, statuses[inst.id], logsFor(inst),
+                                        factsFor(inst), queuedFor(inst)),
                                     onClick = { editing = inst },
                                     onToggle = { on ->
                                         scope.launch { engine.saveInstrument(inst.copy(enabled = on)) }
                                     },
                                 )
+                                if (inst.verifyPending) {
+                                    VerifyPendingRow(
+                                        // Any signed-in staff may confirm — the check is at the bench,
+                                        // not a rights question.
+                                        enabled = signedIn != null,
+                                        onVerified = {
+                                            scope.launch {
+                                                engine.setVerifyPending(inst.id, false)
+                                                onVerified(inst)
+                                                message = "${inst.name} verified — results apply to orders again"
+                                            }
+                                        },
+                                    )
+                                }
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             Row(
@@ -232,7 +290,7 @@ fun InstrumentsScreen(
                                     modifier = Modifier.padding(16.dp),
                                 )
                             }
-                            log.forEachIndexed { i, row ->
+                            log.take(100).forEachIndexed { i, row ->
                                 if (i > 0) HorizontalDivider(
                                     Modifier.padding(start = 14.dp),
                                     color = MaterialTheme.colorScheme.outlineVariant,
@@ -270,6 +328,23 @@ fun InstrumentsScreen(
     editing?.let { cfg ->
         InstrumentEditDialog(
             initial = cfg,
+            linkCheck = if (cfg.id.isBlank()) null else {
+                {
+                    // The SAVED row (a flag may change while the dialog is open), never the unsaved edits.
+                    val saved = instruments.firstOrNull { it.id == cfg.id } ?: cfg
+                    LinkCheckPanel(
+                        cfg = saved,
+                        status = statuses[saved.id],
+                        logs = logsFor(saved),
+                        facts = factsFor(saved),
+                        queued = queuedFor(saved),
+                        environment = env,
+                        engine = engine,
+                        onCheckAgain = { refreshKey++ },
+                        onMessage = { message = it },
+                    )
+                }
+            },
             onDismiss = { editing = null },
             onSave = { updated ->
                 editing = null
@@ -339,11 +414,53 @@ fun InstrumentsScreen(
 
 // ── rows & bits ──
 
+/**
+ * Shown under an analyzer whose driver or param map BNM support changed
+ * remotely. Until "Verified" is pressed every result from it waits in the
+ * claim queue (see InstrumentEngine.VERIFY_PENDING_REASON), so a mapping
+ * typed from the office cannot land on a patient unchecked.
+ */
+@Composable
+private fun VerifyPendingRow(enabled: Boolean, onVerified: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth()
+            .background(VERIFY_AMBER_BG)
+            .padding(start = 60.dp, end = 14.dp, top = 8.dp, bottom = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Outlined.Verified, contentDescription = null, tint = VERIFY_AMBER_FG, modifier = Modifier.size(18.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                "Settings changed by BNM support — Verified?",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = VERIFY_AMBER_FG,
+            )
+            Text(
+                "Run one known sample and check its values against the order. Until then, " +
+                    "results from this analyzer wait in \"Waiting for an order\" instead of " +
+                    "filling in automatically." +
+                    if (!enabled) " Sign in to press Verified." else "",
+                style = MaterialTheme.typography.bodySmall,
+                color = VERIFY_AMBER_FG,
+            )
+        }
+        TextButton(onClick = onVerified, enabled = enabled) {
+            Text("Verified", color = VERIFY_AMBER_FG)
+        }
+    }
+}
+
+/** Amber, fixed rather than a theme role: it must read as "attention" in both themes. */
+private val VERIFY_AMBER_BG = Color(0xFFFFF3CD)
+private val VERIFY_AMBER_FG = Color(0xFF7A4F00)
+
 @Composable
 private fun InstrumentRow(
     inst: InstrumentConfig,
     statusLine: String,
-    statusColor: Color,
+    verdict: LinkCheckReport,
     onClick: () -> Unit,
     onToggle: (Boolean) -> Unit,
 ) {
@@ -364,16 +481,23 @@ private fun InstrumentRow(
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(inst.name, style = MaterialTheme.typography.bodyLarge,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
+            // The Link check verdict — green linked, amber waiting, red blocked at a named step.
             Row(verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Box(Modifier.size(7.dp).background(statusColor, CircleShape))
+                Box(Modifier.size(7.dp).background(linkColor(verdict.verdictState), CircleShape))
                 Text(
-                    "${driverFor(inst.driver)?.label ?: inst.driver} · $statusLine",
+                    verdict.verdict,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = linkColor(verdict.verdictState),
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
+            Text(
+                "${driverFor(inst.driver)?.label ?: inst.driver} · $statusLine",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
         }
         Switch(checked = inst.enabled, onCheckedChange = onToggle)
     }
@@ -383,6 +507,8 @@ private fun InstrumentRow(
 @Composable
 private fun InstrumentEditDialog(
     initial: InstrumentConfig,
+    /** The Link check for a SAVED analyzer (null while adding one). */
+    linkCheck: (@Composable () -> Unit)?,
     onDismiss: () -> Unit,
     onSave: (InstrumentConfig) -> Unit,
     onDelete: (() -> Unit)?,
@@ -393,6 +519,7 @@ private fun InstrumentEditDialog(
     var serialPort by remember { mutableStateOf(initial.serialPort ?: "") }
     var baud by remember { mutableStateOf(initial.baud.toString()) }
     var tcpPort by remember { mutableStateOf(initial.tcpPort?.toString() ?: "5500") }
+    var analyzerHost by remember { mutableStateOf(initial.analyzerHost ?: "") }
     var ports by remember { mutableStateOf(listSerialPorts()) }
 
     AlertDialog(
@@ -481,6 +608,24 @@ private fun InstrumentEditDialog(
                         "sender) at this PC's IP address.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    OutlinedTextField(
+                        value = analyzerHost,
+                        onValueChange = { analyzerHost = it.trim() },
+                        label = { Text("Analyzer IP address (optional)") },
+                        singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text("Only used by the Link check below to ping the analyzer from this PC — " +
+                        "the analyzer still connects to this PC, not the other way round.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (linkCheck != null) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Text("Link check", style = MaterialTheme.typography.labelLarge)
+                    Text("Which step is blocking, live. Edits above apply after Save & connect.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    linkCheck()
                 }
             }
         },
@@ -498,6 +643,7 @@ private fun InstrumentEditDialog(
                         baud = baud.toIntOrNull() ?: (driverFor(driver)?.defaultBaud ?: 115200),
                         tcpPort = tcpPort.toIntOrNull(),
                         enabled = true,
+                        analyzerHost = analyzerHost.ifBlank { null },
                     ))
                 },
             ) { Text("Save & connect") }
@@ -529,13 +675,6 @@ private fun statusLine(s: com.bnm.lab.instruments.InstrumentStatus?): String = w
     s == null -> "Starting…"
     s.lastFrameAt != null -> "${s.detail ?: s.state} · last result ${niceTime(s.lastFrameAt)}"
     else -> s.detail ?: s.state
-}
-
-@Composable
-private fun statusColor(state: String?): Color = when (state) {
-    "listening" -> MaterialTheme.colorScheme.primary
-    "error" -> MaterialTheme.colorScheme.error
-    else -> MaterialTheme.colorScheme.outline
 }
 
 private fun niceTime(iso: String?): String =
