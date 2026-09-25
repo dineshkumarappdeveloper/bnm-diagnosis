@@ -1,0 +1,18 @@
+{
+  "name": "bnmlab-remote",
+  "version": "0.1.0",
+  "description": "BNM Lab remote support bridge — a zero-dependency stdio MCP server that reaches a lab's BNM Lab through BNM's relay",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "bnmlab-remote": "./bnmlab-remote.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test",
+    "keygen": "node bnmlab-remote.mjs keygen"
+  },
+  "license": "UNLICENSED"
+}

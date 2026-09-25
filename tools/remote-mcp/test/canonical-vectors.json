@@ -1,0 +1,186 @@
+[
+  {
+    "name": "empty_object",
+    "input": {},
+    "canonical": "{}",
+    "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+  },
+  {
+    "name": "flat_unsorted",
+    "input": {
+      "b": 2,
+      "a": 1,
+      "c": 3
+    },
+    "canonical": "{\"a\":1,\"b\":2,\"c\":3}",
+    "sha256": "e6a3385fb77c287a712e7f406a451727f0625041823ecf23bea7ef39b2e39805"
+  },
+  {
+    "name": "nested_unsorted",
+    "input": {
+      "z": {
+        "y": 1,
+        "x": [
+          3,
+          {
+            "q": true,
+            "p": null
+          }
+        ]
+      },
+      "a": "s"
+    },
+    "canonical": "{\"a\":\"s\",\"z\":{\"x\":[3,{\"p\":null,\"q\":true}],\"y\":1}}",
+    "sha256": "46ecdc55d22702df6282ad26c8ec9cfe3cb92ecbeb21752cac4970b1b2790287"
+  },
+  {
+    "name": "arrays_keep_order",
+    "input": [
+      3,
+      1,
+      2,
+      {
+        "b": [],
+        "a": {}
+      }
+    ],
+    "canonical": "[3,1,2,{\"a\":{},\"b\":[]}]",
+    "sha256": "b3b1ecbc052a67edbe8906e0bc1ce5f98561d4ebc8ed1dc03affb5f418373142"
+  },
+  {
+    "name": "key_order_utf16_not_numeric",
+    "input": {
+      "0": 7,
+      "9": 2,
+      "10": 5,
+      "b": 1,
+      "B": 3,
+      "a": 4,
+      "_": 6,
+      "é": 8,
+      "Z": 9,
+      "ü": 10
+    },
+    "canonical": "{\"0\":7,\"10\":5,\"9\":2,\"B\":3,\"Z\":9,\"_\":6,\"a\":4,\"b\":1,\"é\":8,\"ü\":10}",
+    "sha256": "dd7d739a344d9a8f896b5db271eb409dd4a923266dc44748b58ecf9fda06319a"
+  },
+  {
+    "name": "string_escapes",
+    "input": {
+      "s": "quote\" backslash\\ newline\n tab\t cr\r bs\b ff\f vt\u000b ctrl\u0001 unit\u001f slash/ emoji😀 é"
+    },
+    "canonical": "{\"s\":\"quote\\\" backslash\\\\ newline\\n tab\\t cr\\r bs\\b ff\\f vt\\u000b ctrl\\u0001 unit\\u001f slash/ emoji😀 é\"}",
+    "sha256": "95b0af39dc5aab40e4937bc1d880f96239210f1d859f9261e9a1dd69a5bf7f54"
+  },
+  {
+    "name": "numbers_as_sent",
+    "input": {
+      "int": 42,
+      "neg": -7,
+      "dec": 3.14,
+      "tenth": 0.1,
+      "small_exp": 1.5e-7,
+      "big_exp": 1e+21,
+      "twenty_digits": 100000000000000000000,
+      "zero": 0
+    },
+    "canonical": "{\"big_exp\":1e+21,\"dec\":3.14,\"int\":42,\"neg\":-7,\"small_exp\":1.5e-7,\"tenth\":0.1,\"twenty_digits\":100000000000000000000,\"zero\":0}",
+    "sha256": "f46d4a46cb5b9eed0cc8822da0e53daa2115e3150c0feebe1243dd8430026dc6"
+  },
+  {
+    "name": "booleans_and_null",
+    "input": {
+      "t": true,
+      "f": false,
+      "n": null,
+      "nested": {
+        "n": null,
+        "arr": [
+          null,
+          false
+        ]
+      }
+    },
+    "canonical": "{\"f\":false,\"n\":null,\"nested\":{\"arr\":[null,false],\"n\":null},\"t\":true}",
+    "sha256": "4d6259ffc2764fcb31066e3d84a410932fceb600a4dd3202240dbc551663676b"
+  },
+  {
+    "name": "tools_call_params",
+    "input": {
+      "name": "instruments.log",
+      "arguments": {
+        "limit": 50,
+        "include_raw": false,
+        "instrument_id": "inst-01"
+      }
+    },
+    "canonical": "{\"arguments\":{\"include_raw\":false,\"instrument_id\":\"inst-01\",\"limit\":50},\"name\":\"instruments.log\"}",
+    "sha256": "71bbe8cbe82ef19eabbce66c12e8cea86b13741858221f8480263ea1248dff99"
+  },
+  {
+    "name": "tools_call_empty_arguments",
+    "input": {
+      "name": "session.info",
+      "arguments": {}
+    },
+    "canonical": "{\"arguments\":{},\"name\":\"session.info\"}",
+    "sha256": "a31bea88d6a3fe9ce68a54610d387be2563f68dbbd9520dd74116369637135e3"
+  },
+  {
+    "name": "deep_nesting",
+    "input": {
+      "a": [
+        [
+          {
+            "z": 1,
+            "b": [
+              {
+                "d": {},
+                "c": {
+                  "d": []
+                }
+              }
+            ]
+          }
+        ]
+      ]
+    },
+    "canonical": "{\"a\":[[{\"b\":[{\"c\":{\"d\":[]},\"d\":{}}],\"z\":1}]]}",
+    "sha256": "7a9047e7fec2dc88d490424f5e6fee72ee646e49dc79bc5fffed002b7a591eb2"
+  },
+  {
+    "name": "scalar_string",
+    "input": "plain",
+    "canonical": "\"plain\"",
+    "sha256": "945603a8f587786b463c3f94fce115c0fae88fac2728cc96ddf5981cf7f61741"
+  },
+  {
+    "name": "unicode_keys_and_values",
+    "input": {
+      "名前": "検査",
+      "ключ": "значение",
+      "a": "ä"
+    },
+    "canonical": "{\"a\":\"ä\",\"ключ\":\"значение\",\"名前\":\"検査\"}",
+    "sha256": "040f3ce83205cef93b7c463724ee2ea02dc0f976e4ff8d2e9fe24b28f8fd9ff8"
+  },
+  {
+    "name": "empty_string_key",
+    "input": {
+      "": 1,
+      "a": 0
+    },
+    "canonical": "{\"\":1,\"a\":0}",
+    "sha256": "3b5c352a4603d03dd7a3bea02ca34f0f6ea63d3d7ef79eb48fb9108452eb71b2"
+  },
+  {
+    "name": "whitespace_inside_strings",
+    "input": {
+      "a": "  padded  ",
+      "b": "tab\tin",
+      "c": " "
+    },
+    "canonical": "{\"a\":\"  padded  \",\"b\":\"tab\\tin\",\"c\":\" \"}",
+    "sha256": "11cb7aca87528391a0f9328653e5c13f22bb5fdf0beec15351bd23e1c2defee1"
+  }
+]
