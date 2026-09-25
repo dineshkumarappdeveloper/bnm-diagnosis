@@ -1,5 +1,6 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.Base64
 import java.util.Properties
 import java.io.FileInputStream
 
@@ -249,6 +250,8 @@ compose.desktop {
 // anyone with the repo and a session code drive any lab. RemoteSupportKeysReleaseTest
 // says the same thing to a test run, but release.yml only runs the package task —
 // so the installer tasks depend on this one. Opt out with -Pbnm.allowDevSupportKey=true.
+// The key is also checked for SHAPE, always: a mangled paste would otherwise
+// only surface as an app that will not start on the lab PC.
 val checkSupportKeyNotDev by tasks.registering {
     val keysFile = layout.projectDirectory.file("src/commonMain/kotlin/com/bnm/lab/remote/RemoteSupportKeys.kt")
     val version = appVersionName
@@ -257,12 +260,22 @@ val checkSupportKeyNotDev by tasks.registering {
     inputs.property("version", version)
     inputs.property("allowed", allowed)
     doLast {
-        if (allowed || version.endsWith("-dev")) return@doLast
         val text = keysFile.asFile.readText()
         fun constant(name: String) = Regex("""$name\s*=\s*"([^"]+)"""").find(text)?.groupValues?.get(1)
         val shipped = constant("SUPPORT_PUBLIC_KEY_SPKI_B64")
         val dev = constant("DEV_PUBLIC_KEY_SPKI_B64")
         check(shipped != null && dev != null) { "RemoteSupportKeys.kt: could not read the support key constants" }
+        // A mangled paste (a truncation, a dropped character) passes every
+        // string comparison and then throws when the app builds its verifier at
+        // startup — i.e. the lab that takes the update cannot open BNM Lab.
+        // 44 bytes: the X.509 SubjectPublicKeyInfo header for Ed25519, then the 32-byte key.
+        val spkiHeader = "302a300506032b6570032100"
+        val der = runCatching { Base64.getDecoder().decode(shipped) }.getOrNull()
+        check(der != null && der.size == 44 && der.take(12).joinToString("") { "%02x".format(it) } == spkiHeader) {
+            "RemoteSupportKeys.SUPPORT_PUBLIC_KEY_SPKI_B64 is not an Ed25519 public key (X.509 SPKI, 44 bytes). " +
+                "Paste the line `node tools/remote-mcp/bnmlab-remote.mjs keygen` prints, whole and unbroken."
+        }
+        if (allowed || version.endsWith("-dev")) return@doLast
         check(shipped != dev) {
             "Version $version would ship the committed DEV remote-support key. Run " +
                 "`node tools/remote-mcp/bnmlab-remote.mjs keygen`, paste the SPKI it prints into " +

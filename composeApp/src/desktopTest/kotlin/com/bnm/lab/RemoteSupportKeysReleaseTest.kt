@@ -1,9 +1,11 @@
 package com.bnm.lab
 
+import com.bnm.lab.remote.Ed25519Verifier
 import com.bnm.lab.remote.RemoteSupportKeys
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * The release gate for the remote-support trust root. The private half of
@@ -37,6 +39,22 @@ class RemoteSupportKeysReleaseTest {
                 "`node tools/remote-mcp/bnmlab-remote.mjs keygen`, paste the SPKI it prints into " +
                 "RemoteSupportKeys.SUPPORT_PUBLIC_KEY_SPKI_B64, and cut the release again.",
         )
+    }
+
+    /**
+     * Rotation day: the engineer runs keygen and pastes the SPKI in. Nothing
+     * else in the suite parses the SHIPPED constant — the signing tests all use
+     * the dev one — and `isDevKey` is a string comparison, so a truncated paste
+     * or a stray newline would sail through every gate and only break on the
+     * lab PC, where `RemoteSupportService.instance` builds this verifier at
+     * startup and the app would not open at all.
+     */
+    @Test
+    fun `the shipped key is a key — the app can build its verifier from it`() {
+        val verifier = Ed25519Verifier(RemoteSupportKeys.SUPPORT_PUBLIC_KEY_SPKI_B64)
+        assertFalse(verifier.verify("anything".encodeToByteArray(), ByteArray(64)),
+            "and it answers instead of throwing when handed a signature that is not one")
+        assertTrue(RemoteSupportKeys.SUPPORT_PUBLIC_KEY_SPKI_B64.isNotBlank())
     }
 
     @Test
