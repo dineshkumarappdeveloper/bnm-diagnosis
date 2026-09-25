@@ -159,7 +159,18 @@ private fun summaryBlock(s: RunFinished): TranscriptBlock = when (s.kind) {
         tone = BlockTone.OK,
     )
     // The failure itself is already a block of its own; this just ends the run.
-    RunKind.ABORTED -> TranscriptBlock(title = "Stopped — nothing further was sent.", tone = BlockTone.FAILED)
+    // Except for a stopped burst: its children hold their own connections, and
+    // an interrupt cannot reach a thread blocked in a socket write. Saying
+    // "nothing further was sent" over connections that are still sending is the
+    // one thing a tool aimed at a live lab must not do.
+    RunKind.ABORTED -> if (s.stragglers > 0) TranscriptBlock(
+        title = "Stopped — but ${s.stragglers} connection(s) were still open.",
+        lines = listOf(
+            "An interrupt cannot reach a thread already inside a socket write. Check the Instruments " +
+                "screen before treating this run as ended."
+        ),
+        tone = BlockTone.FAILED,
+    ) else TranscriptBlock(title = "Stopped — nothing further was sent.", tone = BlockTone.FAILED)
 }
 
 /** The ACK in one line, in the words the engineer needs to act on. */

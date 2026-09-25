@@ -53,6 +53,21 @@ data class Options(
     /** Self-identifying on purpose: an id that could be mistaken for a real
      *  accession is one `findOrder` tail-match away from a patient's order. */
     val ids: List<String> = listOf("BNMTEST-0001"),
+    /**
+     * Whether a run longer than [ids] advances the id instead of repeating it.
+     *
+     * A real analyzer carries its own sequence: run five tubes and five
+     * accessions go down the wire. Repeating one id five times files five
+     * results onto ONE order, each overwriting the last, which is the opposite
+     * of what a five-sample rehearsal is meant to prove.
+     *
+     * Never inferred in here — each front end says which it means. The CLI sets
+     * it whenever `--id` was NOT typed (an id the engineer pinned is their own
+     * choice); the window follows its "+1 per run" tick. Ignored when [ids]
+     * already holds more than one id: a comma list or a `{1..5}` pattern is an
+     * enumeration, and enumerations cycle.
+     */
+    val autoIncrementIds: Boolean = false,
     val count: Int = 0,
     val intervalSeconds: Double = 0.0,
     val profile: Profile = Profile.NORMAL,
@@ -74,10 +89,61 @@ data class Options(
     val liveLab: Boolean = false,
     val verbose: Boolean = false,
 ) {
-    /** How many samples this run sends. Defaults to "one per id". */
-    val samples: Int get() = if (count > 0) count else ids.size
+    /**
+     * How many samples this run sends. Defaults to "one per id".
+     *
+     * A burst IS its samples: n connections carrying one frame each. Saying so
+     * here rather than only inside [Sender.burst] is what gives each of those
+     * connections its own accession — n frames on one id prove nothing about
+     * whether a connection was dropped, because the app would file them onto
+     * one order and the last would win.
+     */
+    val samples: Int get() = when {
+        faults.burst > 0 -> faults.burst
+        count > 0 -> count
+        else -> ids.size
+    }
+
+    /**
+     * The specimen id each sample carries, in order — one entry per [samples].
+     *
+     * This is the whole of the rule, in one place, so the CLI, the menu and the
+     * window cannot disagree about what a five-sample run puts on the wire.
+     * With [autoIncrementIds] and a single base id the sequence ADVANCES, as an
+     * analyzer's does; otherwise the ids cycle, which is what an engineer who
+     * enumerated them by hand asked for.
+     */
+    val sampleIds: List<String>
+        get() {
+            val n = samples
+            if (!autoIncrementIds || ids.size > 1) return List(n) { ids[it % ids.size] }
+            val out = ArrayList<String>(n)
+            var id = ids.first()
+            repeat(n) { out += id; id = nextSpecimenId(id) }
+            return out
+        }
 
     val usesSerial: Boolean get() = serialPort != null
+}
+
+/**
+ * The next id in a sequence: SIM-0001 → SIM-0002, ACC-S1-00042 → ACC-S1-00043.
+ *
+ * The width of the trailing digits is kept, because an accession that lost its
+ * leading zeros matches nothing in BNM Lab — except when the number overflows
+ * its width (0099 → 0100 keeps four; 99 → 100 has to grow). An id that ends in
+ * no digits at all gets a counter rather than repeating itself forever.
+ *
+ * Lives in the core, not in the window, because both front ends advance ids and
+ * two implementations would eventually disagree about a leading zero.
+ */
+fun nextSpecimenId(id: String): String {
+    val trimmed = id.trim()
+    val digits = trimmed.takeLastWhile { it.isDigit() }
+    if (digits.isEmpty()) return if (trimmed.isEmpty()) "BNMTEST-0002" else "$trimmed-2"
+    val stem = trimmed.dropLast(digits.length)
+    val next = (digits.toLongOrNull() ?: 0L) + 1
+    return stem + next.toString().padStart(digits.length, '0')
 }
 
 /** A command line that could not be honoured, with a message meant for a human. */
@@ -110,8 +176,12 @@ object Cli {
           --id <ids>           specimen id(s): one, a comma list, or a pattern
                                such as 'ACC-S1-000{1..5}'. QUOTE the pattern:
                                bash and zsh expand braces before this tool
-                               sees them
-          --count <n>          how many samples (default: one per id; ids cycle)
+                               sees them. An id given here is PINNED — every
+                               sample of the run carries it
+          --count <n>          how many samples. With no --id the default id
+                               advances per sample, as a real analyzer's
+                               sequence does (BNMTEST-0001, -0002, …); with
+                               --id the ids you gave cycle
           --interval <s>       seconds between samples (default 0)
           --profile <name>     ${Profile.names}
           --patient "<name>"   patient name (mindray PID-5; mispa carries none)
@@ -178,6 +248,10 @@ object Cli {
 
         var o = Options(analyzer = analyzer, port = analyzer.defaultPort)
         var faults = Faults()
+        // An id the engineer typed is theirs: --id ACC-S1-00042 --count 3 sends
+        // three frames on that one accession, which is a real thing to want
+        // (proving the app does not double-apply). Only the DEFAULT id advances.
+        var idPinned = false
         var i = 1
         fun next(flag: String): String =
             args.getOrNull(++i) ?: throw CliError("$flag needs a value.")
@@ -194,7 +268,7 @@ object Cli {
                 "--port" -> o = o.copy(port = int(arg))
                 "--serial" -> o = o.copy(serialPort = next(arg))
                 "--baud" -> o = o.copy(baud = int(arg))
-                "--id" -> o = o.copy(ids = expandIds(next(arg)))
+                "--id" -> { o = o.copy(ids = expandIds(next(arg))); idPinned = true }
                 "--count" -> o = o.copy(count = int(arg))
                 "--interval" -> o = o.copy(intervalSeconds = double(arg))
                 "--profile" -> {
@@ -228,7 +302,7 @@ object Cli {
             i++
         }
 
-        val opts = o.copy(faults = faults)
+        val opts = o.copy(faults = faults, autoIncrementIds = !idPinned)
         validate(opts)
         return opts
     }
@@ -272,7 +346,16 @@ object Cli {
             "--cbc-only is a Mindray run mode. The Mispa Count X is a 3-part analyzer: it always reports " +
                 "LYMP/MID/GRAN and has no CBC-only mode to imitate.")
         if (o.count < 0) throw CliError("--count cannot be negative.")
+        // The same ceiling --id ranges get. A run builds one id per sample up
+        // front, and a bench rehearsal that needs more than ten thousand frames
+        // is a load test aimed at the wrong tool.
+        if (o.count > 10_000) throw CliError(
+            "--count ${o.count} is more than 10 000 samples. That is a load test, not a rehearsal.")
         if (o.faults.burst < 0) throw CliError("--burst cannot be negative.")
+        // One OS thread per connection: a burst big enough to exhaust them
+        // proves something about this machine, not about BNM Lab.
+        if (o.faults.burst > 1_000) throw CliError(
+            "--burst ${o.faults.burst} opens more connections at once than this is meant to. Keep it under 1000.")
         if (o.ids.isEmpty()) throw CliError("--id was given but expanded to nothing.")
         if (o.ackTimeoutMs < 0) throw CliError("--ack-timeout cannot be negative.")
         if (!o.dryRun && !o.usesSerial && !isLoopback(o.host) && !o.liveLab) throw CliError(

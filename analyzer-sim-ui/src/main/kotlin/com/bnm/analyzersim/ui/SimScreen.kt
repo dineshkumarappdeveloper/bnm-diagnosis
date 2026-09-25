@@ -212,7 +212,7 @@ private fun LinkCard(state: SimState, form: SimForm) = SectionCard("The link") {
                 form.problem(FormField.SERIAL_PORT)?.let { ErrorLine(it) }
             }
             Spacer(Modifier.width(8.dp))
-            OutlinedButton(onClick = state::refreshSerialPorts) {
+            OutlinedButton(onClick = { state.refreshSerialPorts() }, enabled = !state.scanningPorts) {
                 Icon(Icons.Default.Refresh, null, Modifier.size(15.dp))
                 Spacer(Modifier.width(5.dp))
                 Text("Refresh")
@@ -421,8 +421,18 @@ private fun FaultsCard(state: SimState, form: SimForm) {
             }) { v -> state.edit { it.copy(faults = it.faults.copy(slowChunks = v)) } }
         Fault("Unknown parameter code", "A firmware the driver has never met. Must not land on a real parameter.",
             f.unknownCode) { v -> state.edit { it.copy(faults = it.faults.copy(unknownCode = v)) } }
-        Fault("Bad units", "A unit the converter cannot bridge. The value must still land, with a warning.",
-            f.badUnits) { v -> state.edit { it.copy(faults = it.faults.copy(badUnits = v)) } }
+        // Mindray only, like Scattergram and CBC-only above. MispaFrames never
+        // reads badUnits — the Mispa format has no unit field at all — so an
+        // ungated tick here put "FAULTS: bad-units" over a byte-for-byte clean
+        // frame and the engineer ticked unit handling off the commissioning
+        // list having tested nothing.
+        Fault("Bad units",
+            if (form.analyzer == Analyzer.MINDRAY)
+                "A unit the converter cannot bridge. The value must still land, with a warning."
+            else "the Mispa format carries no units at all, so there is nothing to convert",
+            f.badUnits && form.analyzer == Analyzer.MINDRAY,
+            enabled = form.analyzer == Analyzer.MINDRAY,
+        ) { v -> state.edit { it.copy(faults = it.faults.copy(badUnits = v)) } }
         Fault("No specimen id", "The tube was run before the barcode was scanned. Proves the claim queue.",
             f.noSpecimen) { v -> state.edit { it.copy(faults = it.faults.copy(noSpecimen = v)) } }
         Fault("Duplicate frame", "A retransmit the analyzer did not believe was ACKed. Must not double-apply.",
