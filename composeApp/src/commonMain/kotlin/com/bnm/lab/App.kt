@@ -1066,6 +1066,7 @@ fun App() {
                     composable(Screen.Instruments.route) {
                         InstrumentsScreen(
                             engine = instrumentEngine,
+                            labName = licState.labName ?: authRepository.getSelectedBusinessName() ?: "BNM Lab",
                             onBack = { navController.popBackStack() },
                             onVerified = { inst ->
                                 // Support history row: the bench confirmed the settings support changed.

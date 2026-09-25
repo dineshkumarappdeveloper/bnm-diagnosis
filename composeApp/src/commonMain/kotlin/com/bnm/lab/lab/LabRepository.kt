@@ -1381,9 +1381,8 @@ class LabRepository(
             return from to toExclusive
         }
 
-        private val ENTRY_OPEN_STATUSES = setOf(
-            LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED,
-        )
+        /** @see LabStatus.ENTRY_OPEN — one set, shared with the analyzer paths. */
+        private val ENTRY_OPEN_STATUSES = LabStatus.ENTRY_OPEN
 
         /**
          * Phone identity key: digits only, last 10 kept — so '+91 98765 43210',

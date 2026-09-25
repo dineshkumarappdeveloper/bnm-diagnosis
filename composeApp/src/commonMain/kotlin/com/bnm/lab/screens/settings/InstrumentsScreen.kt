@@ -9,13 +9,17 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -37,6 +41,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -52,10 +57,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.bnm.lab.instruments.ClaimCandidate
+import com.bnm.lab.instruments.ClaimCandidates
 import com.bnm.lab.instruments.INSTRUMENT_DRIVERS
 import com.bnm.lab.instruments.InstrumentConfig
 import com.bnm.lab.instruments.InstrumentEngine
@@ -67,15 +77,28 @@ import com.bnm.lab.instruments.LinkFacts
 import com.bnm.lab.instruments.LinkFactsSnapshot
 import com.bnm.lab.instruments.LinkLogRow
 import com.bnm.lab.instruments.LinkLogSummaries
+import com.bnm.lab.instruments.QueuedFrame
 import com.bnm.lab.instruments.driverFor
+import com.bnm.lab.instruments.filterForClaim
 import com.bnm.lab.instruments.gatherLinkFacts
 import com.bnm.lab.instruments.listSerialPorts
 import com.bnm.lab.instruments.platformLinkEnvironment
+import com.bnm.lab.instruments.scanTargetFor
 import com.bnm.lab.instruments.serialSupported
+import com.bnm.lab.print.AnalyzerWorksheet
+import com.bnm.lab.print.buildAnalyzerWorksheet
+import com.bnm.lab.print.layoutAnalyzerWorksheetA4
+import com.bnm.lab.print.printA4
+import com.bnm.lab.staff.LabPermission
 import com.bnm.lab.staff.LocalStaffSession
+import com.bnm.lab.staff.allows
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
 
 /**
  * Instruments (I0) — connect lab analyzers so results enter themselves.
@@ -86,11 +109,18 @@ import kotlinx.coroutines.launch
  * hardware is 90% "what did the machine actually send"). Each analyzer's
  * editor carries the full Link check ([LinkCheckPanel]): the ordered
  * checklist that names the step that blocks.
+ *
+ * The claim queue is where a run whose order was never registered ends up, and
+ * it has three ways out: assign it to an order (picked from a list, not typed
+ * from memory), print it as an [AnalyzerWorksheet] for the bench while the
+ * order is still missing, or discard it.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun InstrumentsScreen(
     engine: InstrumentEngine,
+    /** The licence's lab name — heads the worksheet, as it heads a report. */
+    labName: String,
     onBack: () -> Unit,
     /** "Verified" pressed after remote support changed an analyzer's settings — the host writes the audit row. */
     onVerified: suspend (InstrumentConfig) -> Unit = {},
@@ -98,11 +128,16 @@ fun InstrumentsScreen(
     environment: LinkEnvironment? = null,
 ) {
     val scope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
     val signedIn = LocalStaffSession.current.signedIn
+    // One rule for every door onto a queued result — assign, print, discard.
+    // The licence is NOT part of it: a lapsed seat is read-only for new work and
+    // must keep printing and exporting what it already holds.
+    val canWorkResults = signedIn.allows(LabPermission.RESULTS)
     val env = environment ?: remember { platformLinkEnvironment() }
     val instruments by engine.instrumentsFlow().collectAsState(emptyList())
     val statuses by engine.status.collectAsState()
-    val unmatched by engine.unmatchedFlow().collectAsState(emptyList())
+    val queue by engine.queueFlow().collectAsState(emptyList())
     // 300 rows so a chatty analyzer can't push a quiet one's newest rows out of the Link check; the list shows 100.
     val log by engine.logFlow(300).collectAsState(emptyList())
 
@@ -124,10 +159,16 @@ fun InstrumentsScreen(
     // The queue itself, not the session counter: claiming or discarding a result
     // removes it here, while framesUnmatched only ever grows (listUnmatched caps
     // at 50, which is far past the point where the count stops being the news).
-    fun queuedFor(inst: InstrumentConfig): Int = unmatched.count { it.instrument_id == inst.id }
+    fun queuedFor(inst: InstrumentConfig): Int = queue.count { it.instrumentId == inst.id }
+    /** The analyzer's configured name, or the engine's own fallback for a row
+     *  whose instrument has since been removed. */
+    fun instrumentName(row: QueuedFrame): String =
+        instruments.firstOrNull { it.id == row.instrumentId }?.name ?: "Analyzer"
 
     var editing by remember { mutableStateOf<InstrumentConfig?>(null) }
-    var claiming by remember { mutableStateOf<String?>(null) }      // instrument_results.id
+    var claiming by remember { mutableStateOf<QueuedFrame?>(null) }
+    var printing by remember { mutableStateOf<QueuedFrame?>(null) }
+    var discarding by remember { mutableStateOf<QueuedFrame?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
 
     Scaffold(
@@ -221,47 +262,34 @@ fun InstrumentsScreen(
                 }
             }
 
-            if (unmatched.isNotEmpty()) {
+            if (queue.isNotEmpty()) {
                 item {
                     Column(Modifier.pageWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Caption("Waiting for an order (${unmatched.size})")
+                        Caption("Waiting for an order (${queue.size})")
                         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                             Column {
-                                unmatched.forEachIndexed { i, row ->
+                                queue.forEachIndexed { i, row ->
                                     if (i > 0) HorizontalDivider(
                                         Modifier.padding(start = 14.dp),
                                         color = MaterialTheme.colorScheme.outlineVariant,
                                     )
-                                    Row(
-                                        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        Icon(Icons.Outlined.Downloading, contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(20.dp))
-                                        Column(Modifier.weight(1f)) {
-                                            Text(
-                                                "Specimen ${row.specimen_id ?: "(not keyed)"}",
-                                                style = MaterialTheme.typography.bodyMedium,
-                                                fontWeight = FontWeight.SemiBold,
-                                            )
-                                            Text(
-                                                niceTime(row.received_at),
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                        }
-                                        TextButton(onClick = { claiming = row.id }) { Text("Assign") }
-                                        TextButton(onClick = {
-                                            scope.launch { engine.discardUnmatched(row.id) }
-                                        }) { Text("Discard", color = MaterialTheme.colorScheme.error) }
-                                    }
+                                    ClaimQueueRow(
+                                        row = row,
+                                        instrumentName = instrumentName(row),
+                                        enabled = canWorkResults,
+                                        onAssign = { claiming = row },
+                                        onPrint = { printing = row },
+                                        onDiscard = { discarding = row },
+                                    )
                                 }
                             }
                         }
                         Text(
-                            "These results arrived without a matching accession. Assign one, " +
-                            "or key the accession number on the analyzer next time.",
+                            if (canWorkResults)
+                                "These results arrived without a matching accession. Assign one, print " +
+                                    "the worksheet for the bench while the order is still missing, or key " +
+                                    "the accession number on the analyzer next time."
+                            else LabPermission.RESULTS.explanation,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -362,53 +390,384 @@ fun InstrumentsScreen(
         )
     }
 
-    claiming?.let { resultId ->
-        var accession by remember(resultId) { mutableStateOf("") }
-        var busy by remember(resultId) { mutableStateOf(false) }
-        var err by remember(resultId) { mutableStateOf<String?>(null) }
+    claiming?.let { row ->
+        var candidates by remember(row.id) { mutableStateOf<ClaimCandidates?>(null) }
+        var query by remember(row.id) { mutableStateOf("") }
+        var busy by remember(row.id) { mutableStateOf(false) }
+        var err by remember(row.id) { mutableStateOf<String?>(null) }
+        // Loaded once per opening. The list is a photograph of the worklist as
+        // the dialog opened, not a live feed: re-ranking rows under a finger
+        // that is already moving towards one is how the wrong patient gets
+        // picked.
+        LaunchedEffect(row.id) {
+            engine.claimCandidates(row.id)
+                .onSuccess { candidates = it }
+                .onFailure { err = it.message ?: "Could not read the orders" }
+        }
+        fun assign(accession: String) {
+            busy = true; err = null
+            scope.launch {
+                engine.claimUnmatched(row.id, accession)
+                    .onSuccess { message = it; claiming = null }
+                    .onFailure { err = it.message ?: "Failed" }
+                busy = false
+            }
+        }
+        ClaimPickerDialog(
+            queued = row,
+            instrumentName = instrumentName(row),
+            candidates = candidates,
+            query = query,
+            onQuery = { query = it },
+            busy = busy,
+            error = err,
+            onAssign = ::assign,
+            onDismiss = { if (!busy) claiming = null },
+        )
+    }
+
+    printing?.let { row ->
+        val worksheet = remember(row.id, labName) {
+            buildAnalyzerWorksheet(labName, row, instrumentName(row))
+        }
+        var busy by remember(row.id) { mutableStateOf(false) }
+        var status by remember(row.id) { mutableStateOf<String?>(null) }
+        WorksheetDialog(
+            worksheet = worksheet,
+            busy = busy,
+            status = status,
+            onPrint = {
+                busy = true
+                scope.launch {
+                    // The report's own print path — same A4 page, same platform
+                    // print dialog. Nothing else happens: no archive file, no
+                    // share token, and the row stays in the queue, because none
+                    // of that would be true of this sheet.
+                    status = withContext(Dispatchers.Default) { printA4(layoutAnalyzerWorksheetA4(worksheet)) }
+                    busy = false
+                }
+            },
+            onCopy = {
+                clipboard.setText(AnnotatedString(worksheet.plainText()))
+                status = "Copied — paste it wherever the bench needs it."
+            },
+            onDismiss = { if (!busy) printing = null },
+        )
+    }
+
+    discarding?.let { row ->
         AlertDialog(
-            onDismissRequest = { if (!busy) claiming = null },
-            title = { Text("Assign to an order") },
+            onDismissRequest = { discarding = null },
+            title = { Text("Discard this result?") },
             text = {
-                Column(Modifier.widthIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Type or scan the order's accession number — the stored analyzer " +
-                        "result will be applied to it.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    OutlinedTextField(
-                        value = accession,
-                        // No case-forcing: accession lookup is exact-match and a
-                        // lab may configure a lowercase prefix; the engine tries
-                        // case variants itself.
-                        onValueChange = { accession = it },
-                        label = { Text("Accession (e.g. ACC-S1-00042)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
+                Column(Modifier.widthIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Specimen ${row.specimenId ?: AnalyzerWorksheet.NO_SPECIMEN} · " +
+                            "${row.paramCount} parameters from ${instrumentName(row)}, " +
+                            niceTime(row.receivedAt) + ".",
+                        style = MaterialTheme.typography.bodyMedium,
                     )
-                    err?.let {
-                        Text(it, style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.error)
-                    }
+                    Text(
+                        "It leaves the queue and cannot be assigned to an order afterwards. " +
+                            "The sample would have to be run again.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             },
             confirmButton = {
-                TextButton(
-                    enabled = !busy && accession.isNotBlank(),
-                    onClick = {
-                        busy = true; err = null
-                        scope.launch {
-                            engine.claimUnmatched(resultId, accession)
-                                .onSuccess { message = it; claiming = null }
-                                .onFailure { err = it.message ?: "Failed" }
-                            busy = false
-                        }
-                    },
-                ) { Text(if (busy) "Applying…" else "Apply results") }
+                TextButton(onClick = {
+                    scope.launch {
+                        engine.discardUnmatched(row.id)
+                        message = "Result discarded"
+                    }
+                    discarding = null
+                }) { Text("Discard", color = MaterialTheme.colorScheme.error) }
             },
-            dismissButton = {
-                TextButton(onClick = { if (!busy) claiming = null }) { Text("Close") }
-            },
+            dismissButton = { TextButton(onClick = { discarding = null }) { Text("Keep it") } },
         )
+    }
+}
+
+// ── the claim queue ──
+
+/**
+ * One waiting result.
+ *
+ * Specimen id, instrument, time, parameter count — and the headline values,
+ * because a bench that ran four samples in ten minutes cannot tell four
+ * "Specimen —" rows apart, and the haemoglobin usually can.
+ */
+@Composable
+internal fun ClaimQueueRow(
+    row: QueuedFrame,
+    instrumentName: String,
+    /** False for a seat with no results permission: the row still reads, nothing acts. */
+    enabled: Boolean,
+    onAssign: () -> Unit,
+    onPrint: () -> Unit,
+    onDiscard: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Outlined.Downloading, contentDescription = null,
+            tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(20.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                row.specimenId?.let { "Specimen $it" } ?: "No specimen id keyed",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "$instrumentName · ${niceTime(row.receivedAt)} · ${row.paramCount} parameters",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            row.headline.takeIf { it.isNotEmpty() }?.let { values ->
+                Text(
+                    values.joinToString("  ·  ") { (k, v) -> "$k $v" },
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        TextButton(onClick = onAssign, enabled = enabled) { Text("Assign") }
+        TextButton(onClick = onPrint, enabled = enabled) { Text("Print") }
+        TextButton(onClick = onDiscard, enabled = enabled) {
+            Text("Discard", color = if (enabled) MaterialTheme.colorScheme.error else Color.Unspecified)
+        }
+    }
+}
+
+/**
+ * Pick the order this run belongs to.
+ *
+ * Typing was the whole interface before, and it asked the operator to remember
+ * an accession number for a patient standing in front of them. Now the orders
+ * are on screen with their patients, best guess first, and typing is what
+ * NARROWS the list — except for a barcode scanner, which types an accession and
+ * sends Enter, and still assigns in one motion ([scanTargetFor]).
+ */
+@Composable
+internal fun ClaimPickerDialog(
+    queued: QueuedFrame,
+    instrumentName: String,
+    /** Null while the orders are still being read. */
+    candidates: ClaimCandidates?,
+    query: String,
+    onQuery: (String) -> Unit,
+    busy: Boolean,
+    error: String?,
+    onAssign: (accession: String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val open = candidates?.open.orEmpty()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Assign to an order") },
+        text = {
+            ClaimPickerBody(queued, instrumentName, candidates, query, onQuery, busy, error, onAssign)
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !busy && query.isNotBlank(),
+                onClick = { scanTargetFor(query, open)?.let(onAssign) },
+            ) { Text(if (busy) "Applying…" else "Assign typed") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Close") } },
+    )
+}
+
+/** The picker's content — the dialog shell is Material's, this is ours. */
+@Composable
+internal fun ClaimPickerBody(
+    queued: QueuedFrame,
+    instrumentName: String,
+    candidates: ClaimCandidates?,
+    query: String,
+    onQuery: (String) -> Unit,
+    busy: Boolean,
+    error: String?,
+    onAssign: (accession: String) -> Unit,
+) {
+    val open = candidates?.open.orEmpty()
+    val shown = open.filterForClaim(query)
+    Column(Modifier.widthIn(max = 520.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            "Specimen ${queued.specimenId ?: AnalyzerWorksheet.NO_SPECIMEN} · " +
+                "${queued.paramCount} parameters from $instrumentName. " +
+                "Pick the order, or scan its barcode.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedTextField(
+            value = query,
+            // No case-forcing: a lab may configure a lowercase prefix, and the
+            // engine tries the case variants itself.
+            onValueChange = onQuery,
+            label = { Text("Search accession, patient or phone — or scan") },
+            singleLine = true,
+            enabled = !busy,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            // The bench scanner's Enter lands here.
+            keyboardActions = KeyboardActions(onDone = { scanTargetFor(query, open)?.let(onAssign) }),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        when {
+            candidates == null && error == null ->
+                Text("Reading the orders…", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            open.isEmpty() ->
+                Text(
+                    "No order is waiting for results. If this sample was never registered, " +
+                        "register it first — the result keeps waiting here until you do.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            shown.isEmpty() ->
+                Text("Nothing matches “${query.trim()}”.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            else -> Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                LazyColumn(Modifier.heightIn(max = 300.dp)) {
+                    itemsIndexed(shown) { i, c ->
+                        if (i > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        CandidateRow(c, enabled = !busy, onClick = { onAssign(c.accessionNo) })
+                    }
+                }
+            }
+        }
+        // Said out loud, never silently filtered: an operator who cannot find
+        // the order concludes it is not in the app and registers a duplicate.
+        candidates?.lockedNote?.let {
+            Text(it, style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        error?.let {
+            Text(it, style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.error)
+        }
+    }
+}
+
+/** One pickable order: who it is, what was ordered, and why it is ranked here. */
+@Composable
+private fun CandidateRow(c: ClaimCandidate, enabled: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(c.accessionNo, style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold)
+                Text(c.status.replace('_', ' '), style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text(
+                "${c.patientName} · ${c.ageSex}" + (c.phone?.let { " · $it" } ?: ""),
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            c.tests.takeIf { it.isNotBlank() }?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Text(
+                "${niceTime(c.registeredAt)} · ${c.matchNote}",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (c.matched > 0) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * The worksheet, on screen before it is on paper — and with the same warning
+ * the paper carries, because this preview is the copy most operators will
+ * actually read.
+ */
+@Composable
+internal fun WorksheetDialog(
+    worksheet: AnalyzerWorksheet,
+    busy: Boolean,
+    status: String?,
+    onPrint: () -> Unit,
+    onCopy: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(AnalyzerWorksheet.TITLE) },
+        text = { WorksheetBody(worksheet, status) },
+        confirmButton = {
+            Row {
+                TextButton(onClick = onCopy, enabled = !busy) { Text("Copy values") }
+                TextButton(onClick = onPrint, enabled = !busy) { Text(if (busy) "Printing…" else "Print") }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Close") } },
+    )
+}
+
+/**
+ * What the worksheet says, on screen. The warning is first and in the error
+ * colour for the same reason it is banded on the paper: this preview is the
+ * copy most operators will actually read.
+ */
+@Composable
+internal fun WorksheetBody(worksheet: AnalyzerWorksheet, status: String? = null) {
+    Column(Modifier.widthIn(max = 520.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Surface(color = MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(8.dp)) {
+            Text(
+                AnalyzerWorksheet.DISCLAIMER,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.padding(10.dp),
+            )
+        }
+        Text(
+            "Specimen ${worksheet.specimenLabel}\n" +
+                "${worksheet.instrumentName} · ${worksheet.driverLabel}\n" +
+                "Received ${worksheet.receivedAt}" +
+                (worksheet.runMode?.let { "\nRun mode $it" } ?: ""),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            LazyColumn(Modifier.heightIn(max = 260.dp).padding(10.dp)) {
+                itemsIndexed(worksheet.lines) { _, l ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(l.param, Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                        // Value, unit and the analyzer's own flag, all in one ink:
+                        // no reference range on this page, so no verdict either.
+                        Text(
+                            l.value + (if (l.unit.isBlank()) "" else " ${l.unit}") +
+                                (l.flag?.takeIf { it.isNotBlank() }?.let { "  [$it]" } ?: ""),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+            }
+        }
+        status?.let {
+            Text(it, style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary)
+        }
     }
 }
 
@@ -677,7 +1036,21 @@ private fun statusLine(s: com.bnm.lab.instruments.InstrumentStatus?): String = w
     else -> s.detail ?: s.state
 }
 
-private fun niceTime(iso: String?): String =
-    iso?.replace('T', ' ')?.take(16) ?: "—"
+/**
+ * An ISO instant as the bench reads a clock — local time, not the stored UTC.
+ *
+ * The stamps are written as UTC instants and used to be shown by chopping the
+ * string, which put "16:33" on a run the lab took at 22:03. Harmless on its own;
+ * not harmless beside the worksheet, which prints the same moment properly
+ * converted, so one screen showed one event at two times. Unparseable input
+ * falls back to the old truncation rather than losing the stamp.
+ */
+private fun niceTime(iso: String?): String {
+    if (iso == null) return "—"
+    return runCatching {
+        val t = kotlin.time.Instant.parse(iso).toLocalDateTime(TimeZone.currentSystemDefault())
+        "${t.date} ${t.hour.toString().padStart(2, '0')}:${t.minute.toString().padStart(2, '0')}"
+    }.getOrElse { iso.replace('T', ' ').take(16) }
+}
 
 private fun Modifier.pageWidth(): Modifier = this.fillMaxWidth().widthIn(max = 760.dp)

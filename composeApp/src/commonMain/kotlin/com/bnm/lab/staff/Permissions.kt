@@ -35,6 +35,22 @@ enum class LabPermission(val title: String, val explanation: String) {
             "catalog itself stays readable so you can look tests up.",
     ),
 
+    /**
+     * Touching clinical results: the analyzer claim queue — assigning a run to
+     * an order, printing its worksheet, discarding it.
+     *
+     * The bench holds this, the front desk does not. A receptionist registers
+     * patients, orders and bills (StaffRole.describe says exactly that); a
+     * queued analyzer run is unattributed clinical data, and putting it on the
+     * wrong order — or onto paper, or in the bin — is bench work.
+     */
+    RESULTS(
+        title = "Results are for the bench",
+        explanation = "Assigning, printing or discarding an analyzer result is done by " +
+            "whoever works the bench — a technician, the pathologist or the owner. " +
+            "Everything else on this screen stays available.",
+    ),
+
     /** Adding people, setting their role, minting their login. */
     MANAGE_STAFF(
         title = "Staff & roles are owner-only",
@@ -59,6 +75,8 @@ fun Staff?.allows(permission: LabPermission): Boolean = when {
         LabPermission.MONEY -> canSeeMoney
         LabPermission.REVENUE -> canSeeMoney
         LabPermission.EDIT_CATALOG -> canEditCatalog
+        // The same people whose names may land on a result's sign-off line.
+        LabPermission.RESULTS -> canVerify
         LabPermission.MANAGE_STAFF -> canManageStaff
     }
 }

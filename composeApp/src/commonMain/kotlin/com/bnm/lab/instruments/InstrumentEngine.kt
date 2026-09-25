@@ -115,6 +115,7 @@ class InstrumentEngine(
             CoroutineExceptionHandler { _, e -> AppLog.e("Analyzer", "background task failed", e) },
     )
     private val q get() = db.instrumentsQueries
+    private val oQ get() = db.labOrdersQueries
     private val restartMutex = Mutex()
     private val listeners = mutableMapOf<String, ListenerHandle>()
     /** The bind failure already written to the log per instrument — the self-heal loop retries every few seconds and must not write a row per attempt. */
@@ -863,6 +864,77 @@ class InstrumentEngine(
         logRow(cfg, "info", "Queued for manual claim — $reason", null)
     }
 
+    /**
+     * The queue as the screen shows it: every waiting row with its frame
+     * already decoded.
+     *
+     * Decoding here rather than in the composable is not tidiness — a
+     * recomposition would otherwise re-parse every payload (histograms and
+     * base64 scattergrams included) on the UI thread, several times a second
+     * while a dialog animates. A row whose payload will not parse is dropped
+     * rather than crashing the screen; it is still in the table, and the
+     * traffic log has the frame that produced it.
+     */
+    fun queueFlow(): Flow<List<QueuedFrame>> =
+        q.listUnmatched().asFlow().mapToList(Dispatchers.Default).map { rows ->
+            rows.mapNotNull { row ->
+                val frame = runCatching {
+                    json.decodeFromString(StoredInstrumentFrame.serializer(), row.payload_json)
+                }.getOrNull() ?: return@mapNotNull null
+                QueuedFrame(
+                    id = row.id,
+                    instrumentId = row.instrument_id,
+                    specimenId = row.specimen_id,
+                    receivedAt = row.received_at,
+                    frame = frame,
+                )
+            }
+        }
+
+    /**
+     * The orders a queued result could be assigned to, best guess first.
+     *
+     * The ranking is the same [selectMapping] the apply path runs — computed
+     * against the same explicit overrides from the instrument's param map — so
+     * "matches 18 of 22" is a promise the assignment keeps rather than a second
+     * opinion that can drift from it. The whole catalog is read once and shared
+     * across candidates: a lab with 223 tests and 80 recent orders would
+     * otherwise do hundreds of single-row lookups to draw one dialog.
+     */
+    suspend fun claimCandidates(resultId: String, limit: Long = 80): Result<ClaimCandidates> = runCatching {
+        val row = withContext(Dispatchers.Default) { q.unmatchedById(resultId).executeAsOneOrNull() }
+            ?: error("That result is gone")
+        val stored = json.decodeFromString(StoredInstrumentFrame.serializer(), row.payload_json)
+        val overrides = parseOverrides(
+            row.instrument_id?.let { id ->
+                withContext(Dispatchers.Default) { q.instrumentById(id).executeAsOneOrNull()?.param_map_json }
+            }
+        )
+        val catalog = labRepo.listTests(includeInactive = true).associateBy { it.id }
+        val rows = withContext(Dispatchers.Default) { oQ.claimCandidates(limit).executeAsList() }
+        val all = rows.map { r ->
+            val tests = r.test_ids.orEmpty().split(',').mapNotNull { catalog[it.trim()] }
+            ClaimCandidate(
+                orderId = r.id,
+                accessionNo = r.accession_no,
+                status = r.status,
+                registeredAt = r.created_at,
+                patientName = r.patient_name,
+                ageSex = ageSexLabel(r.patient_dob, r.patient_age_years, r.patient_sex),
+                phone = r.patient_phone?.takeIf { it.isNotBlank() },
+                tests = r.test_names.orEmpty(),
+                matched = selectMapping(stored.params.keys, tests, overrides)?.second?.size ?: 0,
+                total = stored.params.size,
+                canTakeResults = r.status in LabStatus.ENTRY_OPEN,
+            )
+        }
+        ClaimCandidates(
+            frame = stored,
+            open = all.filter { it.canTakeResults }.rankedForClaim(),
+            lockedCount = all.count { !it.canTakeResults },
+        )
+    }
+
     /** Claim-queue apply: operator typed/scanned an accession for a stored
      *  frame. The row is marked applied ONLY when results actually landed. */
     suspend fun claimUnmatched(resultId: String, accessionNo: String): Result<String> = runCatching {
@@ -1028,9 +1100,8 @@ class InstrumentEngine(
         const val VERIFY_PENDING_REASON =
             "Analyzer settings changed by support — check one known sample, then press Verified"
 
-        private val ENTRY_OPEN = setOf(
-            LabStatus.REGISTERED, LabStatus.COLLECTED, LabStatus.IN_PROGRESS, LabStatus.ENTERED,
-        )
+        /** @see LabStatus.ENTRY_OPEN — one set, shared with enterResult and the picker. */
+        private val ENTRY_OPEN = LabStatus.ENTRY_OPEN
 
         private val STRING_MAP = MapSerializer(String.serializer(), String.serializer())
         private val DOUBLE_LIST = ListSerializer(Double.serializer())
