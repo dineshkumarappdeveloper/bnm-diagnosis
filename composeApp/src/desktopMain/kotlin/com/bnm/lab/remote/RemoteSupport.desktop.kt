@@ -1,7 +1,4 @@
 package com.bnm.lab.remote
 
-/**
- * Placeholder until the engine lands: the desktop `RemoteSupportService`
- * replaces this actual and returns its singleton.
- */
-actual fun platformRemoteSupportController(): RemoteSupportController? = null
+/** The desktop engine — a lab PC is what BNM services. */
+actual fun platformRemoteSupportController(): RemoteSupportController? = RemoteSupportService.instance
