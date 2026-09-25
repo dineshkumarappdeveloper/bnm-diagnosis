@@ -9,6 +9,7 @@ import com.bnm.lab.instruments.InstrumentTransport
 import com.bnm.lab.instruments.Mllp
 import com.bnm.lab.instruments.SampleFrames
 import com.bnm.lab.instruments.filterForClaim
+import com.bnm.lab.instruments.narrowsToOneNonAccession
 import com.bnm.lab.instruments.scanTargetFor
 import com.bnm.lab.lab.LabOrder
 import com.bnm.lab.lab.LabRepository
@@ -121,8 +122,10 @@ class ClaimQueueTest {
         // The approved CBC would have matched every parameter and still must not
         // be offered — saying so is what stops the desk registering a duplicate.
         assertEquals(1, c.lockedCount)
-        assertEquals("1 more order is approved and can no longer take results.", c.lockedNote)
+        assertEquals("1 more order is past result entry (approved) and can no longer take results.", c.lockedNote)
         assertTrue(c.open.all { it.canTakeResults })
+        assertFalse(c.windowFull, "three orders is not a full window — nothing to warn about")
+        assertNull(c.windowNote)
 
         // The row carries who the operator is actually looking for.
         val first = c.open.first()
@@ -147,15 +150,14 @@ class ClaimQueueTest {
     }
 
     @Test
-    fun `a scanned accession assigns directly, and so does a search that narrows to one order`() = runBlocking {
-        val (b, cbc, esr) = stocked()
+    fun `a scanned accession assigns directly`() = runBlocking {
+        val (b, cbc, _) = stocked()
         val resultId = b.queueOne()
         val open = b.engine.claimCandidates(resultId).getOrThrow().open
 
         // What the scanner types, Enter included.
         assertEquals(cbc.accessionNo, scanTargetFor(cbc.accessionNo, open))
         assertEquals(cbc.accessionNo, scanTargetFor(cbc.accessionNo.lowercase(), open), "scanners and prefixes vary in case")
-        assertEquals(esr.accessionNo, scanTargetFor("Ravi", open), "one match left ⇒ that is the intent")
         assertNull(scanTargetFor("   ", open), "nothing typed, nothing to do")
         assertEquals("ACC-S1-99999", scanTargetFor(" ACC-S1-99999 ", open),
             "unknown text goes to the engine, which knows the case variants and says what it found")
@@ -163,6 +165,117 @@ class ClaimQueueTest {
         // And the scan path is the assign path — no second way in.
         val summary = b.engine.claimUnmatched(resultId, scanTargetFor(cbc.accessionNo, open)!!).getOrThrow()
         assertTrue(cbc.accessionNo in summary, summary)
+    }
+
+    @Test
+    fun `Enter never assigns on a name or a phone that happens to leave one order standing`() = runBlocking {
+        val (b, cbc, esr) = stocked()
+        val resultId = b.queueOne()
+        val open = b.engine.claimCandidates(resultId).getOrThrow().open
+
+        // "Ravi" leaves exactly one order on screen — and Enter must STILL not
+        // write to it. The operator narrowed a list; they did not pick a patient.
+        assertEquals(listOf(esr.accessionNo), open.filterForClaim("Ravi").map { it.accessionNo })
+        assertEquals("Ravi", scanTargetFor("Ravi", open), "the raw text goes to the engine, not Ravi's order")
+        assertTrue(narrowsToOneNonAccession("Ravi", open), "…and the screen says to tap the row instead")
+
+        // The real bite: the row reads "Specimen BNMTEST-1", the operator types
+        // the only handle they have, and it is a substring of somebody's PHONE.
+        assertEquals(listOf(cbc.accessionNo), open.filterForClaim("98765").map { it.accessionNo },
+            "the phone search still narrows — that part is wanted")
+        assertEquals("98765", scanTargetFor("98765", open), "but a phone digit run is never an assign target")
+
+        // And nothing lands: the engine refuses text that is not an accession.
+        val err = b.engine.claimUnmatched(resultId, scanTargetFor("98765", open)!!).exceptionOrNull()
+        assertNotNull(err)
+        assertTrue("No order with accession" in err.message.orEmpty(), err.message.orEmpty())
+        assertEquals("unmatched", b.queueRow(resultId)?.status, "the run is still claimable by the right person")
+
+        // A partial barcode — a scanner that dropped the first character — is
+        // likewise never a target. Note what this fixture does unprompted: the
+        // fragment's DIGITS ("00001") are also inside Ravi's phone, so the
+        // "narrowed" list is two orders belonging to two different patients.
+        // That collision is not contrived; it is what a worklist looks like.
+        val partial = cbc.accessionNo.drop(1)
+        assertEquals(listOf(cbc.accessionNo, esr.accessionNo).sorted(),
+            open.filterForClaim(partial).map { it.accessionNo }.sorted(),
+            "an accession fragment reaches a phone number — exactly why near-enough must not write")
+        assertEquals(partial, scanTargetFor(partial, open))
+
+        // Even a fragment that DOES leave one row standing is only a hint.
+        val lone = esr.accessionNo.drop(1)
+        assertEquals(listOf(esr.accessionNo), open.filterForClaim(lone).map { it.accessionNo })
+        assertEquals(lone, scanTargetFor(lone, open), "near-enough is not the same as scanned")
+        assertTrue(narrowsToOneNonAccession(lone, open))
+
+        // An exact accession is never mistaken for a narrowing — no hint, direct assign.
+        assertFalse(narrowsToOneNonAccession(cbc.accessionNo, open))
+    }
+
+    // ── reaching past the loaded window ──────────────────────────────────────
+
+    @Test
+    fun `the search runs in SQL, so an order older than the window is still findable`() = runBlocking {
+        val b = Bench()
+        SeedCatalog.seedIfEmpty(b.repo)
+        b.patient("p-asha", "Asha Menon", "F", 34, "+91 98765 43210")
+        val wanted = b.order("p-asha", "CBC")
+        // Bury it: every later order is newer, so `wanted` falls outside a small window.
+        repeat(6) { i ->
+            b.patient("p-$i", "Other Patient $i", "M", 30, "90000000$i")
+            b.order("p-$i", "CBC")
+        }
+        val resultId = b.queueOne()
+
+        val unfiltered = b.engine.claimCandidates(resultId, limit = 3).getOrThrow()
+        assertEquals(3, unfiltered.open.size)
+        assertFalse(wanted.accessionNo in unfiltered.open.map { it.accessionNo },
+            "out of the window — this is the state the old code answered “nothing matches” from")
+        assertTrue(unfiltered.windowFull, "and it says so, instead of letting the list read as the whole worklist")
+        assertTrue(unfiltered.windowNote.orEmpty().contains("most recent"), unfiltered.windowNote.orEmpty())
+
+        // Typing her name reaches her anyway, because the LIKE is in the query.
+        val byName = b.engine.claimCandidates(resultId, query = "Asha", limit = 3).getOrThrow()
+        assertEquals(listOf(wanted.accessionNo), byName.open.map { it.accessionNo })
+        assertFalse(byName.windowFull, "one match does not fill the window")
+        assertNull(byName.windowNote)
+
+        // So does her phone, digits only, past the +91 and the spaces.
+        assertEquals(listOf(wanted.accessionNo),
+            b.engine.claimCandidates(resultId, query = "98765", limit = 3).getOrThrow().open.map { it.accessionNo })
+        // Two digits is a fragment of every phone number, not a phone number.
+        assertTrue(b.engine.claimCandidates(resultId, query = "98", limit = 3).getOrThrow().open.isEmpty(),
+            "under three digits the phone column is not searched — same threshold as filterForClaim")
+    }
+
+    @Test
+    fun `held-back orders are named by the status they are actually at, and only when they could have been the target`() = runBlocking {
+        val b = Bench()
+        SeedCatalog.seedIfEmpty(b.repo)
+        b.patient("p-asha", "Asha Menon", "F", 34, "+91 98765 43210")
+        b.lock(b.order("p-asha", "CBC"), LabStatus.VERIFIED)
+        // Finished work that takes NONE of a haemogram's parameters: real in every
+        // lab, and never the order this frame was meant for.
+        repeat(5) { i ->
+            b.patient("p-u$i", "Urine Patient $i", "M", 30, null)
+            b.lock(b.order("p-u$i", "URINE-R"), LabStatus.APPROVED)
+        }
+        val resultId = b.queueOne()
+
+        val c = b.engine.claimCandidates(resultId).getOrThrow()
+        assertTrue(c.open.isEmpty())
+        assertEquals(1, c.lockedCount,
+            "only the CBC — five approved urine routines are not what a haemogram was meant for")
+        val note = c.lockedNote.orEmpty()
+        assertTrue("verified" in note, "the note names the status it is actually at: $note")
+        assertFalse("approved" in note, "an order waiting for the pathologist is NOT approved: $note")
+        assertTrue("past result entry" in note, note)
+
+        // A search is the operator naming an order, so everything it reaches counts.
+        val searched = b.engine.claimCandidates(resultId, query = "Urine").getOrThrow()
+        assertEquals(5, searched.lockedCount)
+        assertTrue("matching “Urine”" in searched.lockedNote.orEmpty(), searched.lockedNote.orEmpty())
+        assertTrue("approved" in searched.lockedNote.orEmpty(), searched.lockedNote.orEmpty())
     }
 
     // ── what assigning writes ────────────────────────────────────────────────
@@ -198,6 +311,79 @@ class ClaimQueueTest {
         val row = b.queueRow(resultId)!!
         assertEquals("applied", row.status)
         assertEquals(cbc.id, row.matched_order_id)
+    }
+
+    // ── who did it ───────────────────────────────────────────────────────────
+
+    @Test
+    fun `a manual claim records the person, and reads differently from a frame that matched itself`() = runBlocking {
+        val (b, cbc, _) = stocked()
+        val resultId = b.queueOne()
+        val tech = Staff(id = "s-1", name = "Meera Nair", role = StaffRole.TECHNICIAN)
+
+        b.engine.claimUnmatched(resultId, cbc.accessionNo, by = tech).getOrThrow()
+
+        // On the row: who, by name and by id.
+        val row = b.queueRow(resultId)!!
+        assertEquals("Meera Nair", row.claimed_by)
+        assertEquals("s-1", row.claimed_by_id)
+
+        // And in the trail, in words — the line the automatic path never writes.
+        val log = b.db.instrumentsQueries.recentLog(50).executeAsList().map { it.summary }
+        val claim = log.single { it.startsWith("Claimed by") }
+        assertTrue("Meera Nair" in claim, claim)
+        assertTrue("(manual)" in claim, "a human chose this order — that is the whole point: $claim")
+        assertTrue(cbc.accessionNo in claim, claim)
+
+        // enteredBy stays the ANALYZER: the instrument produced the numbers.
+        assertTrue(b.repo.resultsForOrder(cbc.id).filter { it.isEntered }
+            .all { it.enteredBy == "BC-5130 bench 1" })
+    }
+
+    @Test
+    fun `discarding and printing a run are both written down`() = runBlocking {
+        val b = Bench()
+        SeedCatalog.seedIfEmpty(b.repo)
+        val owner = Staff(id = "s-9", name = "Dr Rao", role = StaffRole.OWNER)
+        val printed = b.queueOne()
+
+        // A cancelled print dialog is not a print, and must leave no trace.
+        b.engine.logWorksheetPrinted(printed, "Print cancelled", by = owner)
+        assertTrue(b.db.instrumentsQueries.recentLog(50).executeAsList()
+            .none { it.summary.startsWith("Worksheet printed") },
+            "the operator backed out — the trail must not claim a page went out")
+        b.engine.logWorksheetPrinted(printed, "Print failed: no printer", by = owner)
+        assertTrue(b.db.instrumentsQueries.recentLog(50).executeAsList()
+            .none { it.summary.startsWith("Worksheet printed") })
+
+        b.engine.logWorksheetPrinted(printed, "Sent to printer", by = owner)
+        b.engine.discardUnmatched(printed, by = owner)
+
+        val row = b.queueRow(printed)!!
+        assertEquals("discarded", row.status)
+        assertEquals("Dr Rao", row.claimed_by)
+        assertEquals("s-9", row.claimed_by_id)
+
+        val log = b.db.instrumentsQueries.recentLog(50).executeAsList().map { it.summary }
+        val discard = log.single { it.startsWith("Discarded by") }
+        val sheet = log.single { it.startsWith("Worksheet printed by") }
+        assertTrue("Dr Rao" in discard && "owner" in discard, discard)
+        assertTrue("Dr Rao" in sheet, sheet)
+        // Counts, never values — this log is read by support.
+        assertTrue("parameters" in discard && "13.8" !in discard, discard)
+    }
+
+    @Test
+    fun `an unattributed claim still says so rather than leaving a blank`() = runBlocking {
+        val (b, cbc, _) = stocked()
+        val resultId = b.queueOne()
+
+        b.engine.claimUnmatched(resultId, cbc.accessionNo).getOrThrow()
+
+        assertNull(b.queueRow(resultId)!!.claimed_by)
+        val claim = b.db.instrumentsQueries.recentLog(50).executeAsList()
+            .map { it.summary }.single { it.startsWith("Claimed by") }
+        assertTrue("unidentified operator" in claim, claim)
     }
 
     @Test

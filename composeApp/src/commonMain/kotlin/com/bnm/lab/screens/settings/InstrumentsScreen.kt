@@ -82,6 +82,7 @@ import com.bnm.lab.instruments.driverFor
 import com.bnm.lab.instruments.filterForClaim
 import com.bnm.lab.instruments.gatherLinkFacts
 import com.bnm.lab.instruments.listSerialPorts
+import com.bnm.lab.instruments.narrowsToOneNonAccession
 import com.bnm.lab.instruments.platformLinkEnvironment
 import com.bnm.lab.instruments.scanTargetFor
 import com.bnm.lab.instruments.serialSupported
@@ -135,11 +136,16 @@ fun InstrumentsScreen(
     // must keep printing and exporting what it already holds.
     val canWorkResults = signedIn.allows(LabPermission.RESULTS)
     val env = environment ?: remember { platformLinkEnvironment() }
-    val instruments by engine.instrumentsFlow().collectAsState(emptyList())
+    // remember(engine), not a fresh call per recomposition: collectAsState keys
+    // its subscription on the FLOW INSTANCE, so a new one each pass cancels and
+    // re-establishes the query — and re-decodes every queued payload — on every
+    // keystroke in the picker's search box. With the frames a Mispa sends
+    // (128-point histograms, base64 scattergrams) that is a visible stutter.
+    val instruments by remember(engine) { engine.instrumentsFlow() }.collectAsState(emptyList())
     val statuses by engine.status.collectAsState()
-    val queue by engine.queueFlow().collectAsState(emptyList())
+    val queue by remember(engine) { engine.queueFlow() }.collectAsState(emptyList())
     // 300 rows so a chatty analyzer can't push a quiet one's newest rows out of the Link check; the list shows 100.
-    val log by engine.logFlow(300).collectAsState(emptyList())
+    val log by remember(engine) { engine.logFlow(300) }.collectAsState(emptyList())
 
     // ── Link check: the PC facts every analyzer shares (addresses, serial
     // ports, firewall per port, ping per analyzer host) are read once every
@@ -395,19 +401,26 @@ fun InstrumentsScreen(
         var query by remember(row.id) { mutableStateOf("") }
         var busy by remember(row.id) { mutableStateOf(false) }
         var err by remember(row.id) { mutableStateOf<String?>(null) }
-        // Loaded once per opening. The list is a photograph of the worklist as
-        // the dialog opened, not a live feed: re-ranking rows under a finger
-        // that is already moving towards one is how the wrong patient gets
-        // picked.
-        LaunchedEffect(row.id) {
-            engine.claimCandidates(row.id)
-                .onSuccess { candidates = it }
+        // Re-read when the operator types, because the search lives in SQL: the
+        // unfiltered list is only the newest `limit` orders, and a lab that
+        // registers a hundred a day pushes this morning's out of it by the
+        // afternoon. Filtering a fixed prefetch would answer "nothing matches"
+        // for a patient who is plainly in the system, and the queue is exactly
+        // where duplicate registrations come from.
+        //
+        // Not a live feed either way — nothing re-ranks under a finger that is
+        // already moving towards a row. It re-reads when, and only when, the
+        // operator changes the query, after they stop typing.
+        LaunchedEffect(row.id, query) {
+            if (query.isNotEmpty()) delay(250)      // debounce: one read per pause, not per keystroke
+            engine.claimCandidates(row.id, query)
+                .onSuccess { candidates = it; err = null }
                 .onFailure { err = it.message ?: "Could not read the orders" }
         }
         fun assign(accession: String) {
             busy = true; err = null
             scope.launch {
-                engine.claimUnmatched(row.id, accession)
+                engine.claimUnmatched(row.id, accession, by = signedIn)
                     .onSuccess { message = it; claiming = null }
                     .onFailure { err = it.message ?: "Failed" }
                 busy = false
@@ -440,10 +453,16 @@ fun InstrumentsScreen(
                 busy = true
                 scope.launch {
                     // The report's own print path — same A4 page, same platform
-                    // print dialog. Nothing else happens: no archive file, no
-                    // share token, and the row stays in the queue, because none
-                    // of that would be true of this sheet.
-                    status = withContext(Dispatchers.Default) { printA4(layoutAnalyzerWorksheetA4(worksheet)) }
+                    // print dialog. Nothing else happens to the RESULT: no
+                    // archive file, no share token, and the row stays in the
+                    // queue, because none of that would be true of this sheet.
+                    // The trail is the exception — a page of a patient's numbers
+                    // leaving the building is an event worth being able to name.
+                    val outcome = withContext(Dispatchers.Default) { printA4(layoutAnalyzerWorksheetA4(worksheet)) }
+                    status = outcome
+                    // Only a page that actually went out is logged — the engine
+                    // reads printA4's verdict rather than assume it.
+                    engine.logWorksheetPrinted(row.id, outcome, by = signedIn)
                     busy = false
                 }
             },
@@ -478,7 +497,7 @@ fun InstrumentsScreen(
             confirmButton = {
                 TextButton(onClick = {
                     scope.launch {
-                        engine.discardUnmatched(row.id)
+                        engine.discardUnmatched(row.id, by = signedIn)
                         message = "Result discarded"
                     }
                     discarding = null
@@ -614,7 +633,9 @@ internal fun ClaimPickerBody(
             singleLine = true,
             enabled = !busy,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-            // The bench scanner's Enter lands here.
+            // The bench scanner's Enter lands here — and ONLY an accession is
+            // assigned by it (see scanTargetFor). A name that happens to leave
+            // one row standing is a narrowed list, not a decision.
             keyboardActions = KeyboardActions(onDone = { scanTargetFor(query, open)?.let(onAssign) }),
             modifier = Modifier.fillMaxWidth(),
         )
@@ -622,7 +643,14 @@ internal fun ClaimPickerBody(
             candidates == null && error == null ->
                 Text("Reading the orders…", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
-            open.isEmpty() ->
+            // Before either "nothing is here" sentence: on a failed read the app
+            // knows NOTHING about the worklist, and telling the bench to go and
+            // register the patient again on the strength of a read that did not
+            // happen is how the same sample gets billed twice. The error line at
+            // the foot of the dialog carries the actual message.
+            candidates == null ->
+                Unit
+            open.isEmpty() && query.isBlank() ->
                 Text(
                     "No order is waiting for results. If this sample was never registered, " +
                         "register it first — the result keeps waiting here until you do.",
@@ -644,9 +672,22 @@ internal fun ClaimPickerBody(
                 }
             }
         }
+        // Enter is a reflex in a search box, and it no longer assigns on a name
+        // that narrows to one row. Say which key does what rather than let it
+        // look broken.
+        if (narrowsToOneNonAccession(query, open)) {
+            Text("One order left — tap it to assign. Enter takes an accession or a scan.",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         // Said out loud, never silently filtered: an operator who cannot find
         // the order concludes it is not in the app and registers a duplicate.
         candidates?.lockedNote?.let {
+            Text(it, style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        // Same reason: a capped list must never read as "not in the app".
+        candidates?.windowNote?.let {
             Text(it, style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }

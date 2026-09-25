@@ -55,11 +55,18 @@ class ClaimQueueRenderTest {
     private fun candidate(
         accession: String, name: String, ageSex: String, phone: String?, tests: String,
         matched: Int, status: String = LabStatus.REGISTERED, at: String = "2026-09-25T10:30:00Z",
+        canTakeResults: Boolean = true,
     ) = ClaimCandidate(
         orderId = "o-$accession", accessionNo = accession, status = status, registeredAt = at,
         patientName = name, ageSex = ageSex, phone = phone, tests = tests,
-        matched = matched, total = frame.params.size, canTakeResults = true,
+        matched = matched, total = frame.params.size, canTakeResults = canTakeResults,
     )
+
+    /** Held-back orders, as the engine hands them over: real rows, real statuses. */
+    private fun locked(vararg statuses: String) = statuses.mapIndexed { i, s ->
+        candidate("ACC-S1-0003${i}", "Signed Off $i", "40 y / M", null,
+            "Complete Blood Count", matched = 7, status = s, canTakeResults = false)
+    }
 
     private fun render(name: String, width: Int = 620, height: Int = 760, content: @Composable () -> Unit) {
         val out = File("build/claim-queue-render").apply { mkdirs() }
@@ -89,7 +96,8 @@ class ClaimQueueRenderTest {
                 candidate("ACC-S1-00039", "Suresh Iyer", "8 mo / M", "90000 22222",
                     "Urine Routine & Microscopy", matched = 0, at = "2026-09-24T18:02:00Z"),
             ),
-            lockedCount = 3,
+            locked = locked(LabStatus.VERIFIED, LabStatus.APPROVED, LabStatus.REPORTED),
+            windowFull = true,
         )
         render("picker-candidates") {
             ClaimPickerBody(queued, "BC-5130 bench 1", candidates, query = "",
@@ -100,8 +108,33 @@ class ClaimQueueRenderTest {
     @Test
     fun `the picker with nothing to offer - the order was never registered`() {
         render("picker-empty", height = 420) {
-            ClaimPickerBody(queued, "BC-5130 bench 1", ClaimCandidates(frame, emptyList(), lockedCount = 0),
+            ClaimPickerBody(queued, "BC-5130 bench 1", ClaimCandidates(frame, emptyList(), locked = emptyList()),
                 query = "", onQuery = {}, busy = false, error = null, onAssign = {})
+        }
+    }
+
+    @Test
+    fun `the picker when the read failed - the error, and no instruction to register again`() {
+        // candidates stay null on a failed read; the body must draw the error and
+        // nothing that asserts anything about the worklist.
+        render("picker-error", height = 420) {
+            ClaimPickerBody(queued, "BC-5130 bench 1", candidates = null, query = "ACC-S1-00042",
+                onQuery = {}, busy = false, error = "That result is gone", onAssign = {})
+        }
+    }
+
+    @Test
+    fun `the picker narrowed to one by name - the hint says which key assigns`() {
+        val candidates = ClaimCandidates(
+            frame = frame,
+            open = listOf(candidate("ACC-S1-00042", "Asha Menon", "34 y / F", "+91 98765 43210",
+                "Complete Blood Count", matched = 7)),
+            locked = emptyList(),
+            query = "Asha",
+        )
+        render("picker-narrowed", height = 420) {
+            ClaimPickerBody(queued, "BC-5130 bench 1", candidates, query = "Asha",
+                onQuery = {}, busy = false, error = null, onAssign = {})
         }
     }
 

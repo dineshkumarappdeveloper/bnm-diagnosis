@@ -124,6 +124,16 @@ LIMIT :limit;
 -- it is holding back; cancelled ones are not, because a withdrawn order is not
 -- waiting for results at all. Typing its accession by hand still reaches it,
 -- and the engine refuses it there with the same "results are locked" message.
+--
+-- The SEARCH is here rather than in the caller on purpose. :limit is a window on
+-- the newest orders, and a lab registering a hundred a day pushes this morning's
+-- out of it by mid-afternoon; filtering an already-fetched window would then
+-- answer "nothing matches" for a patient who is plainly in the system, which is
+-- exactly how a duplicate registration (and a duplicate bill) happens. A blank
+-- :q is the unfiltered ranked window. :digits is :q reduced to digits, blank
+-- when the caller judged it too short to be a phone — the phone column is
+-- stripped the same way so '98765' finds '+91 98765 43210'. LIKE is
+-- case-insensitive for ASCII, which is what the accession and the name need.
 claimCandidates:
 SELECT o.id, o.accession_no, o.status, o.created_at,
        p.name AS patient_name, p.sex AS patient_sex, p.dob AS patient_dob,
@@ -133,6 +143,11 @@ SELECT o.id, o.accession_no, o.status, o.created_at,
 FROM lab_orders o
 JOIN patients p ON p.id = o.patient_id
 WHERE o.status != 'cancelled'
+  AND (:q = ''
+       OR o.accession_no LIKE '%' || :q || '%'
+       OR p.name LIKE '%' || :q || '%'
+       OR (:digits != '' AND replace(replace(replace(coalesce(p.phone, ''), ' ', ''), '+', ''), '-', '')
+             LIKE '%' || :digits || '%'))
 ORDER BY o.created_at DESC
 LIMIT :limit;
 

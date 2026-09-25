@@ -13,6 +13,7 @@ import com.bnm.lab.lab.LabOrder
 import com.bnm.lab.lab.LabRepository
 import com.bnm.lab.lab.LabStatus
 import com.bnm.lab.lab.LabTest
+import com.bnm.lab.staff.Staff
 import io.ktor.network.selector.SelectorManager
 import io.ktor.network.sockets.aSocket
 import io.ktor.network.sockets.openReadChannel
@@ -31,6 +32,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
@@ -874,6 +876,13 @@ class InstrumentEngine(
      * while a dialog animates. A row whose payload will not parse is dropped
      * rather than crashing the screen; it is still in the table, and the
      * traffic log has the frame that produced it.
+     *
+     * `mapToList(Dispatchers.Default)` only moves the `executeAsList()`; the
+     * decode below runs wherever the COLLECTOR runs, which for `collectAsState`
+     * is the composition's Main dispatcher. Hence the trailing `flowOn` — without
+     * it the paragraph above is a wish, not a description. The screen must also
+     * `remember` this flow: a new instance per recomposition restarts the
+     * subscription and re-decodes the whole queue on every keystroke.
      */
     fun queueFlow(): Flow<List<QueuedFrame>> =
         q.listUnmatched().asFlow().mapToList(Dispatchers.Default).map { rows ->
@@ -889,7 +898,7 @@ class InstrumentEngine(
                     frame = frame,
                 )
             }
-        }
+        }.flowOn(Dispatchers.Default)
 
     /**
      * The orders a queued result could be assigned to, best guess first.
@@ -900,44 +909,79 @@ class InstrumentEngine(
      * opinion that can drift from it. The whole catalog is read once and shared
      * across candidates: a lab with 223 tests and 80 recent orders would
      * otherwise do hundreds of single-row lookups to draw one dialog.
+     *
+     * [query] is pushed into SQL, not applied to the result, so an order older
+     * than [limit] is still reachable by name; the screen re-calls this as the
+     * operator types. When the read fills the window, [ClaimCandidates.windowFull]
+     * says so, because "nothing matches" must never be a guess.
+     *
+     * The whole body runs on [Dispatchers.Default]. The caller is a
+     * `LaunchedEffect`, i.e. Main, and the work here is a payload decode (128-point
+     * histograms and base64 scattergrams) plus one [selectMapping] per candidate
+     * — the cost `queueFlow` is at pains to keep off the UI thread. Leaving it
+     * here would freeze the very frame that draws "Reading the orders…".
      */
-    suspend fun claimCandidates(resultId: String, limit: Long = 80): Result<ClaimCandidates> = runCatching {
-        val row = withContext(Dispatchers.Default) { q.unmatchedById(resultId).executeAsOneOrNull() }
-            ?: error("That result is gone")
-        val stored = json.decodeFromString(StoredInstrumentFrame.serializer(), row.payload_json)
-        val overrides = parseOverrides(
-            row.instrument_id?.let { id ->
-                withContext(Dispatchers.Default) { q.instrumentById(id).executeAsOneOrNull()?.param_map_json }
+    suspend fun claimCandidates(
+        resultId: String,
+        query: String = "",
+        limit: Long = 80,
+    ): Result<ClaimCandidates> = withContext(Dispatchers.Default) {
+        runCatching {
+            val row = q.unmatchedById(resultId).executeAsOneOrNull() ?: error("That result is gone")
+            val stored = json.decodeFromString(StoredInstrumentFrame.serializer(), row.payload_json)
+            val overrides = parseOverrides(
+                row.instrument_id?.let { id -> q.instrumentById(id).executeAsOneOrNull()?.param_map_json }
+            )
+            val catalog = labRepo.listTests(includeInactive = true).associateBy { it.id }
+            val q0 = query.trim()
+            // Under three digits is not a phone number, it is a fragment of every
+            // phone number — the same threshold filterForClaim uses on screen.
+            val digits = q0.filter { it.isDigit() }.takeIf { it.length >= 3 }.orEmpty()
+            val rows = oQ.claimCandidates(q0, digits, limit).executeAsList()
+            val all = rows.map { r ->
+                val tests = r.test_ids.orEmpty().split(',').mapNotNull { catalog[it.trim()] }
+                ClaimCandidate(
+                    orderId = r.id,
+                    accessionNo = r.accession_no,
+                    status = r.status,
+                    registeredAt = r.created_at,
+                    patientName = r.patient_name,
+                    ageSex = ageSexLabel(r.patient_dob, r.patient_age_years, r.patient_sex),
+                    phone = r.patient_phone?.takeIf { it.isNotBlank() },
+                    tests = r.test_names.orEmpty(),
+                    matched = selectMapping(stored.params.keys, tests, overrides)?.second?.size ?: 0,
+                    total = stored.params.size,
+                    canTakeResults = r.status in LabStatus.ENTRY_OPEN,
+                )
             }
-        )
-        val catalog = labRepo.listTests(includeInactive = true).associateBy { it.id }
-        val rows = withContext(Dispatchers.Default) { oQ.claimCandidates(limit).executeAsList() }
-        val all = rows.map { r ->
-            val tests = r.test_ids.orEmpty().split(',').mapNotNull { catalog[it.trim()] }
-            ClaimCandidate(
-                orderId = r.id,
-                accessionNo = r.accession_no,
-                status = r.status,
-                registeredAt = r.created_at,
-                patientName = r.patient_name,
-                ageSex = ageSexLabel(r.patient_dob, r.patient_age_years, r.patient_sex),
-                phone = r.patient_phone?.takeIf { it.isNotBlank() },
-                tests = r.test_names.orEmpty(),
-                matched = selectMapping(stored.params.keys, tests, overrides)?.second?.size ?: 0,
-                total = stored.params.size,
-                canTakeResults = r.status in LabStatus.ENTRY_OPEN,
+            ClaimCandidates(
+                frame = stored,
+                open = all.filter { it.canTakeResults }.rankedForClaim(),
+                // Held back, but only the ones that could plausibly have been the
+                // target: the operator's own search, or — with no search — an order
+                // whose tests actually take this frame. A steady lab signs off
+                // everything it registers, so counting the window's finished rows
+                // wholesale would print "70 more orders" under every dialog and
+                // teach the bench to stop reading the line.
+                locked = all.filter { !it.canTakeResults && (q0.isNotEmpty() || it.matched > 0) },
+                query = q0,
+                windowFull = rows.size.toLong() >= limit,
             )
         }
-        ClaimCandidates(
-            frame = stored,
-            open = all.filter { it.canTakeResults }.rankedForClaim(),
-            lockedCount = all.count { !it.canTakeResults },
-        )
     }
 
-    /** Claim-queue apply: operator typed/scanned an accession for a stored
-     *  frame. The row is marked applied ONLY when results actually landed. */
-    suspend fun claimUnmatched(resultId: String, accessionNo: String): Result<String> = runCatching {
+    /**
+     * Claim-queue apply: operator typed/scanned an accession for a stored
+     * frame. The row is marked applied ONLY when results actually landed.
+     *
+     * [by] is the signed-in staff member, and it is not decoration. The result
+     * rows keep the ANALYZER as `entered_by` — the instrument produced the
+     * numbers and that attribution is correct — so without a second line saying
+     * a human chose this order, a wrong-patient claim surfacing a week later
+     * looks exactly like a frame that matched on its own. The log line below is
+     * the only place the difference is written down.
+     */
+    suspend fun claimUnmatched(resultId: String, accessionNo: String, by: Staff? = null): Result<String> = runCatching {
         val row = withContext(Dispatchers.Default) { q.unmatchedById(resultId).executeAsOneOrNull() }
             ?: error("That result is gone")
         require(row.status == "unmatched") { "Already ${row.status} — nothing to apply" }
@@ -953,13 +997,74 @@ class InstrumentEngine(
         } ?: InstrumentConfig(id = "", name = "Analyzer", driver = stored.driver, transport = InstrumentTransport.TCP)
         val outcome = applyFrameToOrder(cfg, stored, order)
         if (!outcome.matched) error("No test on ${order.accessionNo} takes these parameters — check the ordered tests")
-        withContext(Dispatchers.Default) { q.markResultApplied(order.id, nowIso(), resultId) }
+        withContext(Dispatchers.Default) {
+            q.markResultApplied(order.id, nowIso(), by?.name, by?.id, resultId)
+        }
+        logRow(cfg, "info", "Claimed by ${actorName(by)} onto ${order.accessionNo} (manual) — ${outcome.summary}", null)
         outcome.summary
     }
 
-    suspend fun discardUnmatched(resultId: String) = withContext(Dispatchers.Default) {
-        q.markResultDiscarded(nowIso(), resultId)
+    /**
+     * Destroy a queued run. Logged for the same reason a claim is: this throws
+     * away clinical numbers that the analyzer will not send again.
+     */
+    suspend fun discardUnmatched(resultId: String, by: Staff? = null) {
+        val row = withContext(Dispatchers.Default) { q.unmatchedById(resultId).executeAsOneOrNull() }
+        withContext(Dispatchers.Default) { q.markResultDiscarded(nowIso(), by?.name, by?.id, resultId) }
+        row?.let { logRow(cfgFor(it), "info", "Discarded by ${actorName(by)} — ${describe(it)}", null) }
     }
+
+    /**
+     * The worksheet left the building. A page of a patient's numbers walking out
+     * on paper is an event; the trail should not have to infer it from silence.
+     *
+     * [outcome] is `printA4`'s own verdict, and the row is written only when it
+     * says the job went out — a cancelled dialog is not a print, and a log that
+     * claims one is worse than no log. The verdict rides along in the line so
+     * the trail says which printer path it took.
+     */
+    suspend fun logWorksheetPrinted(resultId: String, outcome: String, by: Staff? = null) {
+        if (!printOutcomeSucceeded(outcome)) return
+        val row = withContext(Dispatchers.Default) { q.unmatchedById(resultId).executeAsOneOrNull() } ?: return
+        logRow(cfgFor(row), "info", "Worksheet printed by ${actorName(by)} — ${describe(row)} — $outcome", null)
+    }
+
+    /**
+     * Did `printA4` actually hand the page to a printer?
+     *
+     * The platforms word it differently ("Sent to printer" on desktop, "Opening
+     * print preview…" on Android, which is as far as that API's answer goes) and
+     * every failure they report is prefixed. So: refuse the known failures rather
+     * than whitelist the successes — a new platform's success string should not
+     * silently drop out of the audit trail, while "Print cancelled" must never
+     * enter it.
+     */
+    internal fun printOutcomeSucceeded(outcome: String): Boolean {
+        val o = outcome.trim()
+        return o.isNotEmpty() &&
+            !o.startsWith("Print cancelled", true) &&
+            !o.startsWith("Print failed", true) &&
+            !o.startsWith("Printer not ready", true) &&
+            !o.startsWith("A4 printing arrives", true)   // the iOS stub
+    }
+
+    /** "Ravi (technician)" / "an unidentified operator" — never a blank in the trail. */
+    private fun actorName(by: Staff?): String =
+        by?.name?.takeIf { it.isNotBlank() }?.let { "$it (${by.role})" } ?: "an unidentified operator"
+
+    /** A queued row in one line, counts only — the values stay out of the log. */
+    private fun describe(row: Instrument_results): String {
+        val params = runCatching {
+            json.decodeFromString(StoredInstrumentFrame.serializer(), row.payload_json).params.size
+        }.getOrDefault(0)
+        return "specimen ${row.specimen_id ?: "—"}, $params parameters, received ${row.received_at}"
+    }
+
+    /** The row's analyzer, or the engine's stand-in when that config is gone. */
+    private suspend fun cfgFor(row: Instrument_results): InstrumentConfig =
+        row.instrument_id?.let { id ->
+            withContext(Dispatchers.Default) { q.instrumentById(id).executeAsOneOrNull()?.toModel() }
+        } ?: InstrumentConfig(id = "", name = "Analyzer", driver = "", transport = InstrumentTransport.TCP)
 
     // ── config CRUD + observation (Instruments screen) ──
 

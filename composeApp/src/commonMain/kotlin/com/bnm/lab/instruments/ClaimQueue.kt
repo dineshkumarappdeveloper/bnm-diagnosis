@@ -85,18 +85,49 @@ data class ClaimCandidates(
     val frame: StoredInstrumentFrame,
     /** Assignable orders, best guess first. */
     val open: List<ClaimCandidate>,
-    /** Recent orders excluded because they are signed off — counted, not hidden. */
-    val lockedCount: Int,
+    /**
+     * Orders the same read reached that are PAST result entry — named, not
+     * hidden, and never silently dropped. Only ones that could plausibly have
+     * been the target are here (see [InstrumentEngine.claimCandidates]): a
+     * steady lab finishes everything it registers, and counting every signed-off
+     * order in the window would print "70 more orders" under every dialog.
+     */
+    val locked: List<ClaimCandidate>,
+    /** What the list answers — blank for the ranked worklist. */
+    val query: String = "",
+    /** The read filled its row cap: there may be older orders it never saw. */
+    val windowFull: Boolean = false,
 ) {
+    val lockedCount: Int get() = locked.size
+
     /**
      * The sentence under the list. A silently shortened list is how an operator
      * ends up believing the order "isn't in the app" and registering it twice.
+     *
+     * The wording is built from the statuses actually held back, never the bare
+     * word "approved": an order at `verified` has the technician's signature and
+     * is still waiting for the pathologist, and telling the bench it is approved
+     * tells them the report is out. That is a claim a bench acts on.
      */
     val lockedNote: String?
-        get() = when (lockedCount) {
-            0 -> null
-            1 -> "1 more order is approved and can no longer take results."
-            else -> "$lockedCount more orders are approved and can no longer take results."
+        get() {
+            if (locked.isEmpty()) return null
+            val statuses = locked.map { it.status.replace('_', ' ') }.distinct().sorted().joinToString(", ")
+            val scope = query.trim().takeIf { it.isNotEmpty() }?.let { " matching “$it”" }.orEmpty()
+            return if (locked.size == 1) "1 more order$scope is past result entry ($statuses) and can no longer take results."
+            else "${locked.size} more orders$scope are past result entry ($statuses) and can no longer take results."
+        }
+
+    /**
+     * Said out loud whenever the read hit its cap, for the same reason as
+     * [lockedNote]: an operator who reads "nothing matches" as "not in the app"
+     * registers the patient a second time and bills them twice.
+     */
+    val windowNote: String?
+        get() = when {
+            !windowFull -> null
+            query.isBlank() -> "Showing the most recent orders only — type a name, phone or accession to reach an older one."
+            else -> "More orders match than fit here — type more of the name or the accession."
         }
 }
 
@@ -119,6 +150,12 @@ fun List<ClaimCandidate>.rankedForClaim(): List<ClaimCandidate> =
  * identity, this is for searching) so "98765" finds "+91 98765 43210"; the
  * other two are plain case-insensitive substrings. A blank query filters
  * nothing — the ranked list IS the answer until someone types.
+ *
+ * The authoritative search is the SQL one ([InstrumentEngine.claimCandidates]),
+ * which reaches past the loaded window; this is the same rule applied to the
+ * rows already on screen so the list narrows on the keystroke instead of on the
+ * round trip. Keep the two in step — SQL matches the same three fields and
+ * likewise ignores a phone query shorter than three digits.
  */
 fun List<ClaimCandidate>.filterForClaim(query: String): List<ClaimCandidate> {
     val q = query.trim()
@@ -132,23 +169,43 @@ fun List<ClaimCandidate>.filterForClaim(query: String): List<ClaimCandidate> {
 }
 
 /**
- * What pressing Enter assigns to — the bench barcode scanner's whole world.
+ * What pressing Enter assigns to — the bench barcode scanner's whole world,
+ * and NOTHING else.
  *
- * A scanner types the accession and sends Enter, and that has to keep working
- * exactly as it did when this dialog was a bare text field. So: an exact
- * accession match wins outright; failing that, a query that narrows the open
- * list to ONE order assigns to it (typing half a patient's name and pressing
- * Enter is the same intent); otherwise the raw text goes to the engine, which
- * knows the case variants and the numeric-tail shortcut and says so when it
- * finds nothing. Null only for a blank query — there is nothing to act on.
+ * A scanner types the accession and sends Enter, so an exact accession match
+ * assigns in one motion, exactly as it did when this dialog was a bare text
+ * field. Anything the scanner would not have produced goes to the engine as raw
+ * text, and the engine's lookup is exact-accession too — so the worst a typed
+ * name can do is come back "No order with accession Ravi".
+ *
+ * A query that merely NARROWS the list to one row is deliberately not a target.
+ * The box now searches patient names and phone digits as well, and "7788" — the
+ * only handle on a row that reads "Specimen BNMTEST-7788" — is a substring of
+ * somebody's phone number in any real worklist. Enter is a reflex in a search
+ * box; a claim is not reversible (the row is marked applied and [claimUnmatched]
+ * refuses a second one), so a narrowed list stays a list and the operator taps
+ * the row they meant. [narrowsToOneNonAccession] is how the screen says so.
+ *
+ * Null only for a blank query — there is nothing to act on.
  */
 fun scanTargetFor(query: String, open: List<ClaimCandidate>): String? {
     val q = query.trim()
     if (q.isEmpty()) return null
-    open.firstOrNull { it.accessionNo.equals(q, ignoreCase = true) }?.let { return it.accessionNo }
-    val narrowed = open.filterForClaim(q)
-    if (narrowed.size == 1) return narrowed.single().accessionNo
-    return q
+    return open.firstOrNull { it.accessionNo.equals(q, ignoreCase = true) }?.accessionNo ?: q
+}
+
+/**
+ * True when the typed text has left exactly one order standing but is not that
+ * order's accession — the case Enter used to assign and now does not.
+ *
+ * The screen turns this into a line of help ("tap the row"), because a key that
+ * silently stops working is its own bug report.
+ */
+fun narrowsToOneNonAccession(query: String, open: List<ClaimCandidate>): Boolean {
+    val q = query.trim()
+    if (q.isEmpty()) return false
+    if (open.any { it.accessionNo.equals(q, ignoreCase = true) }) return false
+    return open.filterForClaim(q).size == 1
 }
 
 /** "42 y / F", "7 mo / M", "- / O" — the report's patient-block shape. */
