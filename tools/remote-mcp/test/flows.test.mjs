@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { LabLink, BridgeServer, runTool } from '../bnmlab-remote.mjs';
-import { FakeRelay, until } from './fake-relay.mjs';
+import { FakeRelay, FakeSocket, until } from './fake-relay.mjs';
 
 const here = (f) => new URL(`./${f}`, import.meta.url);
 const KEY_FILE = new URL('./dev-support.key', import.meta.url).pathname;
@@ -72,6 +72,25 @@ test('lab_connect: a wrong token is refused at the upgrade and explained', async
     assert.equal(res.isError, true);
     assert.match(textOf(res), /Check BNM_RELAY_URL and BNM_SUPPORT_TOKEN/);
     assert.equal(link.state, 'disconnected');
+});
+
+test('lab_connect: a socket that never opens is hung up, not just forgotten', async () => {
+    // The Worker cold-starting, or a slow link: the handshake can finish a
+    // moment after we gave up, and by then the Durable Object has given this
+    // socket the session's ONE support seat. Dropping the reference without
+    // closing it locks the engineer out with "busy" until the session expires.
+    const sockets = [];
+    const link = new LabLink({
+        relayUrl: RELAY, token: 'tok-test', keyFile: KEY_FILE, connectMs: 20,
+        wsFactory: () => { const s = new FakeSocket(); sockets.push(s); return s; }, // never opens
+    });
+    const res = await runTool(link, 'lab_connect', { code: 'Q7K3MX9P' });
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /did not answer within 0\.02 s/);
+    assert.equal(link.state, 'disconnected');
+    assert.equal(sockets.length, 1);
+    assert.ok(sockets[0].closed, 'the half-opened socket was hung up');
+    assert.equal(sockets[0].closed.by, 'client');
 });
 
 test('lab_connect: wrong code → no_session in plain words; state stays disconnected', async () => {

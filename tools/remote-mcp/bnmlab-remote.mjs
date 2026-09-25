@@ -268,7 +268,11 @@ export class LabLink {
         try {
             await this.#awaitOpen(ws);
         } catch (e) {
-            this.#dropSocket();
+            // A socket that timed out on us may still finish its handshake a
+            // moment later, and the relay gives a session ONE support seat:
+            // forgetting it without hanging it up locks the next lab_connect
+            // out with "busy" until the session expires.
+            this.#closeSocket('never opened');
             throw e;
         }
         ws.addEventListener('message', (ev) => this.#onMessage(ws, ev));
