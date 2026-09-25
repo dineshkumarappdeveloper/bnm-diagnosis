@@ -65,7 +65,8 @@ class RemoteToolsTest {
         override fun timezoneId() = "Asia/Kolkata"
         override fun localTimeIso() = "2026-09-25T15:30:00+05:30"
         override fun logTail(lines: Int, day: String?) = if (day == "1999-01-01") null else logLines.takeLast(lines).joinToString("\n")
-        override fun serialPorts() = listOf(SerialPortInfo("COM3", "USB Serial Port"), SerialPortInfo("COM9", "Spare"))
+        var ports = listOf(SerialPortInfo("COM3", "USB Serial Port"), SerialPortInfo("COM9", "Spare"))
+        override fun serialPorts() = ports
         override fun probeSerial(portName: String): String? = if (portName == "COM9") null else "Could not open $portName — in use"
     }
 
@@ -337,6 +338,52 @@ class RemoteToolsTest {
             val down = payload(b.call("instruments.probe", """{"tcp_host":"127.0.0.1","tcp_port":$closedPort}"""))
             assertEquals(false, down.bool("reachable"))
             assertIs<ToolResult.Failed>(b.call("instruments.probe", "{}"))
+        } finally { b.close() }
+    }
+
+    @Test
+    fun `a port name is reduced to what the OS means by it`() {
+        assertEquals("com3", SerialPortNames.normalize(" \\\\.\\COM3 "))
+        assertEquals("ttyusb0", SerialPortNames.normalize("/dev/ttyUSB0"))
+        assertNull(SerialPortNames.normalize("  "))
+        assertNull(SerialPortNames.normalize(null))
+        assertTrue(SerialPortNames.same("/dev/ttyUSB0", "ttyUSB0"))
+        assertTrue(SerialPortNames.same("com3", "COM3"))
+        assertFalse(SerialPortNames.same("ttyUSB0", "ttyUSB1"))
+        assertFalse(SerialPortNames.same(null, null), "a missing port owns nothing")
+    }
+
+    @Test
+    fun `the port guard reads a spelling the way the OS does, not character by character`() = runBlocking<Unit> {
+        val b = Bench()
+        try {
+            val mispa = b.engine.saveInstrument(InstrumentConfig(id = "", name = "Mispa", driver = "mispa_count_x",
+                transport = InstrumentTransport.SERIAL, serialPort = "ttyUSB0", baud = 115200))
+            val erba = b.engine.saveInstrument(InstrumentConfig(id = "", name = "Erba", driver = "mispa_count_x",
+                transport = InstrumentTransport.SERIAL, serialPort = "COM3", baud = 115200))
+
+            // The listing spells them the other way round from the rows.
+            b.platform.ports = listOf(SerialPortInfo("/dev/ttyUSB0", "USB-Serial"), SerialPortInfo("com3", "USB Serial Port"),
+                SerialPortInfo("ttyUSB7", "Spare"))
+            val serial = payload(b.call("instruments.ports")).jsonObject.getValue("serial").jsonArray.associateBy { it.str("name")!! }
+            assertEquals(mispa, serial.getValue("/dev/ttyUSB0").str("held_by"))
+            assertEquals(erba, serial.getValue("com3").str("held_by"))
+            assertNull(serial.getValue("ttyUSB7").str("held_by"))
+
+            // jSerialComm opens all of these; so the guard has to refuse all of them.
+            for (spelling in listOf("ttyUSB0", "/dev/ttyUSB0", "/dev/ttyusb0", "COM3", "com3")) {
+                val r = b.call("instruments.probe", """{"serial_port":"$spelling"}""")
+                assertIs<ToolResult.Refused>(r, "probing $spelling took a port from a running analyzer")
+                assertTrue("Mispa" in r.reason || "Erba" in r.reason, r.reason)
+            }
+            assertFalse(b.call("instruments.probe", """{"serial_port":"ttyUSB7"}""") is ToolResult.Refused,
+                "a port no analyzer owns is still probed")
+
+            // And a second analyzer cannot be pointed at a taken port under another name.
+            val clash = b.call("instruments.set_config",
+                """{"name":"Clone","driver_key":"mispa_count_x","transport":"serial","serial_port":"/dev/ttyUSB0","baud":115200,"enabled":true}""")
+            assertIs<ToolResult.Failed>(clash)
+            assertTrue("Mispa" in clash.message, clash.message)
         } finally { b.close() }
     }
 

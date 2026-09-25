@@ -307,7 +307,7 @@ class RemoteTools(
                 for (p in platform.serialPorts()) addJsonObject {
                     put("name", p.name)
                     put("description", p.description)
-                    put("held_by", cfgs.firstOrNull { it.enabled && it.transport == InstrumentTransport.SERIAL && it.serialPort == p.name }?.id)
+                    put("held_by", cfgs.firstOrNull { it.enabled && it.transport == InstrumentTransport.SERIAL && SerialPortNames.same(it.serialPort, p.name) }?.id)
                 }
             }
             putJsonArray("tcp") {
@@ -330,7 +330,7 @@ class RemoteTools(
         return when {
             serial != null -> {
                 val owner = engine.listInstruments().firstOrNull {
-                    it.enabled && it.transport == InstrumentTransport.SERIAL && it.serialPort == serial
+                    it.enabled && it.transport == InstrumentTransport.SERIAL && SerialPortNames.same(it.serialPort, serial)
                 }
                 if (owner != null) {
                     ToolResult.Refused("Port $serial is in use by the analyzer '${owner.name}' — probing it would break that link. Disable the analyzer first, or probe another port.")
@@ -548,7 +548,7 @@ class RemoteTools(
         if (enabled) {
             val others = engine.listInstruments().filter { it.id != id && it.enabled }
             if (transport == InstrumentTransport.SERIAL) {
-                others.firstOrNull { it.transport == InstrumentTransport.SERIAL && it.serialPort == serialPort }?.let {
+                others.firstOrNull { it.transport == InstrumentTransport.SERIAL && SerialPortNames.same(it.serialPort, serialPort) }?.let {
                     return ToolResult.Failed("Serial port $serialPort is already used by the enabled analyzer '${it.name}'")
                 }
             } else {
