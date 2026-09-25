@@ -33,3 +33,6 @@ dependencyResolutionManagement {
 
 include(":composeApp")
 include(":analyzer-sim")
+// The simulator's window — a front end on :analyzer-sim, packaged on its own
+// so a field engineer installs one thing and never opens a terminal.
+include(":analyzer-sim-ui")
