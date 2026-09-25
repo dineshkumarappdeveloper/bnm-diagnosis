@@ -2,7 +2,12 @@ package com.bnm.lab.remote
 
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import com.bnm.lab.db.AppDatabase
+import com.bnm.lab.remote.RemoteTestFixtures.waitFor
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import java.nio.file.Files
 import java.sql.SQLTimeoutException
 import kotlin.test.Test
@@ -183,16 +188,48 @@ class DbQueryGuardTest {
         val ro = JdbcReadOnlySql(file, queryTimeoutMs = 300L)
 
         // count(*) over an unbounded recursion never yields its first row, so
-        // maxRows cannot save it; only an interrupt can.
-        val t0 = System.currentTimeMillis()
-        val e = assertFails { ro.query("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c", 10) }
-        val elapsed = System.currentTimeMillis() - t0
-        assertTrue(elapsed < 10_000L, "stopped in ${elapsed} ms, not at the heat death of the universe")
-        assertIs<SQLTimeoutException>(e)
-        assertTrue("stopped after 0 s" in e.message!!, e.message!!)
+        // maxRows cannot save it; only an interrupt can. The outer limit is
+        // there so a LOST interrupt is a red test and not a CI job that hangs.
+        withTimeout(30_000) {
+            val t0 = System.currentTimeMillis()
+            val e = assertFails { ro.query(RUNAWAY, 10) }
+            val elapsed = System.currentTimeMillis() - t0
+            assertTrue(elapsed < 10_000L, "stopped in ${elapsed} ms, not at the heat death of the universe")
+            assertIs<SQLTimeoutException>(e)
+            assertTrue("stopped after 0 s" in e.message!!, e.message!!)
+        }
 
         // The connection is per query: the next one is unaffected.
         assertEquals(listOf(listOf("1")), ro.query("SELECT 1", 10).rows)
         driver.close()
+    }
+
+    @Test
+    fun `ending the session mid-query stops it, instead of leaving sqlite spinning`() = runBlocking<Unit> {
+        val file = Files.createTempFile("bnmlab-ro-cancel", ".db").toFile().also { it.deleteOnExit() }
+        val driver = JdbcSqliteDriver("jdbc:sqlite:${file.absolutePath}")
+        AppDatabase.Schema.create(driver)
+        // A minute of headroom: nothing but the cancellation may end this query.
+        val ro = JdbcReadOnlySql(file, queryTimeoutMs = 60_000L)
+
+        // The session loop awaits `tools/call` inline, so End (or expiry)
+        // cancels the coroutine the query is being awaited on. Its own scope,
+        // not a child of this one: a query that refuses to die must fail the
+        // test, not wedge the whole run waiting for it.
+        val session = CoroutineScope(Dispatchers.Default)
+        val call = session.launch { runCatching { ro.query(RUNAWAY, 10) } }
+        waitFor("the query to reach a JDBC thread") { ro.inFlight.get() == 1 }
+        call.cancel()
+        withTimeout(15_000) { call.join() }
+        waitFor("the interrupted query to let go of its connection") { ro.inFlight.get() == 0 }
+
+        // And the lab PC is usable again.
+        assertEquals(listOf(listOf("1")), ro.query("SELECT 1", 10).rows)
+        driver.close()
+    }
+
+    private companion object {
+        /** Unbounded recursion: it ends when someone interrupts it, and not before. */
+        const val RUNAWAY = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c"
     }
 }
