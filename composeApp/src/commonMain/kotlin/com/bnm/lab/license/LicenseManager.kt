@@ -164,6 +164,17 @@ private const val KEY_LICENSE_FP = "lab_license_fp"
         }
 
         /**
+         * After a restore from a backup pendrive: is the token `/activate` just
+         * returned the licence the restored records came with? The fingerprint
+         * cannot say — a RE-ISSUED key hashes differently for the very same
+         * licence, and that is the day the backup's recovery code exists for —
+         * but the licence id inside both tokens can. Unknown on either side is
+         * never "same".
+         */
+        internal fun sameLicenceId(restoredLid: String?, activatedLid: String?): Boolean =
+            !restoredLid.isNullOrBlank() && restoredLid == activatedLid
+
+        /**
          * Default offline grace past lic_exp. Only a fallback now: the server
          * signs the actual allowance into the `gr` claim, because a fixed 45
          * days is right for a lapsed annual subscription and absurd for a

@@ -58,6 +58,8 @@ sealed class Screen(val route: String) {
     data object CustomerDetails : Screen("customer_details")
     data object Settings : Screen("settings")
     data object PrintSettings : Screen("print_settings")
+    /** Backup pendrive (offline edition, desktop): status, set-up, restore, stop. */
+    data object BackupSettings : Screen("backup")
     /** Analyzer interfacing (I0): configure connected lab machines, claim
      *  unmatched instrument results, watch the raw traffic log. */
     data object Instruments : Screen("instruments")

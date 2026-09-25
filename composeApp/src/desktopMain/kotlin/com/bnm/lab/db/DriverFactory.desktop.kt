@@ -1,14 +1,25 @@
 package com.bnm.lab.db
 
+import com.bnm.lab.backup.BackupHooks
+import com.bnm.lab.backup.RestoreStaging
 import com.bnm.lab.diagnostics.AppLog
 
 import app.cash.sqldelight.db.SqlDriver
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import java.io.File
+import java.util.Properties
 
 actual class DriverFactory actual constructor() {
     actual fun createDriver(): SqlDriver {
         val dbFile = File(appDataDir(), CHAT_DB_NAME)
+        // A restore staged by the previous session (Backup pendrive → Restore)
+        // is applied HERE, before anything opens the file: the current database
+        // and its rollback journal are set aside under a stamp, never deleted,
+        // and the restored file takes their place. A failed swap must not fall
+        // through to opening whatever is left — the app cannot start on half.
+        RestoreStaging.applyPending(dbFile)?.let {
+            AppLog.w("Database", "restored from backup${it.seq?.let { s -> " (generation $s)" }.orEmpty()} — previous database set aside")
+        }
         // One-time migration into this data dir, tried NEWEST-LEGACY-FIRST.
         //
         // This matters more than it looks. SQLDelight is the SYSTEM OF RECORD for
@@ -23,7 +34,14 @@ actual class DriverFactory actual constructor() {
         //   "BNMDiagnosis" — this app's own dir before the BNM Lab rename.
         //   "BNMAdmin"     — the clone-chain leftover, when all three apps shared
         //                    one sqlite file. Foreign tables in the copy are inert.
-        if (!dbFile.exists()) {
+        //
+        // EXCEPT when this PC's own backup pendrive is plugged in: then the lab's
+        // real records are a Restore away, and a months-old legacy copy must not
+        // silently win over them (it would become "the newest backup" within
+        // seconds). Start EMPTY instead; the app offers the restore at launch.
+        if (!dbFile.exists() && BackupHooks.boundPendriveReachable()) {
+            AppLog.w("Database", "no database, but the backup pendrive is connected — starting EMPTY so it can be restored")
+        } else if (!dbFile.exists()) {
             val parent = dbFile.parentFile.parentFile
             for (legacyDir in LEGACY_APP_DIRS) {
                 val legacy = File(File(parent, legacyDir), CHAT_DB_NAME)
@@ -55,7 +73,16 @@ actual class DriverFactory actual constructor() {
         }
         AppLog.i("Database", "opening ${dbFile.absolutePath} (${dbFile.length() / 1024} KB)")
         // Capture freshness BEFORE constructing the driver (which opens/creates the file).
-        val driver = JdbcSqliteDriver("jdbc:sqlite:${dbFile.absolutePath}")
+        //
+        // busy_timeout 10 s (the driver's default is 3 s): the Backup pendrive
+        // snapshot (`VACUUM INTO`) holds a shared lock for as long as the copy
+        // takes, and app writes have no retry on SQLITE_BUSY — an analyzer frame
+        // that fails to insert is lost, the analyzer does not resend it.
+        val driver = JdbcSqliteDriver(
+            "jdbc:sqlite:${dbFile.absolutePath}",
+            Properties().apply { setProperty("busy_timeout", "10000") },
+        )
+        BackupHooks.attach(driver, dbFile)
         // Self-healing schema: every CREATE is IF NOT EXISTS — create on EVERY
         // open adds tables an older on-disk db lacks, keeping data (columns are
         // healed separately by AppDatabaseFactory's addColumn migrations).
