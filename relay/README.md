@@ -116,9 +116,15 @@ node scripts/mint-test-jwt.mjs --iss other                      # refused: bad_j
 node scripts/mint-test-jwt.mjs --help
 ```
 
-The app side of the E2E (`RemoteSupportE2ETest`, `-Dbnm.e2e=true`) points
-`BNM_RELAY_URL` at `ws://localhost:8787` with that JWT in `license_jwt`; the
-bridge joins with `BNM_RELAY_URL=ws://localhost:8787 BNM_SUPPORT_TOKEN=dev-token`.
+The app side of the E2E (`RemoteSupportE2ETest`, opt-in with `-Dbnm.e2e=true`)
+mints that JWT itself by running this script (or takes `BNM_E2E_LICENSE_JWT`),
+hands it to the engine through its constructor seam — never the real prefs —
+and spawns the bridge with `BNM_RELAY_URL` / `BNM_SUPPORT_TOKEN=dev-token`:
+
+```
+BNM_RELAY_URL=ws://127.0.0.1:8787 ./gradlew :composeApp:desktopTest -Dbnm.e2e=true \
+    --tests 'com.bnm.lab.remote.RemoteSupportE2ETest'
+```
 
 Regenerate the test keypair only if you must (`npm run gen-test-keypair -- --force`);
 the tests and the E2E docs refer to the committed one.
