@@ -37,8 +37,24 @@ object OfflinePolicy {
     /** Draining the billing outbox and pulling the billing directories. */
     fun allowsBillingSync(standalone: Boolean): Boolean = !standalone
 
-    /** Asking GitHub whether a newer build exists. */
+    /**
+     * Asking GitHub whether a newer build exists, BY ITSELF, at app start.
+     * Off for an offline licence: that edition's promise is that the app makes
+     * no network call the lab did not ask for.
+     */
     fun allowsUpdateCheck(standalone: Boolean): Boolean = !standalone
+
+    /**
+     * The operator pressing "Check for updates".
+     *
+     * ALWAYS allowed, including on an offline licence. The offline promise is
+     * about unattended traffic, not about locking the lab out of its own
+     * updates: a standalone lab that has to ring its supplier for an installer
+     * every time is how a lab ends up years behind on a build with a fix in it.
+     * Nothing leaves the PC until the button is pressed, and the check reads a
+     * public release feed — it carries no lab data, no licence and no auth.
+     */
+    fun allowsManualUpdateCheck(): Boolean = true
 
     /** Sending a report through the WhatsApp Business API (the server refuses it too). */
     fun allowsWhatsappApi(standalone: Boolean): Boolean = !standalone

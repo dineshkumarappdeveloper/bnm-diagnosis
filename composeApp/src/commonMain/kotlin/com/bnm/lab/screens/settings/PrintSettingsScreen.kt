@@ -1,6 +1,7 @@
 package com.bnm.lab.screens.settings
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -14,8 +15,10 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.ReceiptLong
 import androidx.compose.material.icons.outlined.Biotech
+import androidx.compose.material.icons.outlined.QrCode
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -38,8 +42,10 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,40 +55,41 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.bnm.lab.billing.PrintKind
 import com.bnm.lab.billing.PrintProfile
 import com.bnm.lab.billing.PrintProfiles
-import com.bnm.lab.print.BtPrinter
+import com.bnm.lab.lab.LocalLabRepository
 import com.bnm.lab.license.LicenseManager
+import com.bnm.lab.print.BtPrinter
+import com.bnm.lab.print.LabelLanguage
+import com.bnm.lab.print.StickerRender
+import com.bnm.lab.print.StickerSpec
+import com.bnm.lab.print.calibrateStickerPrinter
+import com.bnm.lab.print.listRawPrinters
+import com.bnm.lab.print.printSampleStickers
+import com.bnm.lab.print.rawPrintSupported
+import com.bnm.lab.print.sampleSticker
+import com.bnm.lab.report.LetterheadLogo
 import com.bnm.lab.report.ReportPagination
 import com.bnm.lab.report.ReportPalette
 import com.bnm.lab.report.ReportPrefs
 import com.bnm.lab.report.WaShareMode
+import com.bnm.lab.report.defaultReportsDir
+import com.bnm.lab.report.letterheadLogoPickerSupported
 import com.bnm.lab.report.openPdf
+import com.bnm.lab.report.pickFolder
+import com.bnm.lab.report.pickLetterheadLogoPng
+import com.bnm.lab.report.revealInFileManager
 import com.bnm.lab.report.sampleReportDoc
 import com.bnm.lab.report.writeLabReportPdf
 import com.bnm.lab.ui.theme.AppTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import androidx.compose.material.icons.outlined.QrCode
-import androidx.compose.material3.TextButton
-import com.bnm.lab.print.LabelLanguage
-import com.bnm.lab.print.StickerSpec
-import com.bnm.lab.print.listRawPrinters
-import com.bnm.lab.print.printSampleStickers
-import com.bnm.lab.print.rawPrintSupported
-import com.bnm.lab.print.sampleSticker
-import androidx.compose.runtime.LaunchedEffect
-import com.bnm.lab.print.StickerRender
-import com.bnm.lab.print.calibrateStickerPrinter
-import androidx.compose.foundation.layout.width
-import com.bnm.lab.report.defaultReportsDir
-import com.bnm.lab.report.pickFolder
-import com.bnm.lab.report.revealInFileManager
-import androidx.compose.ui.text.font.FontFamily
+import org.jetbrains.compose.resources.decodeToImageBitmap
 
 /** Desktop is the primary target, so the two profiles sit side by side as soon
  *  as there is room. Same breakpoint the lab screens use (LabHomeScreen). */
@@ -471,6 +478,19 @@ private fun ColumnScope.LetterheadBlock(labName: String?) {
     var extra by remember { mutableStateOf(prefs.extraLine) }
     var accent by remember { mutableStateOf(prefs.accentRgb) }
 
+    // Logos live in the database, not the Settings store: on desktop that store
+    // is java.util.prefs and caps a value at 8 KB, which a logo exceeds.
+    val labRepo = LocalLabRepository.current
+    val scope = rememberCoroutineScope()
+    var logoLeft by remember { mutableStateOf<String?>(null) }
+    var logoRight by remember { mutableStateOf<String?>(null) }
+    var logoBusy by remember { mutableStateOf(false) }
+    var logoError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        logoLeft = labRepo.letterheadLogo(LetterheadLogo.Side.LEFT)
+        logoRight = labRepo.letterheadLogo(LetterheadLogo.Side.RIGHT)
+    }
+
     HorizontalDivider(color = c.border)
 
     Text("Letterhead", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
@@ -497,6 +517,71 @@ private fun ColumnScope.LetterheadBlock(labName: String?) {
         style = MaterialTheme.typography.bodySmall,
         color = c.textSecondary,
     )
+    if (letterheadLogoPickerSupported() && mode == "printed") {
+        Text("Logos", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+        Text(
+            "One either side of the lab name — an emblem on the left, your wordmark on the right. " +
+                "Either can be left empty; the name spreads to fill the space.",
+            style = MaterialTheme.typography.bodySmall,
+            color = c.textSecondary,
+        )
+        LetterheadLogo.Side.entries.forEach { side ->
+            val current = if (side == LetterheadLogo.Side.LEFT) logoLeft else logoRight
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    if (side == LetterheadLogo.Side.LEFT) "Left" else "Right",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.width(48.dp),
+                )
+                // The preview IS the confirmation: a lab that picked the wrong
+                // file finds out here, not on a patient's report.
+                val preview = remember(current) {
+                    LetterheadLogo.decode(current)?.let { b -> runCatching { b.decodeToImageBitmap() }.getOrNull() }
+                }
+                preview?.let { Image(it, contentDescription = null, modifier = Modifier.height(36.dp)) }
+                Text(
+                    if (current.isNullOrBlank()) "None" else "Set",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = c.textSecondary,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(enabled = !logoBusy, onClick = {
+                    scope.launch {
+                        logoBusy = true
+                        logoError = null
+                        val png = pickLetterheadLogoPng()
+                        if (png != null) {
+                            val encoded = LetterheadLogo.encode(png)
+                            labRepo.setLetterheadLogo(side, encoded)
+                            if (side == LetterheadLogo.Side.LEFT) logoLeft = encoded else logoRight = encoded
+                        } else {
+                            // Cancelled and unreadable look the same from here,
+                            // so say the thing that is actionable either way.
+                            logoError = "No image was loaded. Choose a PNG or JPG under 512 KB."
+                        }
+                        logoBusy = false
+                    }
+                }) { Text(if (current.isNullOrBlank()) "Choose…" else "Replace…") }
+                if (!current.isNullOrBlank()) {
+                    TextButton(enabled = !logoBusy, onClick = {
+                        scope.launch {
+                            labRepo.setLetterheadLogo(side, null)
+                            if (side == LetterheadLogo.Side.LEFT) logoLeft = null else logoRight = null
+                        }
+                    }) { Text("Remove") }
+                }
+            }
+        }
+        logoError?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+        HorizontalDivider(color = c.border)
+    }
+
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedTextField(
             value = headerMm,

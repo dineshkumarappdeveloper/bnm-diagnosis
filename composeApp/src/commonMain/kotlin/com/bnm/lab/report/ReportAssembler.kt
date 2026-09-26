@@ -103,6 +103,8 @@ class ReportAssembler(
             footerMm = prefs.footerMm.toFloat(),
             accentRgb = prefs.accentRgb,
             letterheadLines = prefs.letterheadLines(),
+            logoLeftPng = LetterheadLogo.decode(repo.letterheadLogo(LetterheadLogo.Side.LEFT)),
+            logoRightPng = LetterheadLogo.decode(repo.letterheadLogo(LetterheadLogo.Side.RIGHT)),
             paramName = { r ->
                 catalog[r.testId]?.parameters?.firstOrNull { it.key == r.parameterKey }?.name
                     ?: r.parameterKey

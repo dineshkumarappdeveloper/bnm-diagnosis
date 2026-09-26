@@ -72,7 +72,13 @@ object MachineTemplate {
         Row("MEAN CELL HAEMOGLOBIN (MCH)", listOf("MCH"), "pg/cell", 27.0, 34.0, decimals = 1),
         Row("MCH CONCENTRATION (MCHC)", listOf("MCHC"), "g/dl", 32.0, 36.0, decimals = 1),
         Row("RED CELL DIS. WIDTH (RDW-CV)", listOf("RDW-CV", "RDWCV"), "%", 11.0, 16.0, decimals = 1),
-        Row("RED CELL DIS. WIDTH (RDW-SD)", listOf("RDW-SD", "RDWSD"), "%", 35.0, 56.0, decimals = 1),
+        // RDW-SD is a WIDTH, measured in femtolitres — the analyzer sends fL and
+        // the reference range (35-56) is in fL. Reference sheets that print "%"
+        // here have copied the label from RDW-CV above; matching that mistake
+        // would mean either mislabelling the unit or refusing to convert a
+        // value that needs no conversion, and the second shows up in red on
+        // every report.
+        Row("RED CELL DIS. WIDTH (RDW-SD)", listOf("RDW-SD", "RDWSD"), "fl", 35.0, 56.0, decimals = 1),
 
         Row("PLATELETS", listOf("PLT"), "Lakhs/cumm", 1.5, 4.0, section = "PLATELETS", decimals = 2),
         Row("MEAN PLATELET VOLUME (MPV)", listOf("MPV"), "fl", 7.0, 11.0, decimals = 1),

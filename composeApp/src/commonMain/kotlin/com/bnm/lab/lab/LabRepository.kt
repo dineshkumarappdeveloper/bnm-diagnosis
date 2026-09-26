@@ -25,6 +25,7 @@ import kotlin.math.round
 import kotlin.math.roundToLong
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
+import com.bnm.lab.report.LetterheadLogo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -289,6 +290,23 @@ class LabRepository(
 
     suspend fun setLabBaseCommissionPct(pct: Double) = withContext(Dispatchers.Default) {
         setQ.putSetting(SETTING_BASE_COMMISSION, pct.coerceIn(0.0, 100.0).toString(), nowIso())
+    }
+
+    /**
+     * Letterhead logo for one side, as base64 PNG, or null when unset.
+     *
+     * Kept in `lab_settings` rather than the Settings store because the desktop
+     * Settings store is java.util.prefs, which caps a value at 8 KB — a logo is
+     * bigger than that, and the save would fail in a way nobody would connect
+     * to the picture they just chose.
+     */
+    suspend fun letterheadLogo(side: LetterheadLogo.Side): String? = withContext(Dispatchers.Default) {
+        setQ.getSetting(LetterheadLogo.keyFor(side)).executeAsOneOrNull()?.takeIf { it.isNotBlank() }
+    }
+
+    /** [base64Png] null or blank REMOVES the logo — that is how the UI clears one. */
+    suspend fun setLetterheadLogo(side: LetterheadLogo.Side, base64Png: String?) = withContext(Dispatchers.Default) {
+        setQ.putSetting(LetterheadLogo.keyFor(side), base64Png?.trim().orEmpty(), nowIso())
     }
 
     /** Override one (referrer, test) percentage. 0 IS a meaningful override here

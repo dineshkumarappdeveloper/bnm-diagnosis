@@ -291,18 +291,56 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         val ruleY = topY + 4f
         hline(left, right, ruleY, accent, 1.1f)
 
+        // Logos first: they bound the width the name may use, so a long lab
+        // name shrinks to fit BETWEEN them rather than printing over them.
+        val logoTop = pageH - bandH - 6f
+        val logoH = (logoTop - ruleY - 8f).coerceAtMost(22f * MM).coerceAtLeast(0f)
+        val leftW = drawLetterheadLogo(doc.logoLeftPng, left, logoTop, logoH, atLeft = true)
+        val rightW = drawLetterheadLogo(doc.logoRightPng, right, logoTop, logoH, atLeft = false)
+        val gutter = 6f
+        val nameLeft = left + leftW + (if (leftW > 0f) gutter else 0f)
+        val nameRight = right - rightW - (if (rightW > 0f) gutter else 0f)
+        val nameW = (nameRight - nameLeft).coerceAtLeast(40f)
+        val nameMid = (nameLeft + nameRight) / 2f
+
         // Lab name: large + bold, shrink-to-fit, ALWAYS the license lab name.
         val name = doc.labName.uppercase()
         var size = 19f
-        while (size > 11f && textWidth(name, fontB, size) > contentW) size -= 1f
+        while (size > 11f && textWidth(name, fontB, size) > nameW) size -= 1f
         var ly = pageH - bandH - 24f
-        if (ly > ruleY + 6f) textCenter(ly, name, fontB, size, ink)
+        if (ly > ruleY + 6f) textCentered(nameMid, ly, name, fontB, size, ink)
         ly -= 13f
         for (line in doc.letterheadLines) {
             if (ly < ruleY + 7f) break
-            textCenter(ly, line, fontR, 8.6f, gray)
+            textCentered(nameMid, ly, line, fontR, 8.6f, gray)
             ly -= 11f
         }
+    }
+
+    /**
+     * One letterhead logo, fitted to [maxH] and anchored to the page edge.
+     * Returns the width it occupied (0 when there is nothing to draw), which is
+     * what keeps the lab name from running underneath it.
+     *
+     * A logo that will not decode is skipped silently ON PURPOSE: a report is
+     * printed in front of a patient, and a broken picture must cost the lab a
+     * missing emblem, never the report.
+     */
+    private fun drawLetterheadLogo(png: ByteArray?, edgeX: Float, top: Float, maxH: Float, atLeft: Boolean): Float {
+        val bytes = png?.takeIf { it.isNotEmpty() } ?: return 0f
+        if (maxH <= 4f) return 0f
+        val c = cs ?: return 0f
+        return runCatching {
+            val img = PDImageXObject.createFromByteArray(pdf, bytes, "letterhead-logo")
+            if (img.width <= 0 || img.height <= 0) return 0f
+            val maxW = contentW * 0.26f       // never more than a quarter of the band
+            val scale = minOf(maxW / img.width, maxH / img.height)
+            val w = img.width * scale
+            val h = img.height * scale
+            val x = if (atLeft) edgeX else edgeX - w
+            c.drawImage(img, x, top - h, w, h)
+            w
+        }.getOrDefault(0f)
     }
 
     // ── content blocks ──

@@ -74,10 +74,13 @@ fun AppVersionPanel(
 ) {
     val scope = rememberCoroutineScope()
     val platform = remember { currentUpdatePlatform() }
-    // An OFFLINE licence never asks GitHub anything: the panel still names the
-    // running build (which is what an operator reporting a fault needs), and
-    // the supplier hands over installers under the maintenance contract.
-    val online = remember { OfflinePolicy.allowsUpdateCheck(LicenseManager().state.value.isStandalone) }
+    // An OFFLINE licence makes no network call on its OWN — but the operator
+    // can still press the button. Automatic and manual are separate policies:
+    // the offline promise is about unattended traffic, not about leaving a lab
+    // unable to update itself.
+    val standalone = remember { LicenseManager().state.value.isStandalone }
+    val autoCheck = remember { OfflinePolicy.allowsUpdateCheck(standalone) }
+    val online = remember { OfflinePolicy.allowsManualUpdateCheck() }
     var state by remember { mutableStateOf<UpdateCheck?>(null) }
     var checking by remember { mutableStateOf(false) }
     var downloading by remember { mutableStateOf(false) }
@@ -101,7 +104,7 @@ fun AppVersionPanel(
     }
 
     // One quiet check per app start — enough to surface a fix without polling.
-    LaunchedEffect(Unit) { if (online && platform != UpdatePlatform.STORE_MANAGED) check() }
+    LaunchedEffect(Unit) { if (autoCheck && platform != UpdatePlatform.STORE_MANAGED) check() }
 
     Card(
         modifier = modifier.fillMaxWidth(),

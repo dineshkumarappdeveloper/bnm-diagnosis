@@ -408,6 +408,12 @@ data class ReportDoc(
     /** Editable letterhead lines under the lab name: address / phone / email /
      *  extra (NABL, GSTIN…). Blank lines are already filtered out. */
     val letterheadLines: List<String>,
+    /** Logo printed at the LEFT of the letterhead band; null prints none and
+     *  the name block keeps the full width. PNG bytes (see [LetterheadLogo]). */
+    val logoLeftPng: ByteArray? = null,
+    /** Logo printed at the RIGHT of the letterhead band — usually the lab's
+     *  own wordmark, opposite the emblem. */
+    val logoRightPng: ByteArray? = null,
     // ── Patient / meta block ──
     val patientName: String,
     val ageSex: String,
@@ -466,6 +472,8 @@ fun buildReportDoc(
     footerMm: Float = 20f,
     accentRgb: Int = ReportPalette.TEAL,
     letterheadLines: List<String> = emptyList(),
+    logoLeftPng: ByteArray? = null,
+    logoRightPng: ByteArray? = null,
     /** Display name for a result row (catalog parameter name); defaults to the raw key. */
     paramName: (LabResult) -> String = { it.parameterKey },
     /** Approver sign-off image + credentials. Null keeps the pre-signature layout. */
@@ -525,6 +533,8 @@ fun buildReportDoc(
         accentRgb = accentRgb,
         labName = labName.trim().ifEmpty { "BNM Lab" },
         letterheadLines = letterheadLines.map { it.trim() }.filter { it.isNotEmpty() },
+    logoLeftPng = logoLeftPng,
+    logoRightPng = logoRightPng,
         patientName = patient.name,
         ageSex = "$ageLabel / ${patient.sex.uppercase()}",
         phone = patient.phone?.takeIf { it.isNotBlank() },

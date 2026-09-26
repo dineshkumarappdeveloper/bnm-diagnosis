@@ -82,7 +82,14 @@ fun MachineHomeScreen(
     /** Wall clock "yyyy-MM-dd HH:mm" for the Reported stamp. */
     now: () -> String = ::machineNowStamp,
 ) {
-    val frames by engine.queueFlow().collectAsState(emptyList())
+    val allFrames by engine.queueFlow().collectAsState(emptyList())
+    var showBackground by remember { mutableStateOf(false) }
+    // Background counts are the analyzer talking about itself, not patients.
+    // Hidden by default rather than deleted: a bench checking why a run looks
+    // odd wants to see the blank, and the count on the toggle says they exist.
+    val backgroundCount = allFrames.count { MachineReport.isBackgroundRun(it.frame) }
+    val frames = if (showBackground) allFrames
+        else allFrames.filterNot { MachineReport.isBackgroundRun(it.frame) }
     val prefs = remember { ReportPrefs() }
     val diagPrefs = remember { DiagnosisPrefs() }
     val scope = rememberCoroutineScope()
@@ -148,7 +155,23 @@ fun MachineHomeScreen(
             )
         },
     ) { pad ->
-        if (frames.isEmpty()) {
+        if (frames.isEmpty() && backgroundCount > 0 && !showBackground) {
+            Box(Modifier.fillMaxSize().padding(pad).padding(32.dp), Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Only background counts so far", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "The analyzer has sent $backgroundCount background count(s) — its own blank " +
+                            "check, not a patient. Run a sample to get a report.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp).widthIn(max = 420.dp),
+                    )
+                    TextButton(onClick = { showBackground = true }, modifier = Modifier.padding(top = 12.dp)) {
+                        Text("Show them anyway")
+                    }
+                }
+            }
+        } else if (frames.isEmpty()) {
             // The empty state has to say what to DO. On a bench PC this screen
             // is the only thing on the monitor, and "nothing yet" with no next
             // step is indistinguishable from a broken cable.
@@ -173,6 +196,16 @@ fun MachineHomeScreen(
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                if (backgroundCount > 0) {
+                    item {
+                        TextButton(onClick = { showBackground = !showBackground }) {
+                            Text(
+                                if (showBackground) "Hide $backgroundCount background count(s)"
+                                else "Show $backgroundCount background count(s)",
+                            )
+                        }
+                    }
+                }
                 items(frames, key = { it.id }) { row ->
                     ResultCard(
                         row = row,

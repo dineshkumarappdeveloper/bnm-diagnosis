@@ -26,6 +26,27 @@ object MachineReport {
     /** Section heading rows are [ReportRow.heading]; kept for call sites that filter. */
     fun isHeading(row: ReportRow): Boolean = row.heading
 
+    /**
+     * A BACKGROUND count, not a patient sample.
+     *
+     * The analyzer runs a blank to check its own cleanliness and transmits it
+     * like any other record — same HL7 shape, an id of "Background" (or a
+     * blank one) and near-zero values. It is a QC reading about the machine,
+     * so it must never be offered as a printable patient report: a lab pressing
+     * Comm once and seeing two rows would reasonably conclude the app is
+     * duplicating its work.
+     *
+     * Detected by the id the analyzer keys, never by "the numbers look low" —
+     * a genuinely pancytopenic patient also has near-zero counts, and hiding
+     * THAT report would be a far worse failure than showing a blank.
+     */
+    fun isBackgroundRun(frame: StoredInstrumentFrame): Boolean {
+        val id = frame.specimenId?.trim().orEmpty()
+        return id.equals("background", ignoreCase = true) ||
+            id.equals("blank", ignoreCase = true) ||
+            frame.patientName?.trim().equals("background", ignoreCase = true)
+    }
+
     /** A row whose unit could not be reconciled with the template's. */
     data class Unconverted(val param: String, val analyzerUnit: String, val printedUnit: String)
 
@@ -117,21 +138,34 @@ object MachineReport {
      */
     fun graphs(frame: StoredInstrumentFrame): List<ReportGraph> {
         val out = ArrayList<ReportGraph>(4)
-        fun curve(kind: String, title: String, xLabel: String?, axisMax: Double? = null, tick: Double? = null) {
+        fun curve(kind: String, title: String, xLabel: String?, axisMax: Double? = null, tick: Double? = null): Boolean {
             val points = frame.histograms[kind].orEmpty()
-            if (points.size >= 2 && points.any { it > 0.0 }) {
-                out += ReportGraph(
-                    kind = kind, title = title, points = points, xLabel = xLabel,
-                    xAxisMax = axisMax, xTickStep = tick,
-                )
-            }
+            if (points.size < 2 || points.none { it > 0.0 }) return false
+            out += ReportGraph(
+                kind = kind, title = title, points = points, xLabel = xLabel,
+                xAxisMax = axisMax, xTickStep = tick,
+            )
+            return true
         }
         // The analyzer's FIXED measuring ranges, which is why they can be
         // constants: the BC-5x plots RBC over 0-300 fL and PLT over 0-40 fL on
         // every run. The WBC histogram is plotted in arbitrary channels and the
         // analyzer's own printout carries no numbers under it either, so
         // neither do we — a made-up axis would be worse than none.
-        curve("wbc", "WBC", null)
+        // A CURVE is preferred wherever the analyzer sent channel data: it
+        // carries an axis, so a reader can see where a population sits.
+        //
+        // The WBC fallback matters because of an asymmetry in the protocol: it
+        // defines a bitmap code for the WBC histogram (15008) and the DIFF
+        // scattergram (15200) and for NOTHING ELSE — RBC (15050) and PLT
+        // (15100) exist only as channel data. So an analyzer set to send
+        // histograms "as Bitmap" can physically produce at most two pictures,
+        // and a lab wanting all four must send histograms as Data.
+        if (!curve("wbc", "WBC", null)) {
+            frame.images["wbc"]?.takeIf { it.isNotBlank() }?.let { b64 ->
+                out += ReportGraph(kind = "wbc", title = "WBC", points = emptyList(), image = decodeBase64(b64))
+            }
+        }
         curve("rbc", "RBC", "fL", axisMax = RBC_AXIS_MAX_FL, tick = 100.0)
         curve("plt", "PLT", "fL", axisMax = PLT_AXIS_MAX_FL, tick = 10.0)
         frame.images["diff"]?.takeIf { it.isNotBlank() }?.let { b64 ->

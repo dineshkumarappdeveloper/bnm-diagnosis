@@ -6,6 +6,7 @@ import com.bnm.lab.instruments.MachineUnits
 import com.bnm.lab.instruments.StoredInstrumentFrame
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -44,7 +45,7 @@ class MachineReportTest {
             "NEU#" to "10*9/L", "EOS#" to "10*9/L", "BAS#" to "10*9/L",
             "LYM#" to "10*9/L", "MON#" to "10*9/L",
             "RBC" to "10*12/L", "HGB" to "g/L", "HCT" to "%", "MCV" to "fL",
-            "MCH" to "pg", "MCHC" to "g/L", "RDW-CV" to "%", "RDW-SD" to "%",
+            "MCH" to "pg", "MCHC" to "g/L", "RDW-CV" to "%", "RDW-SD" to "fL",
             "PLT" to "10*9/L", "MPV" to "fL", "PDW" to "", "PCT" to "%",
             "PLCC" to "10*9/L", "PLCR" to "%",
         ),
@@ -79,7 +80,7 @@ class MachineReportTest {
             "MEAN CELL HAEMOGLOBIN (MCH)" to ("22.0" to "pg/cell"),
             "MCH CONCENTRATION (MCHC)" to ("31.0" to "g/dl"),
             "RED CELL DIS. WIDTH (RDW-CV)" to ("20.1" to "%"),
-            "RED CELL DIS. WIDTH (RDW-SD)" to ("55.4" to "%"),
+            "RED CELL DIS. WIDTH (RDW-SD)" to ("55.4" to "fl"),
             "PLATELETS" to ("3.81" to "Lakhs/cumm"),
             "MEAN PLATELET VOLUME (MPV)" to ("8.3" to "fl"),
             "PLATELET DISTRIBUTION WIDTH (PDW)" to ("15.3" to ""),
@@ -223,5 +224,34 @@ class MachineReportTest {
         assertEquals("11.2", MachineReport.format(11.15, 1))
         assertEquals("3.81", MachineReport.format(3.8149, 2))
         assertEquals("0.05", MachineReport.format(0.0500001, 2), "a leading zero survives")
+    }
+}
+
+/** Background counts — the analyzer's blank, never a patient report. */
+class MachineBackgroundRunTest {
+
+    private fun frame(id: String?, name: String? = null) = StoredInstrumentFrame(
+        driver = "mindray_hl7", specimenId = id, patientName = name,
+        params = mapOf("WBC" to "0.08"), units = mapOf("WBC" to "10*9/L"),
+    )
+
+    @Test
+    fun `the analyzer's blank is recognised by its id, whatever the case`() {
+        assertTrue(MachineReport.isBackgroundRun(frame("Background")))
+        assertTrue(MachineReport.isBackgroundRun(frame("BACKGROUND")))
+        assertTrue(MachineReport.isBackgroundRun(frame(" background ")))
+        assertTrue(MachineReport.isBackgroundRun(frame("Blank")))
+        assertTrue(MachineReport.isBackgroundRun(frame(null, name = "Background")))
+    }
+
+    @Test
+    fun `a real patient with near-zero counts is NOT treated as a blank`() {
+        // The failure that matters: hiding a pancytopenic patient's report
+        // because the numbers look like a blank would be far worse than
+        // showing a blank. Detection is by id only, never by the values.
+        assertFalse(MachineReport.isBackgroundRun(frame("12", name = "HASINI")))
+        assertFalse(MachineReport.isBackgroundRun(frame("636/08")))
+        assertFalse(MachineReport.isBackgroundRun(frame(null)))
+        assertFalse(MachineReport.isBackgroundRun(frame("")))
     }
 }
