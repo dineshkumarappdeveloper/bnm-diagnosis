@@ -301,6 +301,15 @@ private fun ResultCard(
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
+                // The graph note earns its place on the card, not in a log: it
+                // names an analyzer setting the bench can change in a minute.
+                b.graphNote?.let { note ->
+                    Text(
+                        note,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 if (b.missing.isNotEmpty()) {
                     Text(
                         "${b.missing.size} parameter(s) not sent by the analyzer",

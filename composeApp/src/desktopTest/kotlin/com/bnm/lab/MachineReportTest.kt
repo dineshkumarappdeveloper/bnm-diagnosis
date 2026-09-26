@@ -255,3 +255,47 @@ class MachineBackgroundRunTest {
         assertFalse(MachineReport.isBackgroundRun(frame("")))
     }
 }
+
+/** The graph panel is short for a reason the bench can act on. */
+class MachineGraphNoteTest {
+
+    private fun base() = StoredInstrumentFrame(
+        driver = "mindray_hl7", specimenId = "12",
+        params = mapOf("WBC" to "8.1"), units = mapOf("WBC" to "10*9/L"),
+    )
+
+    @Test
+    fun `bitmap mode names the analyzer setting that can send all four`() {
+        // Only WBC and DIFF have bitmap codes in the protocol, so this is the
+        // most a Bitmap-mode analyzer can ever send.
+        val frame = base().copy(images = mapOf("wbc" to "QkE=", "diff" to "QkE="))
+        val built = assertNotNull(MachineReport.build(frame))
+        val note = assertNotNull(built.graphNote, "a short panel must explain itself")
+        assertTrue(note.contains("RBC and PLT"), note)
+        assertTrue(note.contains("Data"), "it must name the setting to change: $note")
+    }
+
+    @Test
+    fun `all four present says nothing at all`() {
+        val frame = base().copy(
+            histograms = mapOf(
+                "wbc" to List(128) { 1.0 },
+                "rbc" to List(128) { 1.0 },
+                "plt" to List(128) { 1.0 },
+            ),
+            images = mapOf("diff" to "QkE="),
+        )
+        val built = assertNotNull(MachineReport.build(frame))
+        assertNull(built.graphNote, "nothing is missing, so there is nothing to say")
+    }
+
+    @Test
+    fun `a silent analyzer is not blamed on the bitmap setting`() {
+        // No pictures AND no curves: the analyzer sent no graphics at all
+        // ("Not transmitted"), which is a different instruction to give.
+        val built = assertNotNull(MachineReport.build(base()))
+        val note = assertNotNull(built.graphNote)
+        assertTrue(note.contains("not sent by the analyzer"), note)
+        assertFalse(note.contains("Bitmap"), "do not name a setting that is not the cause: $note")
+    }
+}

@@ -550,16 +550,19 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
                         else -> textCentered(tx, boxBottom - 6f, label, fontR, 5f, gray)
                     }
                 }
-                g.xLabel?.let { textRight(x + panelW, boxBottom + 3f, it, fontR, 5.5f, gray) }
+                if (g.hasCurve) g.xLabel?.let { textRight(x + panelW, boxBottom + 3f, it, fontR, 5.5f, gray) }
                 gy = boxBottom - GRAPH_GAP - 7f
             } else {
-                g.xLabel?.let { textRight(x + panelW - 2f, boxBottom + 2f, it, fontR, 5.5f, gray) }
+                if (g.hasCurve) g.xLabel?.let { textRight(x + panelW - 2f, boxBottom + 2f, it, fontR, 5.5f, gray) }
                 gy = boxBottom - GRAPH_GAP
             }
-            // Named axes (the DIFF plane): LAS up the left, MAS along the
-            // bottom right, drawn INSIDE the box so they sit over the
-            // analyzer's own white margin rather than stealing table width.
-            g.yLabel?.let { text(x + 3f, boxBottom + boxH - 8f, it, fontB, 5.5f, ink) }
+            // Axis NAMES are drawn only over a curve WE plotted. An analyzer
+            // bitmap is self-describing — the BC-5x renders "LAS" and "MAS"
+            // into the scattergram's own pixels — so labelling it again prints
+            // each name twice, a few millimetres apart.
+            if (g.hasCurve) {
+                g.yLabel?.let { text(x + 3f, boxBottom + boxH - 8f, it, fontB, 5.5f, ink) }
+            }
         }
     }
 

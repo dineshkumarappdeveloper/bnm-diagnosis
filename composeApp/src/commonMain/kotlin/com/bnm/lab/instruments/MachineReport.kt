@@ -56,6 +56,13 @@ object MachineReport {
         val missing: List<String>,
         /** Rows printed in the analyzer's own unit because the pair is unknown. */
         val unconverted: List<Unconverted>,
+        /**
+         * Why the graph panel is short, in words the bench can act on, or null
+         * when all four arrived. Silence here would be the wrong answer: a
+         * sheet with two graphs instead of four looks like the app lost them,
+         * when it is an analyzer setting that CANNOT send the other two.
+         */
+        val graphNote: String? = null,
     )
 
     /**
@@ -127,7 +134,32 @@ object MachineReport {
             graphs = graphs(frame),
             sampleType = "Blood (EDTA)",
         )
-        return Built(listOf(section), missing, unconverted)
+        return Built(listOf(section), missing, unconverted, graphNote(frame, section.graphs))
+    }
+
+    /**
+     * The note under a short graph panel.
+     *
+     * The protocol defines a BITMAP code for the WBC histogram (15008) and the
+     * DIFF scattergram (15200) and for nothing else: RBC (15050) and PLT
+     * (15100) exist only as channel data. So an analyzer set to send histograms
+     * "as Bitmap" can physically deliver at most two pictures, and no amount of
+     * work on this side changes that — only the analyzer's own setting does.
+     */
+    fun graphNote(frame: StoredInstrumentFrame, drawn: List<ReportGraph>): String? {
+        val kinds = drawn.map { it.kind }.toSet()
+        val missing = listOf("rbc" to "RBC", "plt" to "PLT").filterNot { it.first in kinds }
+        if (missing.isEmpty()) return null
+        val names = missing.joinToString(" and ") { it.second }
+        // Bitmap mode is identifiable: a picture arrived for something.
+        val bitmapMode = frame.images.isNotEmpty() && frame.histograms.isEmpty()
+        return if (bitmapMode) {
+            "$names histograms are missing because the analyzer is sending graphs as Bitmap, " +
+                "which the protocol only supports for WBC and DIFF. On the analyzer set " +
+                "\"Histogram Transmitted as\" to Data (leave Scattergram on Bitmap) to get all four."
+        } else {
+            "$names histograms were not sent by the analyzer."
+        }
     }
 
     /**
