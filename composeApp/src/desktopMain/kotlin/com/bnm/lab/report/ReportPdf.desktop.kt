@@ -36,7 +36,7 @@ private const val QR_MM = 20f
 
 /** Height of the accession barcode in the patient box, mm. 8 mm scans from a
  *  desk CCD reader without dominating the box. */
-private const val BARCODE_MM = 8f
+private const val BARCODE_MM = 6f
 /** Code 128 module width, mm — 0.3 mm is the safe X-dimension for laser
  *  output; narrower only when a long accession would not fit the column. */
 private const val BARCODE_MODULE_MM = 0.3f
@@ -180,10 +180,14 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
     // Sized per section: a test with analyzer graphs gives the right-hand
     // panel its width and the columns squeeze into what is left.
     private inner class Cols(val tableW: Float) {
-        val wParam = tableW * 0.36f
+        // The flag column holds "L v" or "H ^" and nothing else — three
+        // characters. It was taking 15% of the table, width the parameter
+        // names needed far more, which is why they were being shrunk and
+        // wrapped. What is left over after these four IS the flag column.
+        val wParam = tableW * 0.42f
         val wValue = tableW * 0.11f
-        val wUnit = tableW * 0.19f
-        val wRef = tableW * 0.19f
+        val wUnit = tableW * 0.20f
+        val wRef = tableW * 0.21f
         val xParam = left + 4f
         val xValue = left + wParam
         val xUnit = xValue + wValue
@@ -400,7 +404,7 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         // the rows; the "Accession" row right under it is its readable text.
         val bars = accessionBarcode(doc.accession)
         val barH = if (bars != null) BARCODE_MM * MM else 0f
-        val barGap = if (bars != null) 6f else 0f
+        val barGap = if (bars != null) 3f else 0f
         val boxH = maxOf(leftH, barH + barGap + rightH) + pad * 2f
 
         // No ensure(): this is drawn by newPage() at the top of a fresh sheet,
@@ -492,6 +496,9 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
     private fun drawSection(section: ReportSection, closesGroup: Boolean) {
         val panel = section.graphs.filter { it.hasCurve || it.hasImage }
         cols = Cols(if (panel.isEmpty()) contentW else contentW - panelW - PANEL_GAP)
+        // The reservation is what the panel MINIMALLY needs, not what it will
+        // stretch to. Reserving the stretched height makes a full-page CBC
+        // fail to fit and break to a fresh sheet — the opposite of the point.
         val panelH = if (panel.isEmpty()) 0f else panelHeight(panel)
         // The graph panel never splits across sheets: it needs its full height
         // under the title, or the whole section moves to a fresh sheet. When the
@@ -503,7 +510,13 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         sectionTitle(section.title, section.sampleType)
         val panelTop = y
         val panelPage = pageIndex
-        if (panel.isNotEmpty()) drawPanel(panel, right - panelW, panelTop)
+        if (panel.isNotEmpty()) {
+            // Estimate the table beside it: one line per row plus its padding,
+            // headings being shorter. Only an estimate is needed — the panel is
+            // stretched to fill, not aligned row by row.
+            val estTable = section.rows.sumOf { (if (it.heading) 13.0 else 14.5) } .toFloat() + 14f
+            drawPanel(panel, right - panelW, panelTop, targetH = minOf(estTable, panelTop - bottomY - 4f))
+        }
         tableHeader()
         section.rows.forEachIndexed { i, row ->
             // KEEP-WITH-NEXT: the group's final row travels with the sign-off.
@@ -514,7 +527,7 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
             val keepWith = if (closesGroup && i == section.rows.lastIndex) 10f + signOff.need else 0f
             drawRow(row, section, keepWith)
         }
-        y -= 10f
+        y -= 7f
         // A short table still clears the panel before whatever comes next —
         // unless the rows already moved on to a later sheet.
         if (panel.isNotEmpty() && pageIndex == panelPage) y = minOf(y, panelTop - panelH - 6f)
@@ -524,13 +537,36 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
     private fun panelHeight(graphs: List<ReportGraph>): Float =
         graphs.sumOf { g -> (GRAPH_TITLE_H + (if (g.hasCurve) GRAPH_H else panelW) + GRAPH_GAP).toDouble() }.toFloat()
 
+    /** What the panel will occupy once stretched to [targetH]. */
+    private fun panelHeightStretched(graphs: List<ReportGraph>, targetH: Float): Float {
+        if (graphs.isEmpty()) return 0f
+        val chrome = graphs.size * GRAPH_TITLE_H + (graphs.size - 1) * GRAPH_GAP
+        val share = ((targetH - chrome) / graphs.size).coerceIn(GRAPH_H, panelW * 1.25f)
+        return chrome + share * graphs.size
+    }
+
     /** Stacked graph boxes down the panel: title, framed box, curve or bitmap. */
-    private fun drawPanel(graphs: List<ReportGraph>, x: Float, top: Float) {
+    /**
+     * [targetH] is how much column the panel SHOULD fill — the height the
+     * table beside it is about to take. The graphs are stretched to use it.
+     *
+     * Fixed box heights left a CBC looking unfinished: four small graphs at
+     * the top of a column and two inches of white under them, while the table
+     * ran on past. Filling the column is also what the reference sheets do,
+     * and what makes the histograms big enough to read.
+     */
+    private fun drawPanel(graphs: List<ReportGraph>, x: Float, top: Float, targetH: Float = 0f) {
         var gy = top
+        // Share whatever room there is, minus each graph's title and the gaps.
+        val chrome = graphs.size * GRAPH_TITLE_H + (graphs.size - 1).coerceAtLeast(0) * GRAPH_GAP
+        val share = if (targetH > 0f && graphs.isNotEmpty()) {
+            ((targetH - chrome) / graphs.size).coerceIn(GRAPH_H, panelW * 1.25f)
+        } else 0f
         for (g in graphs) {
             text(x + 2f, gy - 7f, g.title, fontB, 7f, gray)
             gy -= GRAPH_TITLE_H
-            val boxH = if (g.hasCurve) GRAPH_H else panelW
+            val natural = if (g.hasCurve) GRAPH_H else panelW
+            val boxH = if (share > 0f) share else natural
             val boxBottom = gy - boxH
             cs?.let { c ->
                 c.setStrokingColor(boxStroke); c.setLineWidth(0.6f)
@@ -664,12 +700,26 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
             y -= hH
             return
         }
-        val paramLines = wrapText(row.param, fontR, 9f, wParam - 10f)
-        val unitLines = if (row.unit.isBlank()) emptyList() else wrapText(row.unit, fontR, 8.5f, wUnit - 6f)
+        // A parameter name takes ONE line. Wrapping "PLATELET LARGER CELL
+        // COUNT (P-LCC)" onto a second line costs a whole row of height, and
+        // twenty-five of those is the difference between a one-page CBC and a
+        // two-page one. Shrinking is the cheaper trade: the name stays legible
+        // a point or two down, and only a genuinely enormous name still wraps.
+        var paramSize = 9f
+        while (paramSize > 6.2f && textWidth(row.param, fontR, paramSize) > wParam - 10f) {
+            paramSize -= 0.25f
+        }
+        val paramLines = wrapText(row.param, fontR, paramSize, wParam - 10f)
+        // Same trade as the parameter name: "million cells/cu mm" on two lines
+        // costs a whole row, and one row is the difference between a one-page
+        // CBC and a two-page one.
+        var unitSize = 8.5f
+        while (unitSize > 6.0f && textWidth(row.unit, fontR, unitSize) > wUnit - 6f) unitSize -= 0.25f
+        val unitLines = if (row.unit.isBlank()) emptyList() else wrapText(row.unit, fontR, unitSize, wUnit - 6f)
         val refLines = wrapText(row.ref.ifBlank { "-" }, fontR, 8.5f, wRef - 6f)
-        val lineH = 11f
+        val lineH = 10.5f
         val lines = maxOf(paramLines.size, unitLines.size, refLines.size, 1)
-        val rowH = lines * lineH + 3.5f
+        val rowH = lines * lineH + 1.4f
         if (y - rowH - keepWith < bottomY) continueSection(section)
 
         val emphasis = flagEmphasisRgb(row.flag)
@@ -677,9 +727,9 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         val vFont = if (emphasis != null) fontB else fontR
         val base = y - 9f
 
-        paramLines.forEachIndexed { i, l -> text(xParam, base - i * lineH, l, fontR, 9f, ink) }
+        paramLines.forEachIndexed { i, l -> text(xParam, base - i * lineH, l, fontR, paramSize, ink) }
         text(xValue, base, row.value, vFont, 9f, vColor)
-        unitLines.forEachIndexed { i, l -> text(xUnit, base - i * lineH, l, fontR, 8.5f, ink) }
+        unitLines.forEachIndexed { i, l -> text(xUnit, base - i * lineH, l, fontR, unitSize, ink) }
         refLines.forEachIndexed { i, l -> text(xRef, base - i * lineH, l, fontR, 8.5f, gray) }
         val fl = flagLabel(row.flag)
         if (fl.isNotEmpty()) {
@@ -751,7 +801,7 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         /** 40pt under the taller column: the 15pt drop below its last line,
          *  then the flag key and the end-of-report line (12pt each) still
          *  land above the footer band. */
-        val need = maxOf(signOffH, qrH) + 40f
+        val need = maxOf(signOffH, qrH) + 35f
     }
 
     private val signOff by lazy { SignOffMetrics() }
