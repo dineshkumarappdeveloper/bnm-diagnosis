@@ -405,7 +405,11 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         val bars = accessionBarcode(doc.accession)
         val barH = if (bars != null) BARCODE_MM * MM else 0f
         val barGap = if (bars != null) 3f else 0f
-        val boxH = maxOf(leftH, barH + barGap + rightH) + pad * 2f
+        // The barcode is right-aligned and the meta column is left-aligned in
+        // the same half, so they sit BESIDE each other — the box only has to
+        // be as tall as the tallest of the three, not the column stacked under
+        // the barcode.
+        val boxH = maxOf(leftH, rightH, barH) + pad * 2f
 
         // No ensure(): this is drawn by newPage() at the top of a fresh sheet,
         // and a page break from inside it would recurse straight back here.
@@ -416,7 +420,9 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         }
 
         if (bars != null) {
-            val module = minOf(BARCODE_MODULE_MM * MM, (colW - pad * 2f) / bars.size)
+            // Capped so it cannot reach left into the meta column now that the
+            // two share a line.
+            val module = minOf(BARCODE_MODULE_MM * MM, (colW * 0.44f) / bars.size)
             val bw = module * bars.size
             drawBars(bars, right - pad - bw, y - pad - barH, module, barH)
         }
@@ -432,7 +438,7 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
             }
         }
         drawColumn(leftCol, left + pad, y - pad - 9f)
-        drawColumn(rightCol, left + colW + pad, y - pad - barH - barGap - 9f)
+        drawColumn(rightCol, left + colW + pad, y - pad - 9f)
         y -= boxH + 14f
         // Per-test release: what this sheet does NOT cover, on every sheet, so
         // a partial report can never be mistaken for the whole order.
@@ -515,7 +521,10 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
             // headings being shorter. Only an estimate is needed — the panel is
             // stretched to fill, not aligned row by row.
             val estTable = section.rows.sumOf { (if (it.heading) 13.0 else 14.5) } .toFloat() + 14f
-            drawPanel(panel, right - panelW, panelTop, targetH = minOf(estTable, panelTop - bottomY - 4f))
+            // Leave the sign-off its room AND a gap: graphs that finish level
+            // with the signature line read as part of it.
+            val roomAbove = panelTop - bottomY - signOff.need - 12f
+            drawPanel(panel, right - panelW, panelTop, targetH = minOf(estTable, roomAbove))
         }
         tableHeader()
         section.rows.forEachIndexed { i, row ->
@@ -705,7 +714,7 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         // twenty-five of those is the difference between a one-page CBC and a
         // two-page one. Shrinking is the cheaper trade: the name stays legible
         // a point or two down, and only a genuinely enormous name still wraps.
-        var paramSize = 9f
+        var paramSize = 8.3f
         while (paramSize > 6.2f && textWidth(row.param, fontR, paramSize) > wParam - 10f) {
             paramSize -= 0.25f
         }
