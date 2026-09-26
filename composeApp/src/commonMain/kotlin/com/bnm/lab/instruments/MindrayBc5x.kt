@@ -206,8 +206,7 @@ object MindrayBc5x {
             // A layout the decoder does not recognise goes on record with its
             // raw size, so a commissioning engineer can see what the analyzer
             // actually sends instead of a blank box.
-            else meta["${kind}_hist_error"] =
-                "unrecognised layout: ~${b64.filterNot { it.isWhitespace() }.length * 3 / 4} bytes, meta length $metaLength"
+            else meta["${kind}_hist_error"] = describeUndecodable(b64, metaLength)
         }
 
         if (alerts.isNotEmpty()) meta["alerts"] = alerts.joinToString(";")
@@ -292,6 +291,26 @@ object MindrayBc5x {
      * A trailing all-zero run is NOT trimmed — the x axis is the channel index.
      */
     @OptIn(ExperimentalEncodingApi::class)
+    /**
+     * What to say about a histogram no reading fits.
+     *
+     * The EXACT decoded length and the first bytes in hex, because that is
+     * everything needed to work out the real layout — channel count, header
+     * size, byte order — without another sample, another build and another
+     * trip to the lab. A round number like "about 500 bytes" costs a day.
+     */
+    fun describeUndecodable(base64: String, metaLength: Int): String {
+        val cleaned = base64.filterNot { it.isWhitespace() }
+        val bytes = runCatching {
+            Base64.Default.withPadding(Base64.PaddingOption.PRESENT_OPTIONAL).decode(cleaned)
+        }.getOrNull() ?: return "the data would not base64-decode (${cleaned.length} chars)"
+        val head = bytes.take(16).joinToString("") { b ->
+            val h = (b.toInt() and 0xFF).toString(16)
+            if (h.length == 1) "0$h" else h
+        }
+        return "${bytes.size} bytes, meta length $metaLength, starts $head"
+    }
+
     fun decodeHistogram(base64: String, metaLength: Int): List<Double> {
         val cleaned = base64.filterNot { it.isWhitespace() }
         if (cleaned.isEmpty()) return emptyList()
@@ -299,17 +318,55 @@ object MindrayBc5x {
             Base64.Default.withPadding(Base64.PaddingOption.PRESENT_OPTIONAL).decode(cleaned)
         }.getOrNull() ?: return emptyList()
         val skip = metaLength.coerceAtLeast(0)
-        val points = when {
+
+        // FIRST the documented reading, unchanged — it is what a BC-5130
+        // actually sends and what the fixtures pin.
+        val primary = when {
             skip in 2..4 && bytes.size == skip * 256 -> littleEndian(bytes, 0, skip)
-            bytes.size <= skip -> return emptyList()
+            bytes.size <= skip -> emptyList()
             (bytes.size - skip) % 2 == 0 && bytes.size - skip > 256 -> littleEndian(bytes, skip, 2)
             else -> littleEndian(bytes, skip, 1)
         }
-        return if (points.size in ACCEPTED_CHANNELS) points else emptyList()
+        if (primary.size in ACCEPTED_CHANNELS) return primary
+
+        // ONLY THEN the alternatives. The vendor calls this layout
+        // "customized" and documents only the envelope, so a histogram that
+        // does not match the shape above is likelier to be a layout we have
+        // not met than to be corrupt — and the old code answered "nothing" to
+        // both, leaving an empty box and no way to tell them apart.
+        //
+        // Every candidate is still gated on [ACCEPTED_CHANNELS]: tolerance
+        // about OFFSET and WIDTH is safe, tolerance about what counts as a
+        // histogram is not. A wrong reading that happened to land on 256
+        // points would draw a plausible-looking curve from misaligned bytes,
+        // which on a clinical report is worse than a blank.
+        val alternatives = buildList {
+            if (bytes.size > skip) {
+                add(littleEndian(bytes, skip, 2))
+                add(littleEndian(bytes, skip, 1))
+                add(bigEndian(bytes, skip, 2))
+            }
+            add(littleEndian(bytes, 0, 2))
+            add(littleEndian(bytes, 0, 1))
+            add(bigEndian(bytes, 0, 2))
+        }
+        // All-zero means the offset is wrong, not that the patient has none.
+        return alternatives.firstOrNull { it.size in ACCEPTED_CHANNELS && it.any { v -> v > 0.0 } }
+            ?: emptyList()
     }
 
     /** Channel counts a hematology histogram can have (BC-5130: 256). */
     private val ACCEPTED_CHANNELS = setOf(64, 128, 256, 512, 1024)
+
+    private fun bigEndian(bytes: ByteArray, from: Int, width: Int): List<Double> {
+        val n = (bytes.size - from) / width
+        if (n <= 0) return emptyList()
+        return List(n) { i ->
+            var v = 0L
+            for (b in 0 until width) v = (v shl 8) or (bytes[from + i * width + b].toLong() and 0xFF)
+            v.toDouble()
+        }
+    }
 
     private fun littleEndian(bytes: ByteArray, from: Int, width: Int): List<Double> {
         val n = (bytes.size - from) / width
