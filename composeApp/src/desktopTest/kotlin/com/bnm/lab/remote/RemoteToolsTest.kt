@@ -678,6 +678,7 @@ class RemoteToolsTest {
         repeat(2) {
             driver.addColumn("instruments", "verify_pending", "INTEGER NOT NULL DEFAULT 0")
             driver.addColumn("instruments", "analyzer_host", "TEXT")   // SELECT * needs every later column too
+            driver.addColumn("instruments", "tcp_role", "TEXT")
         }
         val db = AppDatabase(driver)
         val row = db.instrumentsQueries.instrumentById("old").executeAsOne()

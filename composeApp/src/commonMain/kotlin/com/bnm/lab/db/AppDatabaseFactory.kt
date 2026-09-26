@@ -221,6 +221,7 @@ fun createAppDatabase(driverFactory: DriverFactory = DriverFactory()): AppDataba
     driver.addColumn("instruments", "verify_pending", "INTEGER NOT NULL DEFAULT 0")
     // The analyzer's own address for the Link check's ping (2026-09-25) — appended last.
     driver.addColumn("instruments", "analyzer_host", "TEXT")
+    driver.addColumn("instruments", "tcp_role", "TEXT")
     // Who claimed or discarded a queued result (2026-09-25) — appended last, in
     // the SAME order as Instruments.sq, because every query there is SELECT *.
     driver.addColumn("instrument_results", "claimed_by", "TEXT")

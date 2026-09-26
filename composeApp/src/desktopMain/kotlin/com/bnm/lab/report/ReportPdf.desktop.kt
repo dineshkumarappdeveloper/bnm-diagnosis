@@ -181,16 +181,19 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
     // panel its width and the columns squeeze into what is left.
     private inner class Cols(val tableW: Float) {
         val wParam = tableW * 0.36f
-        val wRef = tableW * 0.24f
+        val wValue = tableW * 0.11f
+        val wUnit = tableW * 0.19f
+        val wRef = tableW * 0.19f
         val xParam = left + 4f
         val xValue = left + wParam
-        val xUnit = xValue + tableW * 0.15f
-        val xRef = xUnit + tableW * 0.11f
+        val xUnit = xValue + wValue
+        val xRef = xUnit + wUnit
         val xFlag = xRef + wRef
         val right = left + tableW
     }
     private var cols = Cols(contentW)
     private val wParam get() = cols.wParam
+    private val wUnit get() = cols.wUnit
     private val wRef get() = cols.wRef
     private val xParam get() = cols.xParam
     private val xValue get() = cols.xValue
@@ -261,6 +264,10 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
 
     private fun textRight(xEnd: Float, baseline: Float, s: String, font: PDFont, size: Float, color: Color) =
         text(xEnd - textWidth(s, font, size), baseline, s, font, size, color)
+
+    /** Centred on an arbitrary x — axis ticks sit under the channel they mark. */
+    private fun textCentered(atX: Float, baseline: Float, s: String, font: PDFont, size: Float, color: Color) =
+        text(atX - textWidth(s, font, size) / 2f, baseline, s, font, size, color)
 
     private fun textCenter(baseline: Float, s: String, font: PDFont, size: Float, color: Color) =
         text((pageW - textWidth(s, font, size)) / 2f, baseline, s, font, size, color)
@@ -488,8 +495,33 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
             }
             if (g.hasCurve) drawCurve(g, x, boxBottom, panelW, boxH)
             else g.image?.let { drawGraphImage(it, x, boxBottom, panelW, boxH, g.kind) }
-            g.xLabel?.let { textRight(x + panelW - 2f, boxBottom + 2f, it, fontR, 5.5f, gray) }
-            gy = boxBottom - GRAPH_GAP
+            // Axis numbers UNDER the box, so a reader can see where a
+            // population sits rather than only that one exists. Drawn outside
+            // the frame because the curve already uses the full inner width.
+            val ticks = g.xTicks
+            if (ticks.isNotEmpty()) {
+                val max = g.xAxisMax ?: 0.0
+                val pad = 3f
+                val innerW = panelW - 2 * pad
+                ticks.forEachIndexed { i, v ->
+                    val tx = x + pad + (innerW * (v / max)).toFloat()
+                    val label = if (v == v.toLong().toDouble()) v.toLong().toString() else v.toString()
+                    when (i) {
+                        0 -> text(tx, boxBottom - 6f, label, fontR, 5f, gray)
+                        ticks.lastIndex -> textRight(tx, boxBottom - 6f, label, fontR, 5f, gray)
+                        else -> textCentered(tx, boxBottom - 6f, label, fontR, 5f, gray)
+                    }
+                }
+                g.xLabel?.let { textRight(x + panelW, boxBottom + 3f, it, fontR, 5.5f, gray) }
+                gy = boxBottom - GRAPH_GAP - 7f
+            } else {
+                g.xLabel?.let { textRight(x + panelW - 2f, boxBottom + 2f, it, fontR, 5.5f, gray) }
+                gy = boxBottom - GRAPH_GAP
+            }
+            // Named axes (the DIFF plane): LAS up the left, MAS along the
+            // bottom right, drawn INSIDE the box so they sit over the
+            // analyzer's own white margin rather than stealing table width.
+            g.yLabel?.let { text(x + 3f, boxBottom + boxH - 8f, it, fontB, 5.5f, ink) }
         }
     }
 
@@ -579,10 +611,18 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
 
     /** [keepWith]: extra room that must follow this row on the same sheet. */
     private fun drawRow(row: ReportRow, section: ReportSection, keepWith: Float = 0f) {
+        if (row.heading) {
+            val hH = 13f
+            if (y - hH - keepWith < bottomY) continueSection(section)
+            text(xParam, y - 9f, row.param, fontB, 8.5f, accent)
+            y -= hH
+            return
+        }
         val paramLines = wrapText(row.param, fontR, 9f, wParam - 10f)
+        val unitLines = if (row.unit.isBlank()) emptyList() else wrapText(row.unit, fontR, 8.5f, wUnit - 6f)
         val refLines = wrapText(row.ref.ifBlank { "-" }, fontR, 8.5f, wRef - 6f)
         val lineH = 11f
-        val lines = maxOf(paramLines.size, refLines.size, 1)
+        val lines = maxOf(paramLines.size, unitLines.size, refLines.size, 1)
         val rowH = lines * lineH + 3.5f
         if (y - rowH - keepWith < bottomY) continueSection(section)
 
@@ -593,7 +633,7 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
 
         paramLines.forEachIndexed { i, l -> text(xParam, base - i * lineH, l, fontR, 9f, ink) }
         text(xValue, base, row.value, vFont, 9f, vColor)
-        text(xUnit, base, row.unit, fontR, 8.5f, ink)
+        unitLines.forEachIndexed { i, l -> text(xUnit, base - i * lineH, l, fontR, 8.5f, ink) }
         refLines.forEachIndexed { i, l -> text(xRef, base - i * lineH, l, fontR, 8.5f, gray) }
         val fl = flagLabel(row.flag)
         if (fl.isNotEmpty()) {

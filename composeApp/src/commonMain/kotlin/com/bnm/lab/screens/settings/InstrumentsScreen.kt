@@ -74,6 +74,7 @@ import com.bnm.lab.instruments.CreateOrderGate
 import com.bnm.lab.instruments.INSTRUMENT_DRIVERS
 import com.bnm.lab.instruments.InstrumentConfig
 import com.bnm.lab.instruments.InstrumentEngine
+import com.bnm.lab.instruments.InstrumentTcpRole
 import com.bnm.lab.instruments.InstrumentTransport
 import com.bnm.lab.instruments.LinkCheck
 import com.bnm.lab.instruments.LinkCheckReport
@@ -991,6 +992,7 @@ private fun InstrumentEditDialog(
     var baud by remember { mutableStateOf(initial.baud.toString()) }
     var tcpPort by remember { mutableStateOf(initial.tcpPort?.toString() ?: "5500") }
     var analyzerHost by remember { mutableStateOf(initial.analyzerHost ?: "") }
+    var tcpRole by remember { mutableStateOf(InstrumentTcpRole.normalise(initial.tcpRole)) }
     var ports by remember { mutableStateOf(listSerialPorts()) }
 
     AlertDialog(
@@ -1014,6 +1016,8 @@ private fun InstrumentEditDialog(
                             driver = d.key
                             if (name.isBlank()) name = d.label
                             if (d.tcpOnly) transport = InstrumentTransport.TCP
+                            tcpRole = d.tcpRole
+                            d.defaultTcpPort?.let { tcpPort = it.toString() }
                         },
                         label = { Text(d.label) },
                     )
@@ -1069,26 +1073,50 @@ private fun InstrumentEditDialog(
                         )
                     }
                 } else {
+                    val dialling = tcpRole == InstrumentTcpRole.CONNECT
+                    // Which end opens the connection. Both ends waiting is the
+                    // one failure that produces NO data and NO error, so it is
+                    // asked plainly rather than inferred.
+                    Text("Who starts the connection?", style = MaterialTheme.typography.bodySmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = !dialling,
+                            onClick = { tcpRole = InstrumentTcpRole.LISTEN },
+                            label = { Text("Analyzer calls us") },
+                        )
+                        FilterChip(
+                            selected = dialling,
+                            onClick = { tcpRole = InstrumentTcpRole.CONNECT },
+                            label = { Text("We call the analyzer") },
+                        )
+                    }
                     OutlinedTextField(
                         value = tcpPort,
                         onValueChange = { tcpPort = it.filter { c -> c.isDigit() } },
-                        label = { Text("Listen port") },
+                        label = { Text(if (dialling) "Analyzer port" else "Listen port") },
                         singleLine = true, modifier = Modifier.fillMaxWidth(),
                     )
-                    Text("This app listens on the port; point the analyzer (or a test " +
-                        "sender) at this PC's IP address.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                     OutlinedTextField(
                         value = analyzerHost,
                         onValueChange = { analyzerHost = it.trim() },
-                        label = { Text("Analyzer IP address (optional)") },
+                        label = {
+                            Text(if (dialling) "Analyzer IP address" else "Analyzer IP address (optional)")
+                        },
                         singleLine = true, modifier = Modifier.fillMaxWidth(),
                     )
-                    Text("Only used by the Link check below to ping the analyzer from this PC — " +
-                        "the analyzer still connects to this PC, not the other way round.",
+                    Text(
+                        if (dialling) {
+                            "This app dials the analyzer and holds the connection open. " +
+                                "The Mindray BC-5x works this way: it is a server on port 5100 " +
+                                "and never calls out, so its own screen has no address to set."
+                        } else {
+                            "This app listens on the port; point the analyzer (or a test sender) " +
+                                "at this PC's IP address. The address above is only used by the " +
+                                "Link check to ping the analyzer."
+                        },
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 if (linkCheck != null) {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -1115,6 +1143,7 @@ private fun InstrumentEditDialog(
                         tcpPort = tcpPort.toIntOrNull(),
                         enabled = true,
                         analyzerHost = analyzerHost.ifBlank { null },
+                        tcpRole = tcpRole,
                     ))
                 },
             ) { Text("Save & connect") }

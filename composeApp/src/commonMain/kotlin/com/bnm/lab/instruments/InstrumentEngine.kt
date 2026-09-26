@@ -329,9 +329,24 @@ class InstrumentEngine(
             if (port == null || port !in 1..65535) {
                 Launch(InstrumentStatus("error", "No TCP port set"))
             } else {
-                Launch(InstrumentStatus("listening", "TCP port $port")) {
-                    val job = scope.launch { tcpListenLoop(cfg, port) }
-                    listeners[cfg.id] = ListenerHandle(job, serial = null, assembler = null)
+                if (InstrumentTcpRole.normalise(cfg.tcpRole) == InstrumentTcpRole.CONNECT) {
+                    val host = cfg.analyzerHost?.trim().orEmpty()
+                    if (host.isEmpty()) {
+                        // Naming the field is the whole value of this message:
+                        // "connection failed" would send a bench hunting cables
+                        // for an hour over an empty text box.
+                        Launch(InstrumentStatus("error", "This analyzer must be dialled — set its address"))
+                    } else {
+                        Launch(InstrumentStatus("connecting", "Dialling $host:$port")) {
+                            val job = scope.launch { tcpDialLoop(cfg, host, port) }
+                            listeners[cfg.id] = ListenerHandle(job, serial = null, assembler = null)
+                        }
+                    }
+                } else {
+                    Launch(InstrumentStatus("listening", "TCP port $port")) {
+                        val job = scope.launch { tcpListenLoop(cfg, port) }
+                        listeners[cfg.id] = ListenerHandle(job, serial = null, assembler = null)
+                    }
                 }
             }
         }
@@ -367,6 +382,78 @@ class InstrumentEngine(
             }
         }
         else -> Launch(InstrumentStatus("error", "Unknown transport '${cfg.transport}'"))
+    }
+
+    /**
+     * The OTHER direction: this app dials the analyzer and reads results off
+     * the socket it opened.
+     *
+     * WHY THIS EXISTS. A listener and a server both wait, so pointing the wrong
+     * one at the other produces no data, no error and no clue — the single
+     * worst failure shape in this whole subsystem. The Mindray BC-5x is a TCP
+     * server ("Port is fixed as 5100", manual 5.2) whose Communication Setup
+     * screen has no host-address field at all: it cannot dial out. So for that
+     * analyzer the app must be the client.
+     *
+     * The connection is held OPEN and results stream down it; when the analyzer
+     * drops it (a reboot, a cable, an idle timeout) we redial with a capped
+     * backoff. Every frame is acked on this same socket, exactly as in the
+     * listening path, because the HL7 ack is a property of the protocol and not
+     * of who dialled.
+     */
+    private suspend fun tcpDialLoop(cfg: InstrumentConfig, host: String, port: Int) {
+        val selector = SelectorManager(Dispatchers.Default)
+        var backoffMs = 1_000L
+        var lastError: String? = null
+        try {
+            while (currentCoroutineContext().isActive) {
+                try {
+                    val socket = aSocket(selector).tcp().connect(host, port)
+                    backoffMs = 1_000L
+                    lastError = null
+                    loggedBindFailure.remove(cfg.id)
+                    setStatus(
+                        cfg.id,
+                        InstrumentStatus("listening", "Connected to $host:$port", boundAt = nowIso(), peerIp = host),
+                    )
+                    logRow(cfg, "info", "Connected to $host:$port", null)
+                    val out = socket.openWriteChannel(autoFlush = true)
+                    val assembler = FrameAssembler(cfg) { bytes -> out.writeFully(bytes, 0, bytes.size) }
+                    try {
+                        val channel = socket.openReadChannel()
+                        val buf = ByteArray(8 * 1024)
+                        while (true) {
+                            val n = channel.readAvailable(buf, 0, buf.size)
+                            if (n < 0) break
+                            if (n > 0) assembler.submit(buf.copyOf(n))
+                        }
+                    } finally {
+                        // Drain BEFORE closing: the last chunk may complete a
+                        // message whose ACK still has to go out on this socket.
+                        try { assembler.finish() } finally { runCatching { socket.close() } }
+                    }
+                    logRow(cfg, "info", "Analyzer closed the connection", null)
+                    setStatus(cfg.id, InstrumentStatus("connecting", "Reconnecting to $host:$port"))
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    // One log row per DISTINCT failure: a lab that leaves the
+                    // analyzer off overnight would otherwise wake up to
+                    // thousands of identical rows and a log with no history in
+                    // it, which is how the useful evidence gets trimmed away.
+                    val reason = e.message?.take(120) ?: e::class.simpleName.orEmpty()
+                    if (reason != lastError) {
+                        lastError = reason
+                        logRow(cfg, "error", "Could not reach $host:$port — $reason", null)
+                    }
+                    setStatus(cfg.id, InstrumentStatus("error", "Can't reach $host:$port — is the analyzer on?"))
+                }
+                delay(backoffMs)
+                backoffMs = (backoffMs * 2).coerceAtMost(30_000L)
+            }
+        } finally {
+            runCatching { selector.close() }
+        }
     }
 
     private suspend fun tcpListenLoop(cfg: InstrumentConfig, port: Int) {
@@ -1268,6 +1355,7 @@ class InstrumentEngine(
                 cfg.createdAt.ifBlank { now }, now,
                 if (cfg.verifyPending) 1L else 0L,
                 cfg.analyzerHost?.trim()?.ifBlank { null },
+                InstrumentTcpRole.normalise(cfg.tcpRole),
             )
         }
         restart(id)
@@ -1369,6 +1457,7 @@ class InstrumentEngine(
         createdAt = created_at, updatedAt = updated_at,
         verifyPending = verify_pending == 1L,
         analyzerHost = analyzer_host,
+        tcpRole = InstrumentTcpRole.normalise(tcp_role),
     )
 
     companion object {

@@ -38,7 +38,29 @@ data class InstrumentConfig(
      * "analyzer never pressed Send". The listener itself never dials out.
      */
     val analyzerHost: String? = null,
+    /**
+     * Which end opens the TCP connection — [InstrumentTcpRole].
+     *
+     * Not a detail: get it wrong and NOTHING arrives, with no error anywhere,
+     * because both ends sit waiting to be called. The Mindray BC-5x is a TCP
+     * SERVER on a fixed port 5100 (its Communication Setup screen has no
+     * host-address field at all, which is the giveaway) — a listener will wait
+     * for it forever. Analyzers that push results, like the Mispa, dial out and
+     * want [InstrumentTcpRole.LISTEN].
+     */
+    val tcpRole: String = InstrumentTcpRole.LISTEN,
 )
+
+object InstrumentTcpRole {
+    /** The analyzer dials this app; we bind a port and accept. */
+    const val LISTEN = "listen"
+
+    /** This app dials the analyzer, which is itself a TCP server. */
+    const val CONNECT = "connect"
+
+    fun normalise(raw: String?): String =
+        if (raw?.trim()?.lowercase() == CONNECT) CONNECT else LISTEN
+}
 
 object InstrumentTransport {
     const val SERIAL = "serial"
@@ -61,6 +83,13 @@ data class InstrumentDriver(
     /** The analyzer waits for the app's ACK, which only the TCP path can send:
      *  serial is not offered for it. */
     val tcpOnly: Boolean = false,
+    /**
+     * The TCP role this analyzer requires, pre-selected when it is picked.
+     * The BC-5x is a server and must be DIALLED; most others push to us.
+     */
+    val tcpRole: String = InstrumentTcpRole.LISTEN,
+    /** Port the analyzer serves on when [tcpRole] is connect (BC-5x: 5100). */
+    val defaultTcpPort: Int? = null,
 )
 
 val INSTRUMENT_DRIVERS = listOf(
@@ -78,6 +107,11 @@ val INSTRUMENT_DRIVERS = listOf(
         defaultBaud = 115200,
         bidirectional = false,
         tcpOnly = true,
+        // The BC-5x is the SERVER: its manual (5.2) says the LIS connects to
+        // the analyzer's own address on a port "fixed as 5100". It never dials
+        // out, so this app has to.
+        tcpRole = InstrumentTcpRole.CONNECT,
+        defaultTcpPort = 5100,
     ),
     // I2: astm_serial (generic ASTM E1394 bidirectional, host query)
     // I3: hl7_tcp (Erba CXL Pro Plus — HL7 v2.3.1 over TCP, QRY/DSR)

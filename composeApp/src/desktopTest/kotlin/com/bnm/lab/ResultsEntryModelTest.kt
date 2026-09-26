@@ -222,7 +222,7 @@ class ResultsEntryModelTest {
         val jobN = launch { repo.instrumentNamesFlow().collect { seenN.send(it) } }
         assertTrue(withTimeout(5_000) { seenN.receive() }.isEmpty())
         val now = "2026-09-10T05:00:00Z"
-        db.instrumentsQueries.upsertInstrument("i9", "Sysmex XN-350", "mindray_hl7", "tcp", null, 115200L, 5501L, 1L, null, now, now, 0L, null)
+        db.instrumentsQueries.upsertInstrument("i9", "Sysmex XN-350", "mindray_hl7", "tcp", null, 115200L, 5501L, 1L, null, now, now, 0L, null, null)
         assertEquals(setOf("Sysmex XN-350"), withTimeout(5_000) { seenN.receive() })
         jobN.cancel()
     }
@@ -251,7 +251,7 @@ class ResultsEntryModelTest {
         job.cancel()
 
         val now = "2026-09-10T05:00:00Z"
-        db.instrumentsQueries.upsertInstrument("i1", " Mindray BC-5130 ", "mindray_hl7", "tcp", null, 115200L, 5500L, 1L, null, now, now, 0L, null)
+        db.instrumentsQueries.upsertInstrument("i1", " Mindray BC-5130 ", "mindray_hl7", "tcp", null, 115200L, 5500L, 1L, null, now, now, 0L, null, null)
         assertEquals(setOf("Mindray BC-5130"), repo.instrumentNames())
     }
 }

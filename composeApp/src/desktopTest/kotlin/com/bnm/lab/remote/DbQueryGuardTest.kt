@@ -154,7 +154,7 @@ class DbQueryGuardTest {
         AppDatabase.Schema.create(driver)
         val db = AppDatabase(driver)
         val now = "2026-09-25T10:00:00Z"
-        db.instrumentsQueries.upsertInstrument("i1", "Mispa", "mispa_count_x", "tcp", null, 115200L, 5500L, 1L, null, now, now, 0L, null)
+        db.instrumentsQueries.upsertInstrument("i1", "Mispa", "mispa_count_x", "tcp", null, 115200L, 5500L, 1L, null, now, now, 0L, null, null)
 
         val ro = JdbcReadOnlySql(file)
 

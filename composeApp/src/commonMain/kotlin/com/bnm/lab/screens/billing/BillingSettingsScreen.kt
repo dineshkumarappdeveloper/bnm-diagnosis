@@ -22,12 +22,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.Biotech
-import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Cable
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.CloudSync
 import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Key
+import androidx.compose.material.icons.outlined.Monitor
 import androidx.compose.material.icons.outlined.Numbers
 import androidx.compose.material.icons.outlined.People
 import androidx.compose.material.icons.outlined.Percent
@@ -45,6 +46,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -66,19 +68,21 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.bnm.lab.api.BillingApi
+import com.bnm.lab.auth.AuthRepository
 import com.bnm.lab.backup.BackupController
 import com.bnm.lab.backup.BackupCopy
 import com.bnm.lab.backup.BackupStatus
-import com.bnm.lab.billing.BillingScope
-import com.bnm.lab.auth.AuthRepository
 import com.bnm.lab.billing.BillingPrefs
+import com.bnm.lab.billing.BillingScope
 import com.bnm.lab.billing.PrintProfiles
-import com.bnm.lab.report.ReportPrefs
-import com.bnm.lab.screens.staff.signatureSummary
 import com.bnm.lab.chat.LocalBillingRepository
 import com.bnm.lab.chat.LocalSyncEngine
 import com.bnm.lab.chat.currentFy
+import com.bnm.lab.lab.DiagnosisPrefs
+import com.bnm.lab.lab.ViewMode
+import com.bnm.lab.report.ReportPrefs
 import com.bnm.lab.screens.backup.nowMs
+import com.bnm.lab.screens.staff.signatureSummary
 import com.bnm.lab.staff.LocalStaffSession
 import com.bnm.lab.sync.LabSyncEngine
 import com.bnm.lab.ui.theme.AppTheme
@@ -128,6 +132,9 @@ fun BillingSettingsScreen(
     labName: String = "BNM Lab",
     /** I0: opens Instruments (analyzer interfacing). Null hides the row. */
     onOpenInstruments: (() -> Unit)? = null,
+    /** Settings ▸ View mode changed. The pref is ALREADY written when this
+     *  fires; the host re-points home so the change is visible at once. */
+    onViewModeChanged: (ViewMode) -> Unit = {},
     /** Live one-liner for the Instruments row ("2 listening", "a listener is down"). */
     instrumentsSummary: String? = null,
     /** Backup pendrive (offline edition, desktop only): renders the row when provided. */
@@ -167,6 +174,11 @@ fun BillingSettingsScreen(
     var savingSettings by remember { mutableStateOf(false) }
     var gstMsg by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(settings) { settings?.taxId?.let { if (taxId.isBlank()) taxId = it } }
+
+    // ── View mode (device-local: this PC only) ──
+    val diagPrefs = remember { DiagnosisPrefs() }
+    var viewMode by remember { mutableStateOf(diagPrefs.viewMode) }
+    var showViewModeDialog by remember { mutableStateOf(false) }
 
     // ── Barcode scanner ──
     val prefs = remember { BillingPrefs() }
@@ -270,6 +282,20 @@ fun BillingSettingsScreen(
                             onClick = onOpenInstruments,
                         )
                     }
+                    RowDivider()
+                    SettingsRow(
+                        icon = Icons.Outlined.Monitor,
+                        tint = MaterialTheme.colorScheme.primary,
+                        title = "View mode",
+                        subtitle = viewMode.label + " · " +
+                            if (viewMode == ViewMode.MACHINE_ONLY) {
+                                "home shows the analyzer only"
+                            } else {
+                                "patients, orders, billing, reports"
+                            },
+                        subtitleMaxLines = 2,
+                        onClick = { showViewModeDialog = true },
+                    )
                 }
             }
 
@@ -462,6 +488,56 @@ fun BillingSettingsScreen(
     }
 
     // ── Barcode scanner (a switch and a mode → dialog) ──
+    // View mode. The choice is applied the moment it is picked — the host
+    // watches the pref and swaps home — so the dialog has no Save button and
+    // says plainly that nothing is deleted, because "Machine only" hiding the
+    // patient list is exactly the thing an operator fears it has destroyed.
+    if (showViewModeDialog) {
+        AlertDialog(
+            onDismissRequest = { showViewModeDialog = false },
+            title = { Text("View mode") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ViewMode.entries.forEach { mode ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    viewMode = mode
+                                    diagPrefs.viewMode = mode
+                                    onViewModeChanged(mode)
+                                    showViewModeDialog = false
+                                }
+                                .padding(vertical = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.Top,
+                        ) {
+                            RadioButton(selected = viewMode == mode, onClick = null)
+                            Column {
+                                Text(mode.label, style = MaterialTheme.typography.bodyLarge)
+                                Text(
+                                    mode.detail,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        "This setting is for this computer only. Nothing is deleted — " +
+                            "switch back to Full lab and every patient, order and report " +
+                            "is where you left it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showViewModeDialog = false }) { Text("Close") }
+            },
+        )
+    }
+
     if (showBarcodeDialog) {
         AlertDialog(
             onDismissRequest = { showBarcodeDialog = false },

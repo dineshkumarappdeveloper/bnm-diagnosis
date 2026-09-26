@@ -52,6 +52,9 @@ import com.bnm.lab.connectivity.ConnectivityMonitor
 import com.bnm.lab.connectivity.LocalConnectivity
 import com.bnm.lab.db.createAppDatabase
 import com.bnm.lab.instruments.InstrumentEngine
+import com.bnm.lab.lab.DiagnosisPrefs
+import com.bnm.lab.lab.ViewMode
+import com.bnm.lab.screens.machine.MachineHomeScreen
 import com.bnm.lab.lab.AccessionSeat
 import com.bnm.lab.lab.LabRepository
 import com.bnm.lab.lab.LocalLabRepository
@@ -718,6 +721,22 @@ fun App() {
                         val labName = licState.labName
                             ?: authRepository.getSelectedBusinessName()
                             ?: "BNM Lab"
+
+                        // Machine-only mode (Settings ▸ View mode) replaces home
+                        // outright. Branching HERE rather than at every navigate()
+                        // means the dozen existing paths back to LabHome keep
+                        // working and the setting is the single switch — and a
+                        // lab that switches back finds everything where it was,
+                        // because nothing else in the graph changed.
+                        if (DiagnosisPrefs().viewMode == ViewMode.MACHINE_ONLY) {
+                            MachineHomeScreen(
+                                engine = instrumentEngine,
+                                labName = labName,
+                                onOpenSettings = { navController.navigate(Screen.Settings.route) },
+                                onOpenInstruments = { navController.navigate(Screen.Instruments.route) },
+                            )
+                            return@composable
+                        }
 
                         // First-sync once per device per business, gated on the invoice cursor.
                         LaunchedEffect(businessId, licState.isStandalone) {

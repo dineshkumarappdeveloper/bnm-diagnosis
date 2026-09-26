@@ -22,16 +22,17 @@ class InstrumentSchemaTest {
         }
 
     @Test
-    fun `analyzer_host is the last column of a fresh schema`() {
+    fun `tcp_role is the last column of a fresh schema`() {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         AppDatabase.Schema.create(driver)
         val cols = columns(driver)
-        assertEquals("analyzer_host", cols.last(), cols.toString())
-        assertEquals("verify_pending", cols[cols.size - 2], cols.toString())
+        assertEquals("tcp_role", cols.last(), cols.toString())
+        assertEquals("analyzer_host", cols[cols.size - 2], cols.toString())
+        assertEquals("verify_pending", cols[cols.size - 3], cols.toString())
     }
 
     @Test
-    fun `an installed database gains analyzer_host last through the column self-heal, and the upsert round-trips it`() {
+    fun `an installed database gains the appended columns through the self-heal, and the upsert round-trips them`() {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         AppDatabase.Schema.create(driver)
         driver.execute(null, "DROP TABLE instruments", 0)
@@ -44,13 +45,19 @@ class InstrumentSchemaTest {
         repeat(2) {
             driver.addColumn("instruments", "verify_pending", "INTEGER NOT NULL DEFAULT 0")
             driver.addColumn("instruments", "analyzer_host", "TEXT")
+            driver.addColumn("instruments", "tcp_role", "TEXT")
         }
         val cols = columns(driver)
-        assertEquals("analyzer_host", cols.last(), cols.toString())
+        assertEquals("tcp_role", cols.last(), cols.toString())
 
         val db = AppDatabase(driver)
         assertNull(db.instrumentsQueries.instrumentById("old").executeAsOne().analyzer_host)
-        db.instrumentsQueries.upsertInstrument("old", "Old", "mispa_count_x", "tcp", null, 115200L, 5500L, 1L, null, "a", "c", 0L, "192.168.1.77")
-        assertEquals("192.168.1.77", db.instrumentsQueries.instrumentById("old").executeAsOne().analyzer_host)
+        db.instrumentsQueries.upsertInstrument("old", "Old", "mispa_count_x", "tcp", null, 115200L, 5500L, 1L, null, "a", "c", 0L, "192.168.1.77", "connect")
+        val back = db.instrumentsQueries.instrumentById("old").executeAsOne()
+        assertEquals("192.168.1.77", back.analyzer_host)
+        // A row written before this column existed reads null, and null MUST
+        // mean listen: defaulting it the other way would turn every installed
+        // listener into a dialler pointed at a blank address.
+        assertEquals("connect", back.tcp_role)
     }
 }

@@ -225,6 +225,14 @@ data class ReportRow(
     val ref: String,
     /** Raw flag as stored: N | L | H | CL | CH | A | null. */
     val flag: String?,
+    /**
+     * A SUB-HEADING inside the table ("DIFFERENTIAL COUNT"), not a result:
+     * [param] is drawn bold across the full width and the value/unit/ref/flag
+     * columns are left empty. Reference CBC sheets group their rows this way,
+     * and machine-only mode reproduces that grouping; every other caller
+     * leaves this false and is unaffected.
+     */
+    val heading: Boolean = false,
 )
 
 /**
@@ -245,7 +253,37 @@ class ReportGraph(
     val image: ByteArray? = null,
     /** Axis unit printed in the box corner — "fL" for the RBC/PLT volume axes. */
     val xLabel: String? = null,
+    /**
+     * Full-scale x value of the histogram's LAST channel, in [xLabel] units —
+     * the analyzer's fixed measuring range (RBC 0–300 fL, PLT 0–40 fL on the
+     * BC-5x). When set with [xTickStep], the renderers label the axis, which is
+     * what makes a printed histogram readable: a curve with no numbers under it
+     * says a population exists but not where it sits, and "where" is the whole
+     * clinical point of an RBC or PLT distribution.
+     */
+    val xAxisMax: Double? = null,
+    /** Spacing of the labelled ticks, in the same units (100 fL, 10 fL). */
+    val xTickStep: Double? = null,
+    /**
+     * Y-axis name drawn at the top-left of the box — "LAS" on the DIFF
+     * scattergram, whose axes are named quantities rather than a unit scale.
+     * A scattergram without its axis names is an ink blot: the reader cannot
+     * tell which way absorption runs and which way scatter does.
+     */
+    val yLabel: String? = null,
 ) {
+    /** The tick values to print, 0..[xAxisMax]; empty when the axis is unscaled. */
+    val xTicks: List<Double>
+        get() {
+            val max = xAxisMax ?: return emptyList()
+            val step = xTickStep ?: return emptyList()
+            if (max <= 0.0 || step <= 0.0 || max / step > 20) return emptyList()
+            val out = ArrayList<Double>()
+            var v = 0.0
+            while (v <= max + 1e-9) { out += v; v += step }
+            return out
+        }
+
     val hasCurve: Boolean get() = points.size >= 2 && points.any { it > 0.0 }
     val hasImage: Boolean get() = image != null && image.isNotEmpty()
 }

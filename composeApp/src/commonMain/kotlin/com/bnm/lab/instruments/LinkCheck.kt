@@ -228,7 +228,12 @@ object LinkCheck {
 
     private fun listening(cfg: InstrumentConfig, status: InstrumentStatus?): LinkCheckRow {
         val port = cfg.tcpPort
-        val title = "BNM Lab is listening on port ${port ?: "?"}"
+        val dialling = InstrumentTcpRole.normalise(cfg.tcpRole) == InstrumentTcpRole.CONNECT
+        val title = if (dialling) {
+            "BNM Lab dials ${cfg.analyzerHost?.trim().orEmpty().ifBlank { "the analyzer" }}:${port ?: "?"}"
+        } else {
+            "BNM Lab is listening on port ${port ?: "?"}"
+        }
         if (!cfg.enabled) return LinkCheckRow("listening", LinkState.BLOCKED, title,
             "This analyzer is switched off in BNM Lab",
             "Turn the analyzer's switch on in the list above, then check again.")
@@ -271,6 +276,16 @@ object LinkCheck {
         // make at the analyzer — say so rather than naming one at random.
         val use = if (best.size == 1) "use ${best.first()}"
             else "use whichever of ${best.joinToString(" or ")} is on the analyzer's network"
+        if (InstrumentTcpRole.normalise(cfg.tcpRole) == InstrumentTcpRole.CONNECT) {
+            // Nothing is typed into the analyzer in this direction: it already
+            // serves on its own address and port, and BNM Lab calls it. Saying
+            // "set the host to 10.0.0.10" would send a bench looking for a
+            // field the BC-5x does not have.
+            return LinkCheckRow("address", LinkState.OK, title,
+                "${best.joinToString(", ")}$more — nothing to enter on the analyzer: " +
+                    "BNM Lab calls it on ${cfg.analyzerHost?.trim().orEmpty().ifBlank { "its address" }}:" +
+                    "${cfg.tcpPort ?: "?"}")
+        }
         return LinkCheckRow("address", LinkState.OK, title,
             "${best.joinToString(", ")}$more — on the analyzer's LIS settings $use, " +
                 "port ${cfg.tcpPort ?: "?"}, TCP client mode")
@@ -459,6 +474,9 @@ object LinkCheck {
                 " port ${cfg.tcpPort ?: "?"}"
         val hint = if (cfg.transport == InstrumentTransport.SERIAL)
             "On the analyzer, press Send / Transmit (and turn on auto-transmit so every sample is sent). Then run a sample."
+        else if (InstrumentTcpRole.normalise(cfg.tcpRole) == InstrumentTcpRole.CONNECT)
+            "BNM Lab calls the analyzer, so there is no host address to set on it. Check the analyzer is " +
+                "switched on and its Comm. Protocol is HL7, turn on Auto communication, then run a sample."
         else "On the analyzer's LIS / host settings, set the host to $where, TCP client mode, and enable auto-transmit. " +
             "Then press Send / Transmit for the last sample, or run one."
         return LinkCheckRow("connected", LinkState.WAITING, title, "Nothing received$since", hint)
