@@ -268,6 +268,8 @@ class MachineGraphNoteTest {
     fun `bitmap mode names the analyzer setting that can send all four`() {
         // Only WBC and DIFF have bitmap codes in the protocol, so this is the
         // most a Bitmap-mode analyzer can ever send.
+        // A WBC BITMAP is the proof: it is the only histogram the protocol
+        // can send as a picture.
         val frame = base().copy(images = mapOf("wbc" to "QkE=", "diff" to "QkE="))
         val built = assertNotNull(MachineReport.build(frame))
         val note = assertNotNull(built.graphNote, "a short panel must explain itself")
@@ -287,6 +289,18 @@ class MachineGraphNoteTest {
         )
         val built = assertNotNull(MachineReport.build(frame))
         assertNull(built.graphNote, "nothing is missing, so there is nothing to say")
+    }
+
+    @Test
+    fun `a scattergram alone does not prove the histograms are bitmaps`() {
+        // The DIFF scattergram is ALWAYS a bitmap. An analyzer correctly on
+        // Data whose histogram we failed to read still has one — telling that
+        // lab to change a setting it already changed is the worst outcome.
+        val frame = base().copy(images = mapOf("diff" to "QkE="))
+        val built = assertNotNull(MachineReport.build(frame))
+        val note = assertNotNull(built.graphNote)
+        assertFalse(note.contains("sending graphs as Bitmap"), note)
+        assertTrue(note.contains("not sent by the analyzer"), note)
     }
 
     @Test

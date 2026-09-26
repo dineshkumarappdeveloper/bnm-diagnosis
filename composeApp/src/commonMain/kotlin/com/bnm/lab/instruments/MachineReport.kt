@@ -167,14 +167,25 @@ object MachineReport {
                 "the layout. Send this line to BNM support — the data is arriving, it is the decoding " +
                 "that needs fixing."
         }
-        // Bitmap mode is identifiable: a picture arrived for something.
-        val bitmapMode = frame.images.isNotEmpty() && frame.histograms.isEmpty()
+        // Bitmap mode is proved by a WBC BITMAP, and by nothing else.
+        //
+        // The earlier test — "some picture arrived and no curves did" — was
+        // wrong, because the DIFF scattergram is ALWAYS a bitmap. An analyzer
+        // correctly switched to Data whose histogram we then failed to read
+        // would still have its scattergram, and would be told to go and change
+        // a setting it had already changed.
+        val bitmapMode = frame.images.containsKey("wbc")
         return if (bitmapMode) {
             "$names histograms are missing because the analyzer is sending graphs as Bitmap, " +
                 "which the protocol only supports for WBC and DIFF. On the analyzer set " +
                 "\"Histogram Transmitted as\" to Data (leave Scattergram on Bitmap) to get all four."
         } else {
-            "$names histograms were not sent by the analyzer."
+            // No curve, no bitmap and no decode error: nothing for these
+            // arrived at all. Name both settings that cause it, because from
+            // here they are indistinguishable.
+            "$names histograms were not sent by the analyzer. On the analyzer check " +
+                "\"Histogram Transmitted as\" is set to Data (not \"Not transmitted\"), " +
+                "and that the change was saved."
         }
     }
 
