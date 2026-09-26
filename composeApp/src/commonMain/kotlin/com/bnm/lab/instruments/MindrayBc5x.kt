@@ -319,40 +319,65 @@ object MindrayBc5x {
         }.getOrNull() ?: return emptyList()
         val skip = metaLength.coerceAtLeast(0)
 
-        // FIRST the documented reading, unchanged — it is what a BC-5130
-        // actually sends and what the fixtures pin.
+        // WHY NOT "the first reading that fits".
+        //
+        // The layout is undocumented ("customized", manual 6.2) and the same
+        // byte count is ambiguous: 256 bytes is either 256 one-byte channels
+        // or 128 two-byte ones, and only the data can say which. Taking the
+        // first reading of an acceptable SIZE picks wrong about a third of the
+        // time and then never looks further — which is how a histogram the lab
+        // can see in another LIS came out blank here.
+        //
+        // So every reading is scored. A histogram is SMOOTH: neighbouring
+        // channels differ a little, because cells of nearly the same size are
+        // nearly as common. Read with the wrong width, offset or byte order,
+        // the same bytes become high-frequency noise. Roughness therefore
+        // separates the true reading from its impostors without knowing the
+        // layout in advance — and it is measured relative to the curve's own
+        // height, so a 16-bit reading is not punished for having bigger
+        // numbers than an 8-bit one.
+        // The documented reading leads the field: it is right for a BC-5130
+        // and it is what decides an all-zero payload, where smoothness cannot.
         val primary = when {
             skip in 2..4 && bytes.size == skip * 256 -> littleEndian(bytes, 0, skip)
             bytes.size <= skip -> emptyList()
             (bytes.size - skip) % 2 == 0 && bytes.size - skip > 256 -> littleEndian(bytes, skip, 2)
             else -> littleEndian(bytes, skip, 1)
         }
-        if (primary.size in ACCEPTED_CHANNELS) return primary
-
-        // ONLY THEN the alternatives. The vendor calls this layout
-        // "customized" and documents only the envelope, so a histogram that
-        // does not match the shape above is likelier to be a layout we have
-        // not met than to be corrupt — and the old code answered "nothing" to
-        // both, leaving an empty box and no way to tell them apart.
-        //
-        // Every candidate is still gated on [ACCEPTED_CHANNELS]: tolerance
-        // about OFFSET and WIDTH is safe, tolerance about what counts as a
-        // histogram is not. A wrong reading that happened to land on 256
-        // points would draw a plausible-looking curve from misaligned bytes,
-        // which on a clinical report is worse than a blank.
-        val alternatives = buildList {
-            if (bytes.size > skip) {
-                add(littleEndian(bytes, skip, 2))
-                add(littleEndian(bytes, skip, 1))
-                add(bigEndian(bytes, skip, 2))
+        val candidates = buildList {
+            add(primary)
+            for (from in linkedSetOf(0, skip)) {
+                if (from >= bytes.size) continue
+                add(littleEndian(bytes, from, 1))
+                add(littleEndian(bytes, from, 2))
+                add(littleEndian(bytes, from, 4))
+                add(bigEndian(bytes, from, 2))
             }
-            add(littleEndian(bytes, 0, 2))
-            add(littleEndian(bytes, 0, 1))
-            add(bigEndian(bytes, 0, 2))
         }
-        // All-zero means the offset is wrong, not that the patient has none.
-        return alternatives.firstOrNull { it.size in ACCEPTED_CHANNELS && it.any { v -> v > 0.0 } }
+        val acceptable = candidates.filter { it.size in ACCEPTED_CHANNELS }
+        // A blank run IS a legitimate histogram — a background count is all
+        // zeros — so an empty curve is never grounds to reject a reading. It
+        // simply cannot be scored, since roughness needs a height to divide
+        // by, and there the documented reading decides.
+        val measurable = acceptable.filter { it.any { v -> v > 0.0 } }
+        return measurable.minByOrNull { roughness(it) }
+            ?: acceptable.firstOrNull()
             ?: emptyList()
+    }
+
+    /**
+     * How un-histogram-like a reading is: the average step between channels,
+     * as a fraction of the curve's height. A real distribution scores low;
+     * bytes read at the wrong width or offset score high, because every other
+     * value is then a high byte that has nothing to do with its neighbour.
+     */
+    private fun roughness(points: List<Double>): Double {
+        if (points.size < 2) return Double.MAX_VALUE
+        val max = points.max()
+        if (max <= 0.0) return Double.MAX_VALUE
+        var steps = 0.0
+        for (i in 1 until points.size) steps += kotlin.math.abs(points[i] - points[i - 1])
+        return steps / (max * points.size)
     }
 
     /** Channel counts a hematology histogram can have (BC-5130: 256). */

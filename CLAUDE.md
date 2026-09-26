@@ -112,9 +112,11 @@ with `claude mcp add`). Engineer's runbook: `docs/remote-support/RUNBOOK.md`.
   `RemoteSupportKeys.kt` and ship a build BEFORE revoking the old key on the
   engineers' machines. The paste is checked for SHAPE (a 44-byte Ed25519
   SPKI) by `checkSupportKeyNotDev` and `RemoteSupportKeysReleaseTest`: a
-  truncated one verifies nothing and stops the app starting on every lab. 🔴 This branch embeds the DEV key whose private half is
-  committed (`tools/remote-mcp/test/dev-support.key`) — `lab.overview` reports
-  `support_key: dev`; REPLACE before release. Relay token: `wrangler secret
+  truncated one verifies nothing and stops the app starting on every lab. The
+  PRODUCTION key was generated and embedded 2026-09-26 (`lab.overview` reports
+  `support_key: prod`); its private half lives only at
+  `~/.config/bnmlab-remote/support.key` on the support engineer's machine and
+  is in no repository, CI secret or backup. Relay token: `wrangler secret
   put BNM_SUPPORT_TOKEN`; relay licence key mirrors `docs/license-public-key.jwk.json`.
 - **Verify:** `./gradlew :composeApp:desktopTest :composeApp:compileDebugKotlinAndroid`,
   `cd relay && npm test`, `cd tools/remote-mcp && node --test`. End to end
