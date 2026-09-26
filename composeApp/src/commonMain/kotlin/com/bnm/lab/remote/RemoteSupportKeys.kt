@@ -17,17 +17,17 @@ package com.bnm.lab.remote
  */
 object RemoteSupportKeys {
     /**
-     * ┌──────────────────────────────────────────────────────────────────────┐
-     * │  REPLACE BEFORE RELEASE.                                              │
-     * │  This is the DEV keypair from tools/remote-mcp/test/dev-support.*,    │
-     * │  whose PRIVATE half is committed in this repository so the bridge and │
-     * │  app tests can sign. A shipped build carrying it would let anyone     │
-     * │  with the repo drive any lab that reads them a session code.          │
-     * │  Generate the real key with `bnmlab-remote.mjs keygen`, paste its     │
-     * │  SPKI here, and `isDevKey` turns false (lab.overview reports it).     │
-     * └──────────────────────────────────────────────────────────────────────┘
+     * The PRODUCTION support key, generated 2026-09-26. Its private half lives
+     * ONLY at `~/.config/bnmlab-remote/support.key` (0600) on the support
+     * engineer's machine and is in no repository, no CI secret and no backup
+     * that leaves that machine — lose it and no engineer can open a session
+     * until a new key ships; leak it and every lab on this build is reachable.
+     *
+     * To rotate: `bnmlab-remote.mjs keygen --force`, paste the new SPKI here,
+     * ship the build, and only THEN retire the old private key — a lab keeps
+     * trusting the key its installed build carries.
      */
-    const val SUPPORT_PUBLIC_KEY_SPKI_B64 = "MCowBQYDK2VwAyEAKRprPO/KtAKrrHADx75Xi0ZZzgWaSU7fTaI0wrq9aMA="
+    const val SUPPORT_PUBLIC_KEY_SPKI_B64 = "MCowBQYDK2VwAyEAmvvVrnkRpRG+YtdOzQkxB55Yf3uV3qSuCRRLOlO8vvE="
 
     /** The committed dev key (tools/remote-mcp/test/dev-support.pub), kept to detect a build that still trusts it. */
     const val DEV_PUBLIC_KEY_SPKI_B64 = "MCowBQYDK2VwAyEAKRprPO/KtAKrrHADx75Xi0ZZzgWaSU7fTaI0wrq9aMA="
