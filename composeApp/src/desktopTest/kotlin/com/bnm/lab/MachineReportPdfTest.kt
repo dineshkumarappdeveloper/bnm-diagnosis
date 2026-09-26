@@ -165,4 +165,29 @@ class MachineReportPdfTest {
         assertTrue(path.isNotBlank(), "the renderer returned a path")
         println("MACHINE-ONLY SHEET: $path")
     }
+
+    /**
+     * A LONG accession, which is the normal shape once a lab uses seat-prefixed
+     * numbers ("ACC-S1-00042"). It used to run underneath the barcode, because
+     * the meta column and the bars shared a half with no boundary between them.
+     */
+    @Test
+    fun `a long accession renders beside the barcode, not under it`() {
+        val doc = assertNotNull(
+            MachineReportDoc.build(
+                frame = frame().copy(specimenId = "ACC-S1-00042"),
+                labName = "DR MURUGESAN MEMORIAL HOSPITAL",
+                letterheadLines = listOf(
+                    "16/5, Merpanaikkadu Rd, Keeramangalam North, Tamil Nadu - 614624",
+                    "Ph : +91 95979 93959 · Compassionate Care, trusted Healing",
+                ),
+                reported = "2026-09-26 17:30",
+                generatedAt = "2026-09-26 17:30",
+            ),
+        )
+        require(doc.accession == "ACC-S1-00042")
+        val path = writeLabReportPdf(doc)
+        assertTrue(path.isNotBlank())
+        println("LONG-ACCESSION SHEET: $path")
+    }
 }

@@ -374,8 +374,16 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         val pad = 9f
         val lineH = 13f
         val labelW = 62f
-        val colW = contentW / 2f
-        val valueW = colW - labelW - pad * 2f
+        // THREE columns, sized explicitly: patient | meta | barcode. They used
+        // to be two halves with the barcode laid over the second, which left a
+        // gap between columns one and two AND let a long accession run under
+        // the bars ("ACC-S1-00042" did exactly that).
+        val patientW = contentW * 0.40f
+        val metaW = contentW * 0.34f
+        val barcodeW = contentW - patientW - metaW
+        val colW = patientW
+        val valueW = patientW - labelW - pad * 2f
+        val metaValueW = metaW - labelW - pad
 
         data class Cell(val label: String, val value: String, val font: PDFont, val size: Float, val color: Color)
 
@@ -393,11 +401,11 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
                 if (doc.priority != null) awt(ReportColors.HIGH_RED) else ink),
         )
 
-        fun columnLines(cells: List<Cell>): List<Pair<Cell, List<String>>> =
-            cells.map { it to wrapText(it.value, it.font, it.size, valueW) }
+        fun columnLines(cells: List<Cell>, w: Float): List<Pair<Cell, List<String>>> =
+            cells.map { it to wrapText(it.value, it.font, it.size, w) }
 
-        val leftCol = columnLines(leftCells)
-        val rightCol = columnLines(rightCells)
+        val leftCol = columnLines(leftCells, valueW)
+        val rightCol = columnLines(rightCells, metaValueW)
         val leftH = leftCol.sumOf { it.second.size } * lineH
         val rightH = rightCol.sumOf { it.second.size } * lineH
         // The accession barcode sits at the top of the right column, above
@@ -420,9 +428,9 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         }
 
         if (bars != null) {
-            // Capped so it cannot reach left into the meta column now that the
-            // two share a line.
-            val module = minOf(BARCODE_MODULE_MM * MM, (colW * 0.44f) / bars.size)
+            // Confined to the third column: whatever the accession's length,
+            // the bars start no further left than the column does.
+            val module = minOf(BARCODE_MODULE_MM * MM, (barcodeW - pad * 2f) / bars.size)
             val bw = module * bars.size
             drawBars(bars, right - pad - bw, y - pad - barH, module, barH)
         }
@@ -438,7 +446,7 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
             }
         }
         drawColumn(leftCol, left + pad, y - pad - 9f)
-        drawColumn(rightCol, left + colW + pad, y - pad - 9f)
+        drawColumn(rightCol, left + patientW + pad, y - pad - 9f)
         y -= boxH + 14f
         // Per-test release: what this sheet does NOT cover, on every sheet, so
         // a partial report can never be mistaken for the whole order.
@@ -714,7 +722,7 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         // twenty-five of those is the difference between a one-page CBC and a
         // two-page one. Shrinking is the cheaper trade: the name stays legible
         // a point or two down, and only a genuinely enormous name still wraps.
-        var paramSize = 8.3f
+        var paramSize = 7.7f
         while (paramSize > 6.2f && textWidth(row.param, fontR, paramSize) > wParam - 10f) {
             paramSize -= 0.25f
         }
@@ -770,7 +778,10 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         val verifierImage: ByteArray? = doc.verifierSignature?.imagePng?.takeIf { it.isNotEmpty() }
         /** The gap is where a pen would go; an image needs a little more room.
          *  One gap for both columns, so the two rules stay level. */
-        val gap = if (sigImage != null || verifierImage != null) 48f else 34f
+        // The gap above the rule is where a person physically signs. 34pt is
+        // ~12mm, which is not enough room for a signature and left the rule
+        // crowding whatever ended above it — usually the graph panel.
+        val gap = if (sigImage != null || verifierImage != null) 48f else 52f
 
         val qr = doc.qr?.takeIf { it.matrix.size > 0 }
         val qrSide = QR_MM * MM
