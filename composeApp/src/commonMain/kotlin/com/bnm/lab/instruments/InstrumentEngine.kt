@@ -95,7 +95,33 @@ import kotlin.uuid.Uuid
  * erased by a stale optimistic one. Result ingest only stamps `lastFrameAt`;
  * state changes belong to the transports.
  */
+/**
+ * How hard the dial loop is allowed to knock.
+ *
+ * 🔴 The analyzer is an embedded instrument with a small socket table, and it
+ * is the thing the lab cannot work without. Redialling it in a tight loop is
+ * not merely untidy — a BC-5130 was driven into "Error is detected! The
+ * program stops running" by a one-per-second reconnect, and only unplugging
+ * the LAN cleared it.
+ */
+private const val MIN_REDIAL_MS = 5_000L
+
+/** Ceiling, for an analyzer switched off overnight. */
+private const val MAX_REDIAL_MS = 60_000L
+
+/**
+ * How long a connection carrying NO data must last to count as having worked.
+ * Below this, "connected" and "refused" are the same event for pacing: an
+ * analyzer that accepts and instantly drops must not reset the backoff, or
+ * the loop never backs off at all.
+ */
+private const val WORTHWHILE_CONNECTION_MS = 30_000L
+
+private fun nowMillis(): Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
+
 @OptIn(ExperimentalUuidApi::class)
+
+
 class InstrumentEngine(
     private val db: AppDatabase,
     private val labRepo: LabRepository,
@@ -403,13 +429,14 @@ class InstrumentEngine(
      */
     private suspend fun tcpDialLoop(cfg: InstrumentConfig, host: String, port: Int) {
         val selector = SelectorManager(Dispatchers.Default)
-        var backoffMs = 1_000L
+        var backoffMs = MIN_REDIAL_MS
         var lastError: String? = null
         try {
             while (currentCoroutineContext().isActive) {
                 try {
                     val socket = aSocket(selector).tcp().connect(host, port)
-                    backoffMs = 1_000L
+                    val openedAt = nowMillis()
+                    var bytesThisConnection = 0L
                     lastError = null
                     loggedBindFailure.remove(cfg.id)
                     setStatus(
@@ -425,14 +452,35 @@ class InstrumentEngine(
                         while (true) {
                             val n = channel.readAvailable(buf, 0, buf.size)
                             if (n < 0) break
-                            if (n > 0) assembler.submit(buf.copyOf(n))
+                            if (n > 0) {
+                                bytesThisConnection += n
+                                assembler.submit(buf.copyOf(n))
+                            }
                         }
                     } finally {
                         // Drain BEFORE closing: the last chunk may complete a
                         // message whose ACK still has to go out on this socket.
                         try { assembler.finish() } finally { runCatching { socket.close() } }
                     }
-                    logRow(cfg, "info", "Analyzer closed the connection", null)
+                    // 🔴 A CONNECTION THAT OPENS AND CLOSES IS NOT A SUCCESS.
+                    //
+                    // The backoff used to reset the moment connect() returned,
+                    // so an analyzer that accepts and immediately drops left us
+                    // redialling once a second, for ever. Against a PC that is
+                    // untidy; against an embedded analyzer with a small socket
+                    // table it is a flood, and the instrument is the thing the
+                    // lab cannot do without. The reset now needs a connection
+                    // that did something — carried bytes, or stayed up long
+                    // enough to be real.
+                    val livedMs = nowMillis() - openedAt
+                    if (bytesThisConnection > 0L || livedMs >= WORTHWHILE_CONNECTION_MS) {
+                        backoffMs = MIN_REDIAL_MS
+                    }
+                    logRow(
+                        cfg, "info",
+                        "Analyzer closed the connection after ${livedMs}ms, $bytesThisConnection bytes",
+                        null,
+                    )
                     setStatus(cfg.id, InstrumentStatus("connecting", "Reconnecting to $host:$port"))
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
@@ -449,7 +497,7 @@ class InstrumentEngine(
                     setStatus(cfg.id, InstrumentStatus("error", "Can't reach $host:$port — is the analyzer on?"))
                 }
                 delay(backoffMs)
-                backoffMs = (backoffMs * 2).coerceAtMost(30_000L)
+                backoffMs = (backoffMs * 2).coerceAtMost(MAX_REDIAL_MS)
             }
         } finally {
             runCatching { selector.close() }
