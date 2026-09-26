@@ -48,8 +48,36 @@ class DiagnosisPrefs {
         get() = s.getString(K_MACHINE_REFERRER, "")
         set(v) = s.putString(K_MACHINE_REFERRER, v.trim())
 
+    /**
+     * Machine-only mode: print each incoming result as it arrives, with no
+     * operator action.
+     *
+     * DELIBERATELY NOT OFFERED IN FULL LAB MODE. There a result belongs to an
+     * order and is printed after a pathologist verifies it; printing on
+     * arrival would put an unverified result on a patient's report and bypass
+     * the sign-off the workflow exists to enforce. Machine-only mode has no
+     * verification step by design — the lab prints what the analyzer sends —
+     * so there is nothing to bypass.
+     */
+    var autoPrint: Boolean
+        get() = s.getBoolean(K_AUTO_PRINT, false)
+        set(v) = s.putBoolean(K_AUTO_PRINT, v)
+
+    /**
+     * Results received at or before this stamp are NOT auto-printed.
+     *
+     * Set to "now" the moment the toggle is switched on, so enabling it does
+     * not empty a tray printing the whole day's backlog — and carried across
+     * restarts, so a reopened app does not reprint what it already printed.
+     */
+    var autoPrintAfter: String
+        get() = s.getString(K_AUTO_PRINT_AFTER, "")
+        set(v) = s.putString(K_AUTO_PRINT_AFTER, v)
+
     private companion object {
         const val K_LAST_EDITION = "lims_last_seen_edition"
+        const val K_AUTO_PRINT = "pref_machine_auto_print"
+        const val K_AUTO_PRINT_AFTER = "pref_machine_auto_print_after"
         const val K_PREFIX = "pref_accession_prefix"
         const val K_VIEW_MODE = "pref_view_mode"
         const val K_MACHINE_REFERRER = "pref_machine_referrer"

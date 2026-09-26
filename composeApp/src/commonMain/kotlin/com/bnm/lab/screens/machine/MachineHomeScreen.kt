@@ -27,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -108,6 +109,10 @@ fun MachineHomeScreen(
         logoRight = LetterheadLogo.decode(labRepo.letterheadLogo(LetterheadLogo.Side.RIGHT))
     }
 
+    var autoPrint by remember { mutableStateOf(diagPrefs.autoPrint) }
+    var autoPrinted by remember { mutableStateOf(setOf<String>()) }
+    var autoPrintError by remember { mutableStateOf<String?>(null) }
+
     var printing by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf<QueuedFrame?>(null) }
@@ -147,6 +152,57 @@ fun MachineHomeScreen(
         }
     }
 
+    /**
+     * Auto-print: every result that arrives goes straight to the printer.
+     *
+     * Three rules make this safe enough to leave running unattended:
+     *  · BACKGROUND COUNTS ARE NEVER PRINTED. They are the analyzer's own
+     *    blank, not a patient, and a tray of them is how a lab decides the
+     *    feature is broken and turns it off.
+     *  · A WATERMARK, persisted, decides what is "new". Switching the toggle
+     *    on stamps it with the current time, so enabling the feature does not
+     *    print the whole day's backlog; keeping it across restarts means a
+     *    reopened app does not reprint this morning's work.
+     *  · ONE AT A TIME, oldest first. Firing five jobs at one printer
+     *    concurrently is how pages come out interleaved.
+     */
+    LaunchedEffect(autoPrint, frames) {
+        if (!autoPrint) return@LaunchedEffect
+        val after = diagPrefs.autoPrintAfter
+        val due = frames
+            .filterNot { MachineReport.isBackgroundRun(it.frame) }
+            .filter { it.receivedAt > after && it.id !in autoPrinted }
+            .sortedBy { it.receivedAt }
+        for (row in due) {
+            val outcome = withContext(Dispatchers.Default) {
+                runCatching {
+                    val doc = MachineReportDoc.build(
+                        frame = row.frame,
+                        labName = labName,
+                        defaultReferrer = diagPrefs.machineReferrer,
+                        letterheadLines = prefs.letterheadLines(),
+                        logoLeftPng = logoLeft,
+                        logoRightPng = logoRight,
+                        mode = prefs.mode(),
+                        headerMm = prefs.headerMm.toFloat(),
+                        footerMm = prefs.footerMm.toFloat(),
+                        accentRgb = prefs.accentRgb,
+                        pagination = prefs.pagination(),
+                        reported = now(),
+                        generatedAt = now(),
+                    ) ?: return@runCatching "no machine-only layout for this analyzer"
+                    printPdf(writeLabReportPdf(doc))
+                }.getOrElse { it.message ?: "print failed" }
+            }
+            // Mark it done either way. A printer that is off should not make
+            // the app retry the same sheet on every refresh for the rest of
+            // the day — the row stays on screen with its Print button.
+            autoPrinted = autoPrinted + row.id
+            diagPrefs.autoPrintAfter = row.receivedAt
+            if (outcome.isNotBlank()) autoPrintError = "Auto-print: $outcome"
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -154,13 +210,32 @@ fun MachineHomeScreen(
                     Column {
                         Text(labName, style = MaterialTheme.typography.titleMedium)
                         Text(
-                            "Machine only · results print as the analyzer sends them",
+                            if (autoPrint) "Machine only · every result prints as it arrives"
+                            else "Machine only · results print as the analyzer sends them",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 },
                 actions = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Auto-print",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Switch(
+                            checked = autoPrint,
+                            onCheckedChange = { on ->
+                                autoPrint = on
+                                diagPrefs.autoPrint = on
+                                // Stamp the watermark ON ENABLE so the backlog
+                                // already on screen is not printed at once.
+                                if (on) diagPrefs.autoPrintAfter = nowIsoForWatermark()
+                            },
+                            modifier = Modifier.padding(start = 6.dp, end = 4.dp),
+                        )
+                    }
                     IconButton(onClick = onOpenInstruments) {
                         Icon(Icons.Outlined.Cable, contentDescription = "Analyzer connection")
                     }
@@ -240,6 +315,20 @@ fun MachineHomeScreen(
             row = row,
             onDismiss = { editing = null },
             onPrint = { header -> output(row, header, preview = false) },
+        )
+    }
+
+    autoPrintError?.let { text ->
+        AlertDialog(
+            onDismissRequest = { autoPrintError = null },
+            title = { Text("Auto-print") },
+            text = {
+                Text(
+                    "$text\n\nThe result is safe — it is still in the list and can be " +
+                        "printed with its Print button.",
+                )
+            },
+            confirmButton = { TextButton(onClick = { autoPrintError = null }) { Text("OK") } },
         )
     }
 
@@ -411,3 +500,10 @@ internal fun machineNowStamp(): String {
     fun p(n: Int) = n.toString().padStart(2, '0')
     return "${t.year}-${p(t.monthNumber)}-${p(t.dayOfMonth)} ${p(t.hour)}:${p(t.minute)}"
 }
+
+/**
+ * The watermark stamp. Matches the shape of `QueuedFrame.receivedAt` (a
+ * SQLite ISO-8601 string) so the two can be compared directly — anything
+ * cleverer would only be a second format to keep in step with the first.
+ */
+internal fun nowIsoForWatermark(): String = kotlin.time.Clock.System.now().toString()
