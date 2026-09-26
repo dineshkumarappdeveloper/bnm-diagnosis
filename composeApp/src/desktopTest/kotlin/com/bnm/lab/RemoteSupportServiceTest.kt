@@ -13,6 +13,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
@@ -132,6 +133,32 @@ class RemoteSupportServiceTest {
         val history = await { service.history(10) }
         assertEquals(listOf("echo.text"), history.map { it.tool })
         assertEquals(SupportAuditRow.Outcome.OK, history.single().outcome)
+    }
+
+    /**
+     * The consent dialog closes the moment a session starts, taking its
+     * rememberCoroutineScope with it — so start() finishes inside a scope that
+     * is already being cancelled. Seen in a real session: the session ran, its
+     * calls were signed and consent-checked, and the audit row saying WHO
+     * opened it and what they agreed to never landed.
+     */
+    @Test
+    fun `the session is audited even when the caller's scope is cancelled under it`() {
+        val t = readyTransport()
+        val caller = CoroutineScope(SupervisorJob() + executor.asCoroutineDispatcher())
+        val started = java.util.concurrent.CountDownLatch(1)
+        caller.launch {
+            service.start(SupportConsent(records = true), 3_600L, owner)
+            started.countDown()
+            // What the dialog does: closes, cancelling everything it owns.
+            caller.cancel()
+        }
+        assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS), "start() returned")
+        await { t.sent.receive() }
+
+        val row = audit.started.firstOrNull()
+        assertNotNull(row, "the start MUST be on record even though the caller was cancelled")
+        assertTrue(row.consent.records, "and with the consent the owner actually gave")
     }
 
     @Test

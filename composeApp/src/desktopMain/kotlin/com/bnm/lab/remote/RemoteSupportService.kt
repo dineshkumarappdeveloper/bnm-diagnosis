@@ -10,6 +10,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -149,7 +151,25 @@ class RemoteSupportService internal constructor(
                     "for ${duration}s consent=${consentFlags(consent)}")
             }
         }
-        runCatching { auditStore?.sessionStarted(r.session) }.logFailure("RemoteSupport", "audit session start")
+        // 🔴 NonCancellable, because the CALLER's scope dies under us.
+        //
+        // start() is invoked from the consent dialog, which closes the instant
+        // the session begins — taking its rememberCoroutineScope with it. The
+        // audit write inherited that scope and died with it
+        // (ForgottenCoroutineScopeException, seen in a real session), so a
+        // session ran with no record of who opened it or what they consented
+        // to. Every tool call was still signed and consent-checked; it was the
+        // EVIDENCE that went missing, which is the half that matters after the
+        // fact.
+        //
+        // NOT scope.launch: fire-and-forget would make the row merely likely,
+        // and an audit trail that is usually written is not an audit trail.
+        // NonCancellable keeps it inline and ordered while making it immune to
+        // the cancellation that was killing it.
+        withContext(NonCancellable) {
+            runCatching { auditStore?.sessionStarted(r.session) }
+                .logFailure("RemoteSupport", "audit session start")
+        }
         r.job = scope.launch { sessionLoop(r) }
         return r.firstConnect.await().map { r.session }
     }
@@ -313,8 +333,13 @@ class RemoteSupportService internal constructor(
             runCatching { t.close() }
         }
         val actions = _status.value.actions
-        runCatching { auditStore?.sessionEnded(r.session.id, clock.wallMs(), reason) }
-            .logFailure("RemoteSupport", "audit session end")
+        // Same hazard, and worse: finish() runs precisely while things are
+        // being torn down, so the closing row is the one most likely to be
+        // cancelled before it lands.
+        withContext(NonCancellable) {
+            runCatching { auditStore?.sessionEnded(r.session.id, clock.wallMs(), reason) }
+                .logFailure("RemoteSupport", "audit session end")
+        }
         AppLog.i("RemoteSupport", "session ${r.session.id.take(8)} ended: $reason ($actions actions)")
         if (run === r) _status.value = RemoteSupportStatus(phase = phase, lastError = error)
         // Ended before the first connect came back (End, or the app closing):
