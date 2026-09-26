@@ -105,6 +105,34 @@ actual fun printPdf(path: String): String = try {
     "Print failed: ${e.message}"
 }.also { AppLog.i("Report", "print: $it") }
 
+actual fun printPdfSilently(path: String, printerName: String?): String = try {
+    val f = File(path)
+    if (!f.exists()) "PDF not found: $path"
+    else PDDocument.load(f).use { pdf ->
+        val job = PrinterJob.getPrinterJob()
+        job.jobName = f.name
+        job.setPageable(PDFPageable(pdf))
+        // A named printer is honoured EXACTLY, and its absence is an error
+        // rather than a silent fall-through to the default. A lab that picked
+        // the A4 laser must never have a report appear on the label printer
+        // because the laser was offline that morning.
+        if (!printerName.isNullOrBlank()) {
+            val svc = PrinterJob.lookupPrintServices()
+                .firstOrNull { it.name.equals(printerName, ignoreCase = true) }
+                ?: return@use "Printer '$printerName' not found — check Settings ▸ Print settings"
+            job.printService = svc
+        }
+        job.print()
+        "Sent to ${job.printService?.name ?: "the default printer"}"
+    }
+} catch (e: Exception) {
+    AppLog.e("Report", "silent printing failed", e)
+    "Print failed: ${e.message}"
+}.also { AppLog.i("Report", "auto-print: $it") }
+
+actual fun availablePrinters(): List<String> =
+    runCatching { PrinterJob.lookupPrintServices().map { it.name } }.getOrDefault(emptyList())
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Replace/strip anything the base-14 WinAnsi encoding can't show. */

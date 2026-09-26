@@ -767,3 +767,9 @@ private class AndroidReportPainter(private val doc: ReportDoc) {
         y += 12f
     }
 }
+
+/** Mobile has no unattended printing path; auto-print is desktop-only. */
+actual fun printPdfSilently(path: String, printerName: String?): String =
+    "Automatic printing is available on the lab PC only."
+
+actual fun availablePrinters(): List<String> = emptyList()

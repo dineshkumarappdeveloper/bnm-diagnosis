@@ -43,6 +43,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.bnm.lab.billing.PrintProfiles
 import com.bnm.lab.instruments.InstrumentEngine
 import com.bnm.lab.instruments.MachineReport
 import com.bnm.lab.instruments.MachineReportDoc
@@ -51,8 +52,10 @@ import com.bnm.lab.lab.DiagnosisPrefs
 import com.bnm.lab.lab.LocalLabRepository
 import com.bnm.lab.report.LetterheadLogo
 import com.bnm.lab.report.ReportPrefs
+import com.bnm.lab.report.availablePrinters
 import com.bnm.lab.report.openPdf
 import com.bnm.lab.report.printPdf
+import com.bnm.lab.report.printPdfSilently
 import com.bnm.lab.report.writeLabReportPdf
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -112,6 +115,8 @@ fun MachineHomeScreen(
     var autoPrint by remember { mutableStateOf(diagPrefs.autoPrint) }
     var autoPrinted by remember { mutableStateOf(setOf<String>()) }
     var autoPrintError by remember { mutableStateOf<String?>(null) }
+    var autoPrintLast by remember { mutableStateOf<String?>(null) }
+    var pickPrinter by remember { mutableStateOf(false) }
 
     var printing by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
@@ -191,7 +196,14 @@ fun MachineHomeScreen(
                         reported = now(),
                         generatedAt = now(),
                     ) ?: return@runCatching "no machine-only layout for this analyzer"
-                    printPdf(writeLabReportPdf(doc))
+                    // Silent, and to the REPORT profile's printer — the one
+                    // the lab chose for A4 reports, not whatever the OS
+                    // happens to default to on a PC that also has a label
+                    // printer and a PDF writer attached.
+                    printPdfSilently(
+                        writeLabReportPdf(doc),
+                        PrintProfiles.report.printerName.takeIf { it.isNotBlank() },
+                    )
                 }.getOrElse { it.message ?: "print failed" }
             }
             // Mark it done either way. A printer that is off should not make
@@ -199,7 +211,10 @@ fun MachineHomeScreen(
             // the day — the row stays on screen with its Print button.
             autoPrinted = autoPrinted + row.id
             diagPrefs.autoPrintAfter = row.receivedAt
-            if (outcome.isNotBlank()) autoPrintError = "Auto-print: $outcome"
+            // "Sent to <printer>" is the answer to "is this actually working?",
+            // so it goes on the row, not only into the log.
+            autoPrintLast = outcome
+            if (!outcome.startsWith("Sent to")) autoPrintError = "Auto-print: $outcome"
         }
     }
 
@@ -210,8 +225,11 @@ fun MachineHomeScreen(
                     Column {
                         Text(labName, style = MaterialTheme.typography.titleMedium)
                         Text(
-                            if (autoPrint) "Machine only · every result prints as it arrives"
-                            else "Machine only · results print as the analyzer sends them",
+                            when {
+                                autoPrint && autoPrintLast != null -> "Machine only · $autoPrintLast"
+                                autoPrint -> "Machine only · every result prints as it arrives"
+                                else -> "Machine only · results print as the analyzer sends them"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -227,11 +245,21 @@ fun MachineHomeScreen(
                         Switch(
                             checked = autoPrint,
                             onCheckedChange = { on ->
-                                autoPrint = on
-                                diagPrefs.autoPrint = on
-                                // Stamp the watermark ON ENABLE so the backlog
-                                // already on screen is not printed at once.
-                                if (on) diagPrefs.autoPrintAfter = nowIsoForWatermark()
+                                if (on && PrintProfiles.report.printerName.isBlank()) {
+                                    // The ONE touch this feature gets: which
+                                    // printer. Asked once, when the lab turns
+                                    // it on, because after this nobody is
+                                    // standing here — and a silent job to
+                                    // whatever the OS defaults to is how a
+                                    // report ends up on a label printer.
+                                    pickPrinter = true
+                                } else {
+                                    autoPrint = on
+                                    diagPrefs.autoPrint = on
+                                    // Stamp the watermark ON ENABLE so the
+                                    // backlog on screen is not printed at once.
+                                    if (on) diagPrefs.autoPrintAfter = nowIsoForWatermark()
+                                }
                             },
                             modifier = Modifier.padding(start = 6.dp, end = 4.dp),
                         )
@@ -315,6 +343,44 @@ fun MachineHomeScreen(
             row = row,
             onDismiss = { editing = null },
             onPrint = { header -> output(row, header, preview = false) },
+        )
+    }
+
+    // The one-time printer choice. After this the feature never asks again: a
+    // result arrives, a sheet comes out, and the only button left is Print —
+    // for a reprint.
+    if (pickPrinter) {
+        val printers = remember { availablePrinters() }
+        AlertDialog(
+            onDismissRequest = { pickPrinter = false },
+            title = { Text("Which printer?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        if (printers.isEmpty()) {
+                            "This computer reports no printers. Connect one, then turn auto-print on."
+                        } else {
+                            "Reports will print here automatically, with nothing to click. " +
+                                "You can change it later in Settings - Print settings."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    printers.forEach { name ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable {
+                                PrintProfiles.report.printerName = name
+                                autoPrint = true
+                                diagPrefs.autoPrint = true
+                                diagPrefs.autoPrintAfter = nowIsoForWatermark()
+                                pickPrinter = false
+                            }.padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) { Text(name, style = MaterialTheme.typography.bodyLarge) }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { pickPrinter = false }) { Text("Cancel") } },
         )
     }
 

@@ -51,3 +51,18 @@ expect fun openPdf(path: String): String
 /** Send the PDF down the OS print path (native dialog where the OS has one).
  *  Returns a short operator-facing status. */
 expect fun printPdf(path: String): String
+
+/**
+ * Print with NO dialog, to [printerName] when given and the system default
+ * otherwise. For auto-print, where a modal dialog per sample would defeat the
+ * entire point — nobody is standing at the bench to dismiss it.
+ *
+ * Returns a status that NAMES the printer it used. A lab running this
+ * unattended has to be able to answer "where did that go?", and on a PC with
+ * a PDF writer, a label printer and an A4 laser attached, "Sent to printer"
+ * is not an answer.
+ */
+expect fun printPdfSilently(path: String, printerName: String?): String
+
+/** Printers this computer can see, for the settings picker. */
+expect fun availablePrinters(): List<String>
