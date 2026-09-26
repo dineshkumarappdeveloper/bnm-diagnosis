@@ -31,6 +31,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,6 +47,8 @@ import com.bnm.lab.instruments.MachineReport
 import com.bnm.lab.instruments.MachineReportDoc
 import com.bnm.lab.instruments.QueuedFrame
 import com.bnm.lab.lab.DiagnosisPrefs
+import com.bnm.lab.lab.LocalLabRepository
+import com.bnm.lab.report.LetterheadLogo
 import com.bnm.lab.report.ReportPrefs
 import com.bnm.lab.report.openPdf
 import com.bnm.lab.report.printPdf
@@ -94,6 +97,17 @@ fun MachineHomeScreen(
     val diagPrefs = remember { DiagnosisPrefs() }
     val scope = rememberCoroutineScope()
 
+    // The letterhead logos live in the database, so they are READ here and
+    // passed into every build. The ordered path gets them from the assembler;
+    // this path has no assembler, which is exactly how they went missing.
+    val labRepo = LocalLabRepository.current
+    var logoLeft by remember { mutableStateOf<ByteArray?>(null) }
+    var logoRight by remember { mutableStateOf<ByteArray?>(null) }
+    LaunchedEffect(Unit) {
+        logoLeft = LetterheadLogo.decode(labRepo.letterheadLogo(LetterheadLogo.Side.LEFT))
+        logoRight = LetterheadLogo.decode(labRepo.letterheadLogo(LetterheadLogo.Side.RIGHT))
+    }
+
     var printing by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf<QueuedFrame?>(null) }
@@ -113,6 +127,8 @@ fun MachineHomeScreen(
                         header = header,
                         defaultReferrer = diagPrefs.machineReferrer,
                         letterheadLines = prefs.letterheadLines(),
+                        logoLeftPng = logoLeft,
+                        logoRightPng = logoRight,
                         mode = prefs.mode(),
                         headerMm = prefs.headerMm.toFloat(),
                         footerMm = prefs.footerMm.toFloat(),

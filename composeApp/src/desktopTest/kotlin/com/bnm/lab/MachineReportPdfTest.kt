@@ -109,6 +109,23 @@ class MachineReportPdfTest {
         return out.toByteArray()
     }
 
+    /** A small opaque PNG standing in for a lab's emblem/wordmark. */
+    private fun logoPng(r: Int, g: Int, b: Int, glyph: String): ByteArray {
+        val img = java.awt.image.BufferedImage(220, 120, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        val gg = img.createGraphics()
+        gg.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
+        gg.color = java.awt.Color(r, g, b)
+        gg.fillRoundRect(4, 4, 212, 112, 28, 28)
+        gg.color = java.awt.Color.WHITE
+        gg.font = java.awt.Font("SansSerif", java.awt.Font.BOLD, 64)
+        val fm = gg.fontMetrics
+        gg.drawString(glyph, (220 - fm.stringWidth(glyph)) / 2, 60 + fm.ascent / 2 - 6)
+        gg.dispose()
+        val out = java.io.ByteArrayOutputStream()
+        javax.imageio.ImageIO.write(img, "png", out)
+        return out.toByteArray()
+    }
+
     private fun gauss(x: Double, mu: Double, sd: Double): Double {
         val z = (x - mu) / sd
         return exp(-0.5 * z * z)
@@ -126,6 +143,8 @@ class MachineReportPdfTest {
                     "Ramalinga Complex, Kadayampatti Main Road, Ellampillai, Salem - 637 502",
                     "Ph : 0427 2493603 · srigokullabelp@gmail.com",
                 ),
+                logoLeftPng = logoPng(0x1B, 0x6E, 0xC4, "+"),
+                logoRightPng = logoPng(0x2E, 0x9E, 0x54, "SG"),
                 reported = "2026-09-26 10:44",
                 generatedAt = "2026-09-26 10:44",
             ),

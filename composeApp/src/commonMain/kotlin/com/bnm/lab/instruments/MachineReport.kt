@@ -151,6 +151,22 @@ object MachineReport {
         val missing = listOf("rbc" to "RBC", "plt" to "PLT").filterNot { it.first in kinds }
         if (missing.isEmpty()) return null
         val names = missing.joinToString(" and ") { it.second }
+
+        // The driver ALREADY records why it dropped a histogram it could not
+        // parse (`<kind>_hist_error`, with the byte count). That is the single
+        // most useful sentence on this screen when graphs are missing, and it
+        // was being written to the frame and never shown to anyone. It comes
+        // first: a decode failure is OUR problem, and blaming the analyzer's
+        // Bitmap setting for it would send the bench to change a setting that
+        // is already correct.
+        val decodeErrors = missing.mapNotNull { (kind, label) ->
+            frame.meta["${'$'}{kind}_hist_error"]?.takeIf { it.isNotBlank() }?.let { "$label ($it)" }
+        }
+        if (decodeErrors.isNotEmpty()) {
+            return "The analyzer sent ${'$'}{decodeErrors.joinToString("; ")} but BNM Lab could not read " +
+                "the layout. Send this line to BNM support — the data is arriving, it is the decoding " +
+                "that needs fixing."
+        }
         // Bitmap mode is identifiable: a picture arrived for something.
         val bitmapMode = frame.images.isNotEmpty() && frame.histograms.isEmpty()
         return if (bitmapMode) {

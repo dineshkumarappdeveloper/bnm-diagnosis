@@ -312,7 +312,12 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         ly -= 13f
         for (line in doc.letterheadLines) {
             if (ly < ruleY + 7f) break
-            textCentered(nameMid, ly, line, fontR, 8.6f, gray)
+            // Shrink each line the same way the name shrinks. Without this a
+            // long address keeps its size and slides under the right-hand
+            // logo — the lab's own address, printed over its own emblem.
+            var ls = 8.6f
+            while (ls > 6f && textWidth(line, fontR, ls) > nameW) ls -= 0.3f
+            textCentered(nameMid, ly, line, fontR, ls, gray)
             ly -= 11f
         }
     }
