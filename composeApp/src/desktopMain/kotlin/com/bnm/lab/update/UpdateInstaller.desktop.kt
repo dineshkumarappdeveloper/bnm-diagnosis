@@ -93,11 +93,25 @@ actual suspend fun downloadAndLaunchInstaller(
         }
 
         // ── 4. Hand to the OS ────────────────────────────────────────────────
-        val opened = runCatching {
-            if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) {
-                Desktop.getDesktop().open(target); true
-            } else false
-        }.getOrDefault(false)
+        // Windows gets a script rather than Desktop.open(). Three reasons, all
+        // of them things a lab actually hit:
+        //  · Desktop.open() on an .msi can return having launched nothing, and
+        //    the app then quits for an installer that never appeared — which
+        //    reads as "it downloaded and did nothing".
+        //  · The installer cannot replace files this process still holds, so
+        //    something has to wait for us to exit. Nothing did.
+        //  · Nothing started the app again afterwards, so an update looked like
+        //    a crash and the next launch was still the old build — and the
+        //    download began all over again.
+        val opened = if (currentUpdatePlatform() == UpdatePlatform.WINDOWS) {
+            launchWindowsInstaller(target)
+        } else {
+            runCatching {
+                if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) {
+                    Desktop.getDesktop().open(target); true
+                } else false
+            }.getOrDefault(false)
+        }
 
         val note = if (unverified) " (no checksum published for this release — unverified)" else ""
         if (opened) {
@@ -120,3 +134,41 @@ actual fun quitForUpdate() {
     // the installer blocked on files still in use.
     kotlin.system.exitProcess(0)
 }
+
+/**
+ * Install on Windows and come back up.
+ *
+ * A .bat is used rather than a ProcessBuilder chain because the sequence has
+ * to OUTLIVE this process: wait for the app to exit so its files unlock, run
+ * msiexec, then start the new build. A child process started directly would
+ * be competing with its own parent for the files it is trying to replace.
+ *
+ * `/passive` shows a progress bar and asks nothing — except UAC, which
+ * Windows raises on its own and which the operator must accept. A silent
+ * `/qn` would leave a cancelled elevation looking identical to a success.
+ */
+private fun launchWindowsInstaller(msi: File): Boolean = runCatching {
+    // Where THIS build runs from, so the script can start it again. Absent in
+    // odd launch setups; the update still installs, it just does not relaunch.
+    val exe = ProcessHandle.current().info().command().orElse(null)
+    val script = File(msi.parentFile, "bnm-lab-update.bat")
+    script.writeText(
+        buildString {
+            appendLine("@echo off")
+            // Give the app time to exit and release its files. msiexec would
+            // otherwise ask for a reboot, which a bench will simply decline.
+            appendLine("ping 127.0.0.1 -n 4 >nul")
+            appendLine("msiexec /i \"${msi.absolutePath}\" /passive")
+            if (exe != null) {
+                appendLine("ping 127.0.0.1 -n 3 >nul")
+                appendLine("start \"\" \"$exe\"")
+            }
+            // Leave no litter in the lab's Downloads folder.
+            appendLine("del \"%~f0\"")
+        },
+    )
+    ProcessBuilder("cmd", "/c", "start", "\"\"", "/min", script.absolutePath)
+        .directory(msi.parentFile)
+        .start()
+    true
+}.getOrDefault(false)

@@ -507,7 +507,11 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         y -= h + 3f
     }
 
+    /** Whether a sub-heading has already been drawn in THIS section. */
+    private var headingSeen = false
+
     private fun drawSection(section: ReportSection, closesGroup: Boolean) {
+        headingSeen = false
         val panel = section.graphs.filter { it.hasCurve || it.hasImage }
         cols = Cols(if (panel.isEmpty()) contentW else contentW - panelW - PANEL_GAP)
         // The reservation is what the panel MINIMALLY needs, not what it will
@@ -711,9 +715,14 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
     /** [keepWith]: extra room that must follow this row on the same sheet. */
     private fun drawRow(row: ReportRow, section: ReportSection, keepWith: Float = 0f) {
         if (row.heading) {
-            val hH = 13f
+            // Air ABOVE a sub-heading, so the groups read as groups rather
+            // than one unbroken column of twenty-five rows. None above the
+            // first, which would only push the table down from its own header.
+            val lead = if (headingSeen) 5f else 0f
+            headingSeen = true
+            val hH = 10.5f + lead
             if (y - hH - keepWith < bottomY) continueSection(section)
-            text(xParam, y - 9f, row.param, fontB, 8.5f, accent)
+            text(xParam, y - 8f - lead, row.param, fontB, 8.5f, accent)
             y -= hH
             return
         }
@@ -736,7 +745,7 @@ private class A4ReportWriter(private val pdf: PDDocument, private val doc: Repor
         val refLines = wrapText(row.ref.ifBlank { "-" }, fontR, 8.5f, wRef - 6f)
         val lineH = 10.5f
         val lines = maxOf(paramLines.size, unitLines.size, refLines.size, 1)
-        val rowH = lines * lineH + 1.4f
+        val rowH = lines * lineH + 0.85f
         if (y - rowH - keepWith < bottomY) continueSection(section)
 
         val emphasis = flagEmphasisRgb(row.flag)
